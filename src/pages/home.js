@@ -1,9 +1,5 @@
 /**
  * 文件名: src/pages/home.js
- * 修复说明:
- * 1. 移除了主页底部的 XHTTP 独立订阅链接显示（订阅链接 (XHTTP) 部分）。
- * 2. 保留了 XHTTP 节点详情（Vless+xhttp+tls）的显示。
- * 3. 保持其他修复（如 Socks5 Base64 认证）不变。
  */
 import { CONSTANTS } from '../constants.js';
 import { sha1 } from '../utils/helpers.js';
@@ -23,6 +19,7 @@ export async function generateHomePage(env, ctx, hostName) {
         'trojan', 'trojan-tls', 'trojan-clash', 'trojan-clash-tls', 'trojan-sb', 'trojan-sb-tls',
         'ss', 'ss-tls', 'ss-clash', 'ss-clash-tls', 'ss-sb', 'ss-sb-tls',
         'socks', 'socks-tls', 'socks-clash', 'socks-clash-tls', 'socks-sb', 'socks-sb-tls',
+        'mandala-tls', // [新增] Mandala 单独订阅路径
         'xhttp-tls', 'xhttp-clash-tls', 'xhttp-sb-tls'
     ];
     
@@ -50,21 +47,24 @@ export async function generateHomePage(env, ctx, hostName) {
     const socks_auth = btoa(`${ctx.userID}:${ctx.dynamicUUID}`);
     const socks_tls = `socks://${socks_auth}@${hostName}:${httpsPorts[0]}?transport=ws&security=tls&sni=${hostName}&path=${encodeURIComponent(path)}#${hostName}-SOCKS-TLS`;
     
+    // [新增] Mandala 链接生成
+    // 格式: mandala://password@host:port?params#remark
+    const mandala_tls = `mandala://${ctx.dynamicUUID}@${hostName}:${httpsPorts[0]}?security=tls&sni=${hostName}&type=ws&host=${hostName}&path=${encodeURIComponent(path)}#${hostName}-MANDALA-TLS`;
+    
     const xhttp_tls = `vless://${ctx.userID}@${hostName}:${httpsPorts[0]}?encryption=none&security=tls&sni=${hostName}&fp=random&allowInsecure=1&type=xhttp&host=${hostName}&path=${encodeURIComponent('/' + ctx.userID.substring(0, 8))}&mode=stream-one#${hostName}-XHTTP-TLS`;
 
     // HTML 模板片段
     const copyBtn = (val) => `<div class="input-group mb-2"><input type="text" class="form-control" value="${val}" readonly><button class="btn btn-secondary" onclick="copyToClipboard('${val}')">复制</button></div>`;
     
-    // [修复] 仅保留 XHTTP 节点详情，移除订阅链接显示
     let xhttpHtml = '';
-    let mixedTitle = '混合订阅 (VLESS+Trojan+SS+Socks5)'; 
+    // [修改] 标题增加 Mandala
+    let mixedTitle = '混合订阅 (VLESS+Trojan+SS+Socks5+Mandala)'; 
 
     if (ctx.enableXhttp) {
-        mixedTitle = '混合订阅 (VLESS+Trojan+XHTTP+SS+Socks5)';
+        mixedTitle = '混合订阅 (VLESS+Trojan+Mandala+XHTTP+SS+Socks5)';
         xhttpHtml = `<hr><h2 class="mt-4">XHTTP 节点 (VLESS)</h2>` +
             `<h3>Vless+xhttp+tls</h3>` +
             `<div class="input-group mb-3"><input type="text" class="form-control" value="${xhttp_tls}" readonly><button class="btn btn-outline-secondary" onclick="copyToClipboard('${xhttp_tls}')">复制</button></div>`;
-            // 已移除下方的订阅链接部分
     }
 
     const managementPath = '/' + ctx.dynamicUUID.toLowerCase();
@@ -84,6 +84,7 @@ export async function generateHomePage(env, ctx, hostName) {
     `<h2>节点详情</h2>` +
     `<h3>VLESS TLS</h3>${copyBtn(vless_tls)}` +
     `<h3>Trojan TLS</h3>${copyBtn(trojan_tls)}` +
+    `<h3>Mandala TLS (New)</h3>${copyBtn(mandala_tls)}` +  // [新增] 显示 Mandala 链接
     `<h3>Shadowsocks TLS</h3>${copyBtn(ss_tls)}` +
     `<h3>Socks5 TLS</h3>${copyBtn(socks_tls)}` +
     xhttpHtml +
