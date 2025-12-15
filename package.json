@@ -1,0 +1,28 @@
+{
+  "name": "cf-worker-proxy-pro",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker Proxy Refactored - Modular Version",
+  "main": "dist/_worker.js",
+  "scripts": {
+    "build": "node build.js",
+    "dev": "node build.js --watch",
+    "deploy": "wrangler deploy"
+  },
+  "keywords": [
+    "cloudflare",
+    "worker",
+    "proxy",
+    "vless",
+    "trojan",
+    "esbuild"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "wrangler": "^3.91.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
