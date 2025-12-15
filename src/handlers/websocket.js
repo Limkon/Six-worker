@@ -4,14 +4,17 @@
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
 import { parseTrojanHeader } from '../protocols/trojan.js';
+import { parseMandalaHeader } from '../protocols/mandala.js'; // [新增] 导入 Mandala 解析器
 import { parseSocks5Header } from '../protocols/socks5.js';
 import { parseShadowsocksHeader } from '../protocols/shadowsocks.js';
 import { handleTCPOutBound } from './outbound.js';
 import { safeCloseWebSocket, base64ToArrayBuffer, isHostBanned } from '../utils/helpers.js';
 
+// [修改] 注册 mandala 协议
 const protocolManager = new ProtocolManager()
     .register('vless', processVlessHeader)
     .register('trojan', parseTrojanHeader)
+    .register('mandala', parseMandalaHeader) // [新增] 注册位置建议在 socks5 之前
     .register('socks5', parseSocks5Header)
     .register('ss', parseShadowsocksHeader);
 
@@ -33,6 +36,7 @@ export async function handleWebSocketRequest(request, ctx) {
         async write(chunk, controller) {
             const bufferView = new Uint8Array(chunk);
             
+            // Socks5 协商逻辑 (保持不变)
             if (socks5State > 0 || (!protocolDetected && bufferView[0] === 5)) {
                 let currentChunk = chunk;
                 let currentOffset = 0;
@@ -92,6 +96,7 @@ export async function handleWebSocketRequest(request, ctx) {
                 }
             }
 
+            // 数据转发逻辑
             if (protocolDetected) {
                 if (remoteSocketWrapper.value) {
                     const writer = remoteSocketWrapper.value.writable.getWriter();
@@ -104,6 +109,7 @@ export async function handleWebSocketRequest(request, ctx) {
             }
             
             try {
+                // 协议检测
                 const result = await protocolManager.detect(chunk, ctx);
                 if (socks5State === 2 && result.protocol !== 'socks5') throw new Error('Socks5 protocol mismatch');
 
@@ -121,11 +127,13 @@ export async function handleWebSocketRequest(request, ctx) {
                 let responseHeader = null;
                 let clientData = chunk;
                 
+                // [修改] 协议分支处理
                 if (protocol === 'vless') {
                     clientData = chunk.slice(rawDataIndex);
                     responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
                     if (isUDP && portRemote !== 53) throw new Error('UDP only for DNS(53)');
-                } else if (protocol === 'trojan' || protocol === 'ss') {
+                } else if (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') { 
+                    // [新增] mandala 走这里，直接使用解析后的 rawClientData (已去除头部)
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
