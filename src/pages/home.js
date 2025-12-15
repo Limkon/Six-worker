@@ -84,7 +84,7 @@ export async function generateHomePage(env, ctx, hostName) {
     `<h2>节点详情</h2>` +
     `<h3>VLESS TLS</h3>${copyBtn(vless_tls)}` +
     `<h3>Trojan TLS</h3>${copyBtn(trojan_tls)}` +
-    `<h3>Mandala TLS (New)</h3>${copyBtn(mandala_tls)}` +  // [新增] 显示 Mandala 链接
+    `<h3>Mandala TLS (New)</h3>${copyBtn(mandala_tls)}` +
     `<h3>Shadowsocks TLS</h3>${copyBtn(ss_tls)}` +
     `<h3>Socks5 TLS</h3>${copyBtn(socks_tls)}` +
     xhttpHtml +
