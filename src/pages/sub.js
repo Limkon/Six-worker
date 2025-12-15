@@ -154,6 +154,7 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
         'trojan', 'trojan-tls', 'trojan-clash', 'trojan-clash-tls', 'trojan-sb', 'trojan-sb-tls',
         'ss', 'ss-tls', 'ss-clash', 'ss-clash-tls', 'ss-sb', 'ss-sb-tls',
         'socks', 'socks-tls', 'socks-clash', 'socks-clash-tls', 'socks-sb', 'socks-sb-tls',
+        'mandala-tls', // [新增]
         'xhttp-tls', 'xhttp-clash-tls', 'xhttp-sb-tls'
     ];
     
@@ -177,13 +178,14 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
     const jsonDownloadHeader = { ...jsonHeader, "Content-Disposition": `attachment; filename="${FileName}.json"` };
 
     // 辅助函数：简化调用
-    const genB64 = (proto, tls) => generateBase64Subscription(proto, (proto==='ss'||proto==='trojan')?ctx.dynamicUUID:ctx.userID, hostName, tls, ctx);
+    const genB64 = (proto, tls) => generateBase64Subscription(proto, (proto==='ss'||proto==='trojan'||proto==='mandala')?ctx.dynamicUUID:ctx.userID, hostName, tls, ctx);
     
     // --- 通用订阅 ---
     if (pathName === 'all' || pathName === 'sub') {
         const content = [
             genB64('vless', false),
             genB64('trojan', false),
+            genB64('mandala', false), // [新增]
             genB64('ss', false),
             genB64('socks', false),
             enableXhttp ? genB64('xhttp', true) : ''
@@ -194,6 +196,7 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
         const content = [
             genB64('vless', true),
             genB64('trojan', true),
+            genB64('mandala', true), // [新增]
             genB64('ss', true),
             genB64('socks', true),
             enableXhttp ? genB64('xhttp', true) : ''
@@ -224,14 +227,17 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
     const isClash = parts.includes('clash');
     const isSb = parts.includes('sb');
 
-    if (['vless', 'trojan', 'ss', 'socks', 'xhttp'].includes(protocol)) {
+    if (['vless', 'trojan', 'ss', 'socks', 'xhttp', 'mandala'].includes(protocol)) {
         if (protocol === 'xhttp' && !enableXhttp) return new Response('XHTTP disabled', { status: 404 });
         
-        const id = (protocol === 'trojan' || protocol === 'ss') ? ctx.dynamicUUID : ctx.userID;
+        // [修改] 密码选择
+        const id = (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') ? ctx.dynamicUUID : ctx.userID;
 
         if (isClash) {
+            if (protocol === 'mandala') return new Response('Clash not supported for Mandala', { status: 400 });
             return new Response(generateClashConfig(protocol, id, hostName, isTls, ctx), { headers: plainDownloadHeader });
         } else if (isSb) {
+            if (protocol === 'mandala') return new Response('SingBox not supported for Mandala', { status: 400 });
             return new Response(generateSingBoxConfig(protocol, id, hostName, isTls, ctx), { headers: jsonDownloadHeader });
         } else {
             // Base64
