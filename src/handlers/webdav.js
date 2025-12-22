@@ -1,10 +1,6 @@
 /**
  * 文件名: src/handlers/webdav.js
- * 修复说明:
- * 1. 独立模块：不再手动生成节点，而是直接调用 handleSubscription 获取通用订阅内容。
- * 2. 注入参数：通过 ctx.socksPassword 强制 Socks5 使用 KEY 作为密码。
- * 3. 格式转换：获取 Base64 订阅内容后解码为明文。
- * 4. 自动去重：使用 Set 去除因生成逻辑导致的重复硬编码节点。
+ * 修改说明: 注释掉所有 WebDAV 推送逻辑
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
@@ -12,6 +8,8 @@ import { getConfig } from '../config.js';
 import { CONSTANTS } from '../constants.js';
 
 export async function executeWebDavPush(env, hostName, ctx, force = false) {
+    // [修改] 注释掉所有 WebDAV 推送逻辑
+    /*
     try {
         // ==========================================
         // WebDAV 配置 (请确认此处信息是否正确)
@@ -103,4 +101,6 @@ export async function executeWebDavPush(env, hostName, ctx, force = false) {
     } catch (e) {
         console.error('WebDAV 推送逻辑错误:', e);
     }
+    */
+    console.log('[WebDAV] Feature disabled in code.');
 }
