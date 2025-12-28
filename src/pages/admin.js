@@ -35,7 +35,7 @@ export async function handleEditConfig(request, env, ctx) {
         ['CFPORTS', 'CF端口 (httpsPorts)', 'Cloudflare支持的TLS端口, 逗号隔开。', '443,8443,2053,2083,2087,2096', 'text'],
         
         // [修改] 启用 XHTTP -> 禁用协议
-        ['DIS', '禁用协议', '填入需要关闭的协议(VLESS, Trojan, XHTTP等), 英文逗号分隔, 不区分大小写。默认关闭 XHTTP。', '例如: XHTTP, SOCKS5', 'text'],
+        ['DIS', '禁用协议', '填入需要关闭的协议(VLESS, Trojan, XHTTP等), 英文逗号分隔, 不区分大小写。默认全部开启，pages不支持XHTTP。', '例如: XHTTP, SOCKS5', 'text'],
         
         ['DNS64', 'NAT64服务器', '用于将IPv4转为IPv6访问 (如无可留空)。', '例如: 64:ff9b::/96', 'text'],
         ['SOCKS5', 'SOCKS5/HTTP代理', 'Worker出站时使用的前置代理 (如无可留空)。', 'user:pass@host:port 或 http://user:pass@host:port', 'text'],
