@@ -1,9 +1,6 @@
 /**
  * 文件名: src/handlers/websocket.js
- * 最终优化:
- * 1. [安全] 新增 DETECT_TIMEOUT (10秒)：防止僵尸连接占用资源。
- * 2. [性能] 保持了 Buffer 机制与 Socks5 状态机分离的高效结构。
- * 3. [稳定] 完美的异常捕获与资源释放。
+ * 修改内容: 在 protocolManager.detect 返回后，增加禁用协议的检查逻辑。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -45,8 +42,7 @@ export async function handleWebSocketRequest(request, ctx) {
 
     const log = (info, event) => console.log(`[WS] ${info}`, event || '');
 
-    // [新增] 超时熔断器：如果 10 秒内没能识别出协议，强行断开
-    // 这能有效防止 Slowloris 攻击或客户端死锁
+    // 超时熔断器
     const timeoutTimer = setTimeout(() => {
         if (!isConnected) {
             log('Timeout: Protocol detection took too long');
@@ -72,7 +68,6 @@ export async function handleWebSocketRequest(request, ctx) {
             }
 
             // 2. 数据缓冲
-            // 性能提示：Cloudflare Worker 对 Uint8Array 处理优化很好，此处拼接开销可忽略
             headerBuffer = concatUint8(headerBuffer, new Uint8Array(chunk));
 
             // 3. Socks5 握手处理 (State 0 & 1)
@@ -80,7 +75,7 @@ export async function handleWebSocketRequest(request, ctx) {
                 const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
                 
                 if (error) {
-                    clearTimeout(timeoutTimer); // 失败时也要清理定时器
+                    clearTimeout(timeoutTimer); 
                     throw new Error(error);
                 }
 
@@ -101,9 +96,18 @@ export async function handleWebSocketRequest(request, ctx) {
                     throw new Error('Protocol mismatch after Socks5 handshake');
                 }
 
+                // [修改] 检查协议是否被禁用
+                const pName = result.protocol; // 'vless', 'trojan', 'ss', 'socks5', 'mandala'
+                // 允许用户配置 'socks' 来禁用 socks5
+                const isSocksDisabled = pName === 'socks5' && ctx.disabledProtocols.includes('socks');
+                
+                if (ctx.disabledProtocols.includes(pName) || isSocksDisabled) {
+                    throw new Error(`Protocol ${pName.toUpperCase()} is disabled by admin`);
+                }
+
                 // --- 成功识别 ---
                 isConnected = true;
-                clearTimeout(timeoutTimer); // [重要] 识别成功，取消超时计时
+                clearTimeout(timeoutTimer); 
                 remoteSocketWrapper.isConnecting = true;
 
                 const { protocol, addressRemote, portRemote, addressType, rawDataIndex, isUDP } = result;
@@ -137,9 +141,7 @@ export async function handleWebSocketRequest(request, ctx) {
 
             } catch (e) {
                 // [缓冲策略]
-                // 只有当缓冲区较小且未超时时，才认为是分包，继续等待
-                // 如果超过 MAX_HEADER_BUFFER，说明发了太多垃圾数据，直接报错
-                if (headerBuffer.length < 512 && headerBuffer.length < MAX_HEADER_BUFFER) {
+                if (headerBuffer && headerBuffer.length < 512 && headerBuffer.length < MAX_HEADER_BUFFER) {
                     return; 
                 }
                 
@@ -151,7 +153,7 @@ export async function handleWebSocketRequest(request, ctx) {
         close() { log("Client WebSocket closed"); },
         abort(reason) { log("WebSocket aborted", reason); safeCloseWebSocket(webSocket); },
     })).catch((err) => {
-        clearTimeout(timeoutTimer); // 确保任何异常退出都清理定时器
+        clearTimeout(timeoutTimer);
         log("Stream processing failed", err.toString());
         safeCloseWebSocket(webSocket);
     });
@@ -161,7 +163,7 @@ export async function handleWebSocketRequest(request, ctx) {
     return new Response(null, { status: 101, webSocket: client });
 }
 
-// 辅助函数：Socks5 握手状态机 (保持上一版的高效逻辑)
+// 辅助函数：Socks5 握手状态机 (保持不变)
 function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
     const res = { consumed: 0, newState: currentState, error: null };
     if (buffer.length === 0) return res;
