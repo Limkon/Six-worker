@@ -1,9 +1,11 @@
 /**
  * 文件名: src/pages/admin.js
- * 修改内容: 注释掉 WebDAV 推送和远程配置相关代码。
+ * 修改说明:
+ * 1. 将原有的 "EX" (启用 XHTTP) 配置项修改为 "DIS" (禁用协议)。
+ * 2. 保持其他逻辑不变，确保配置可以正确保存到 KV。
  */
-import { getConfig /*, loadRemoteConfig*/ } from '../config.js'; // [修改]
-// import { executeWebDavPush } from '../handlers/webdav.js'; // [修改]
+import { getConfig /*, loadRemoteConfig*/ } from '../config.js'; 
+// import { executeWebDavPush } from '../handlers/webdav.js'; 
 import { CONSTANTS } from '../constants.js';
 import { cleanList } from '../utils/helpers.js';
 
@@ -31,7 +33,10 @@ export async function handleEditConfig(request, env, ctx) {
         ['ADDNOTLSAPI', '非TLS API (ADDNOTLSAPI)', '远程非TLS节点列表的下载链接。', 'https://example.com/notls.txt', 'text'],
         ['ADDCSV', 'CSV测速文件 (ADDCSV)', 'CloudflareSpeedTest 测速结果 CSV 文件的链接。', 'https://example.com/result.csv', 'text'],
         ['CFPORTS', 'CF端口 (httpsPorts)', 'Cloudflare支持的TLS端口, 逗号隔开。', '443,8443,2053,2083,2087,2096', 'text'],
-        ['EX', '启用 XHTTP 协议', '是否启用 XHTTP (gRPC 伪装) 协议 (true/false)。', 'false', 'text'],
+        
+        // [修改] 启用 XHTTP -> 禁用协议
+        ['DIS', '禁用协议', '填入需要关闭的协议(VLESS, Trojan, XHTTP等), 英文逗号分隔, 不区分大小写。默认关闭 XHTTP。', '例如: XHTTP, SOCKS5', 'text'],
+        
         ['DNS64', 'NAT64服务器', '用于将IPv4转为IPv6访问 (如无可留空)。', '例如: 64:ff9b::/96', 'text'],
         ['SOCKS5', 'SOCKS5/HTTP代理', 'Worker出站时使用的前置代理 (如无可留空)。', 'user:pass@host:port 或 http://user:pass@host:port', 'text'],
         ['GO2SOCKS5', 'SOCKS5分流规则', '哪些域名走SOCKS5代理, 逗号隔开。', '*example.net,*example.com,all in', 'text'],
@@ -70,21 +75,7 @@ export async function handleEditConfig(request, env, ctx) {
             }
             await Promise.all(savePromises);
 
-            // [修改] 注释掉 WebDAV 强制推送逻辑
-            /*
-            const hostName = request.headers.get('Host');
-            const enableXhttp = (await getConfig(env, 'EX', 'false')).toLowerCase() === 'true';
-            
-            const newCtx = { 
-                userID: await getConfig(env, 'UUID'), 
-                dynamicUUID: await getConfig(env, 'KEY'), 
-                httpsPorts: CONSTANTS.HTTPS_PORTS, 
-                enableXhttp: enableXhttp,
-                waitUntil: ctx.waitUntil.bind(ctx) 
-            };
-            
-            await executeWebDavPush(env, hostName, newCtx, true);
-            */
+            // [注] 原 WebDAV 推送逻辑已注释
 
             return new Response('保存成功', { status: 200 });
         } catch (e) {
@@ -93,9 +84,8 @@ export async function handleEditConfig(request, env, ctx) {
     }
     
     // 处理 GET 渲染页面
-    // [修改] 注释掉 loadRemoteConfig
     // const remoteConfig = await loadRemoteConfig(env);
-    const remoteConfig = {}; // [修改] 使用空对象替代
+    const remoteConfig = {}; 
     
     const kvPromises = configItems.map(item => env.KV.get(item[0]));
     const kvValues = await Promise.all(kvPromises);
@@ -114,7 +104,6 @@ export async function handleEditConfig(request, env, ctx) {
         
         let envHint = '';
         if (key !== 'ADD.txt' && key !== 'BESTIP_SOURCES') {
-            // [修改] 移除远程配置的提示显示
             // if (remoteValue) envHint = `<div class="env-hint">远程配置: <code>${remoteValue}</code> (优先级高于环境变量)</div>`;
             /*else*/ if (envValue) envHint = `<div class="env-hint">环境变量: <code>${envValue}</code></div>`;
         }
