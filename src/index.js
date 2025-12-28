@@ -1,20 +1,19 @@
 /**
  * 文件名: src/index.js
  * 说明: 
- * 1. [关键修复] 修正了初始密码设置的判断逻辑 (直接检查原始配置，防止被动态UUID欺骗)。
- * 2. [关键修复] XHTTP 拦截逻辑排除根路径 ('/')，防止误拦截密码设置和登录表单。
- * 3. 整合了美化后的登录界面。
- * 4. 移除了 WebDAV 自动推送引用。
+ * 1. [完整恢复] 包含了登录界面、初始密码设置界面。
+ * 2. [完整恢复] 包含了 Admin 鉴权、路由分发、反代逻辑。
+ * 3. [功能集成] 使用 context.enableXhttp (由 config.js 解析禁用列表得出) 控制 XHTTP 开关。
  */
 import { initializeContext, getConfig } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
 import { handleXhttpClient } from './handlers/xhttp.js';
 import { handleEditConfig, handleBestIP } from './pages/admin.js';
 import { handleSubscription } from './pages/sub.js';
-// [修改] 移除 WebDAV 模块引用
+// [注意] 根据原文件注释，WebDAV 模块引用已被移除。如需启用请取消注释。
 // import { executeWebDavPush } from './handlers/webdav.js';
 import { generateHomePage } from './pages/home.js';
-import { sha1, isStrictV4UUID } from './utils/helpers.js';
+import { sha1 } from './utils/helpers.js';
 import { CONSTANTS } from './constants.js';
 
 // 密码设置页面 HTML
@@ -155,12 +154,11 @@ export default {
             const upgradeHeader = request.headers.get('Upgrade');
             if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
                 if (!context.userID) return new Response('UUID not set', { status: 401 });
+                // WebSocket 内部已集成 disabledProtocols 检查
                 return await handleWebSocketRequest(request, context);
             }
 
             // 3. 初始密码设置 (KV存在但无UUID)
-            // [修复] 修正判断逻辑：显式检查原始配置，而非依赖 context.userID
-            // getConfig 会在无配置时返回默认密码，所以这里比较 rawUUID 是否等于默认密码
             const rawUUID = await getConfig(env, 'UUID');
             const rawKey = await getConfig(env, 'KEY');
             
@@ -185,14 +183,12 @@ export default {
             else if (isUserRoute) subPath = path.substring(('/' + dynamicID).length);
             else if (isSubRoute) subPath = path.substring(('/' + userHash).length);
 
-            // 辅助判断：是否是 API POST 请求 (如果是管理 API，则不作为 XHTTP 处理)
+            // 辅助判断：是否是 API POST 请求
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
-            // 5. XHTTP 协议拦截 (POST请求 + 开启XHTTP + 非管理API + 非登录请求)
-            // [修复] 增加 && path !== '/' 判断。
-            // 这一步非常关键：根路径 ('/') 的 POST 请求（如初始密码设置、根路径反代）
-            // 必须排除在 XHTTP 拦截之外，否则会报错 "Detected Form submission..."
+            // 5. XHTTP 协议拦截
+            // 检查项: POST 方法 + 已开启 XHTTP + 非 API 请求 + 非登录鉴权 + 非根路径
             if (request.method === 'POST' && context.enableXhttp && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
                 const r = await handleXhttpClient(request, context);
                 if (r) {
@@ -208,14 +204,22 @@ export default {
                     });
                 }
                 
-                // [优化] XHTTP 握手失败时的错误区分
+                // XHTTP 握手失败处理
                 if (!isManagementRoute) {
                     const contentType = request.headers.get('content-type') || '';
                     // 如果 Content-Type 表明这是一个表单提交，说明用户可能想登录但被 XHTTP 拦截了
                     if (contentType.includes('application/x-www-form-urlencoded') || contentType.includes('multipart/form-data')) {
                         return new Response('Error: Detected Form submission on XHTTP path. Missing "?auth=login" param?', { status: 400 });
                     }
+                    // 如果被禁用，config.js 里的 enableXhttp 为 false，不会进入此块；
+                    // 但如果进入此块却失败，说明是 XHTTP 协议错误
                     return new Response('Internal Server Error', { status: 500 });
+                }
+            } else if (request.method === 'POST' && !context.enableXhttp && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
+                // [新增] 如果检测到疑似 XHTTP 特征但协议被禁用
+                const xhttpPath = `/${context.userID.substring(0, 8)}`;
+                if (path === xhttpPath || request.headers.get('Content-Type') === 'application/grpc') {
+                     return new Response('XHTTP protocol is disabled by admin.', { status: 403 });
                 }
             }
 
@@ -247,7 +251,6 @@ export default {
                 if (subPath === '/edit') return await handleEditConfig(request, env, ctx);
                 if (subPath === '/bestip') return await handleBestIP(request, env);
                 
-                // 默认：显示主页信息 (已移除 WebDAV 自动推送)
                 const html = await generateHomePage(env, context, hostName);
                 return new Response(html, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
             }
@@ -277,5 +280,17 @@ export default {
         } catch (e) {
             return new Response(e.stack || e.toString(), { status: 500 });
         }
+    },
+    
+    // [注意] Scheduled 事件处理 (如果需要恢复 WebDAV 推送，请取消下面的注释)
+    /*
+    async scheduled(event, env, ctx) {
+        try {
+            const request = new Request('https://scheduled.worker/scheduled');
+            const context = await initializeContext(request, env);
+            context.waitUntil = ctx.waitUntil.bind(ctx);
+            await executeWebDavPush(env, context);
+        } catch (e) { console.error('Scheduled Event Error:', e); }
     }
+    */
 };
