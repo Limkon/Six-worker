@@ -1,6 +1,6 @@
 /**
  * 文件名: src/config.js
- * 修改内容: 解析 DIS 配置项，支持禁用特定协议，默认关闭 XHTTP。
+ * 修改内容: 解析 DIS 配置项，支持禁用特定协议，默认不禁用任何协议 (原默认禁用 XHTTP)。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -85,8 +85,8 @@ export async function initializeContext(request, env) {
     if (banStr) ctx.banHosts = await cleanList(banStr);
     
     // [修改] 处理禁用协议逻辑 (取代原 EX 逻辑)
-    // 获取禁用列表，默认值为 'xhttp' (即默认关闭 XHTTP)
-    const disStr = await getConfig(env, 'DIS', 'xhttp'); 
+    // 获取禁用列表，默认值为 '' (即默认不禁用任何协议)
+    const disStr = await getConfig(env, 'DIS', ''); 
     ctx.disabledProtocols = (await cleanList(disStr)).map(p => p.toLowerCase());
 
     // 根据禁用列表推导 enableXhttp
