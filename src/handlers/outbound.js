@@ -1,9 +1,8 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [核心] 重构 createUnifiedConnection，将 Phase 2 和 Phase 3 从嵌套结构改为线性结构，确保降级逻辑正确执行。
- * 2. 移除 Phase 2 的 `if (!useSocks)` 判断，确保 Socks5 失败后也能降级到 ProxyIP。
- * 3. 修正 NAT64 的触发条件逻辑。
+ * 1. [Critical Fix] 修复 socks5Connect 中认证长度计算错误 (使用字节长度而非字符长度)。
+ * 2. 保持原有 Phase 1/2/3 连接降级逻辑。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -76,15 +75,23 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     const reader = socket.readable.getReader();
     const encoder = new TextEncoder();
     
-    await writer.write(new Uint8Array([5, 2, 0, 2]));
+    // SOCKS5 Hello
+    await writer.write(new Uint8Array([5, 1, 2])); // Method 2: Username/Password
     let { value: res } = await reader.read();
     
     if (!res || res[0] !== 0x05 || res[1] === 0xff) throw new Error('SOCKS5 greeting failed');
     
+    // SOCKS5 Auth
     if (res[1] === 0x02) {
         if (!username || !password) throw new Error('SOCKS5 auth required');
-        const authReq = new Uint8Array([1, username.length, ...encoder.encode(username), password.length, ...encoder.encode(password)]);
+        
+        // [修复] 获取 UTF-8 编码后的字节数组及其长度
+        const uBytes = encoder.encode(username);
+        const pBytes = encoder.encode(password);
+        
+        const authReq = new Uint8Array([1, uBytes.length, ...uBytes, pBytes.length, ...pBytes]);
         await writer.write(authReq);
+        
         const { value: authRes } = await reader.read();
         if (!authRes || authRes[0] !== 0x01 || authRes[1] !== 0x00) throw new Error('SOCKS5 auth failed');
     }
@@ -99,7 +106,8 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
              DSTADDR = new Uint8Array([4, ...parseIPv6(addressRemote.replace(/[\[\]]/g, ''))]);
              break;
         default:
-             DSTADDR = new Uint8Array([3, addressRemote.length, ...encoder.encode(addressRemote)]);
+             const domainBytes = encoder.encode(addressRemote);
+             DSTADDR = new Uint8Array([3, domainBytes.length, ...domainBytes]);
     }
     
     const socksRequest = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]);
@@ -115,7 +123,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress) {
     const CONNECT_TIMEOUT_MS = 5000;
-    const enableHttp = ctx.socks5 && ctx.socks5.toLowerCase().startsWith('http://');
+    const enableHttp = ctx.socks5 && ctx.socks5.toLowerCase().startsWith('http://'); // 注意：原代码保留了此变量但未处理 HTTP 代理
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
 
     const connectAndWrite = async (host, port, isSocks) => {
@@ -130,6 +138,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         const remote = doConnect();
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Connect timeout')), CONNECT_TIMEOUT_MS));
         const socket = await remote;
+        // 如果是直连，等待 opened 状态；SOCKS5 内部已处理握手
         if (!isSocks) await Promise.race([socket.opened, timeoutPromise]);
         return socket;
     };
@@ -148,6 +157,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     // -----------------------------------------------------------
     const currentProxyIP = fallbackAddress || ctx.proxyIP;
     const { host: proxyHost, port: proxyPort } = parseProxyIP(currentProxyIP, portRemote);
+    // 如果没有 ProxyIP (host 等于默认值且不是强制 fallback)，可能需要跳过，但原逻辑是强制尝试
     try {
         return await connectAndWrite(proxyHost.toLowerCase(), proxyPort, false);
     } catch (err2) {
@@ -179,7 +189,9 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             async write(chunk, controller) {
                 hasIncomingData = true;
                 if (webSocket.readyState !== 1) { 
-                    controller.error('webSocket is not open');
+                    // 这里通常意味着客户端断开了连接，不再报错，优雅退出
+                    // controller.error('webSocket is not open'); 
+                    return;
                 }
                 if (responseHeader) {
                     webSocket.send(await new Blob([responseHeader, chunk]).arrayBuffer());
@@ -192,7 +204,10 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             abort(reason) { console.error('Remote socket aborted', reason); },
         })
     ).catch((error) => {
-        console.error('remoteSocketToWS error:', error);
+        // 忽略正常的连接关闭错误
+        if (error.message !== 'webSocket is not open') {
+            console.error('remoteSocketToWS error:', error);
+        }
         safeCloseWebSocket(webSocket);
     });
     
@@ -278,4 +293,5 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         log('[Outbound] Initial connection failed: ' + error.message);
         safeCloseWebSocket(webSocket);
     }
+
 }
