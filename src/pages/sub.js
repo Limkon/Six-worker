@@ -1,3 +1,10 @@
+/**
+ * 文件名: src/pages/sub.js
+ * 修改内容: 
+ * 1. 引入协议禁用检查逻辑 (isEnabled)。
+ * 2. 生成 all/all-tls 订阅时过滤被禁用的协议。
+ * 3. 单协议订阅请求时，如果协议被禁用则拦截。
+ */
 import { cleanList, sha1 } from '../utils/helpers.js';
 import { getConfig } from '../config.js';
 import { generateBase64Subscription, generateClashConfig, generateSingBoxConfig, generateMixedClashConfig, generateMixedSingBoxConfig } from './generators.js';
@@ -13,8 +20,6 @@ async function fetchAndParseAPI(apiUrl, httpsPorts) {
         clearTimeout(timeout);
         if (response.ok) {
             const text = await response.text();
-            // 简单处理: 如果是反代IP形式 (ip:port#remark)，直接使用
-            // 过滤逻辑简化，假设内容是标准的一行一个
             return await cleanList(text);
         }
     } catch (e) {
@@ -38,7 +43,6 @@ async function fetchAndParseCSV(csvUrl, isTLS, httpsPorts, DLS, remarkIndex) {
         const results = [];
         for (let i = 1; i < lines.length; i++) {
             const columns = lines[i].split(',');
-            // 检查 TLS 列是否匹配，且速度是否达标
             if (columns.length > tlsIndex && columns[tlsIndex] && columns[tlsIndex].toUpperCase() === (isTLS ? 'TRUE' : 'FALSE') && parseFloat(columns[columns.length - 1]) > DLS) {
                 const ip = columns[0];
                 const port = columns[1];
@@ -53,9 +57,8 @@ async function fetchAndParseCSV(csvUrl, isTLS, httpsPorts, DLS, remarkIndex) {
     return [];
 }
 
-// 准备订阅数据 (填充 ctx.addresses 和 ctx.addressesnotls)
+// 准备订阅数据
 export async function prepareSubscriptionData(ctx, env) {
-    // 1. 获取配置
     const addStr = await getConfig(env, 'ADD.txt') || await getConfig(env, 'ADD');
     const addApiStr = await getConfig(env, 'ADDAPI');
     const addNoTlsStr = await getConfig(env, 'ADDNOTLS');
@@ -63,11 +66,9 @@ export async function prepareSubscriptionData(ctx, env) {
     const addCsvStr = await getConfig(env, 'ADDCSV');
     const linkStr = await getConfig(env, 'LINK');
     
-    // 参数配置
     const DLS = Number(await getConfig(env, 'DLS', '8'));
     const remarkIndex = Number(await getConfig(env, 'CSVREMARK', '1'));
 
-    // 2. 初始化列表
     let addresses = [];
     let addressesApi = [];
     let addressesNoTls = [];
@@ -75,43 +76,36 @@ export async function prepareSubscriptionData(ctx, env) {
     let addressesCsv = [];
     let links = [];
 
-    // 3. 处理手动列表 (ADD)
     if (addStr) {
         const list = await cleanList(addStr);
-        // 分类 API 和 普通地址
         list.forEach(item => {
             if (item.startsWith('http')) addressesApi.push(item);
             else addresses.push(item);
         });
     }
 
-    // 4. 处理手动 API (ADDAPI)
     if (addApiStr) {
         const apis = await cleanList(addApiStr);
         addressesApi = addressesApi.concat(apis);
     }
     
-    // 5. 拉取 API 内容 (并发)
     if (addressesApi.length > 0) {
         const promises = addressesApi.map(url => fetchAndParseAPI(url, ctx.httpsPorts));
         const results = await Promise.all(promises);
         results.forEach(res => addresses = addresses.concat(res));
     }
 
-    // 6. 处理非 TLS (ADDNOTLS)
     if (addNoTlsStr) addressesNoTls = await cleanList(addNoTlsStr);
     
     if (addNoTlsApiStr) {
         const apis = await cleanList(addNoTlsApiStr);
-        const promises = apis.map(url => fetchAndParseAPI(url, CONSTANTS.HTTP_PORTS)); // 使用 HTTP 端口
+        const promises = apis.map(url => fetchAndParseAPI(url, CONSTANTS.HTTP_PORTS)); 
         const results = await Promise.all(promises);
         results.forEach(res => addressesNoTls = addressesNoTls.concat(res));
     }
 
-    // 7. 处理 CSV (ADDCSV)
     if (addCsvStr) {
         const csvs = await cleanList(addCsvStr);
-        // 并发拉取 TLS 和 非TLS
         const promisesTLS = csvs.map(url => fetchAndParseCSV(url, true, ctx.httpsPorts, DLS, remarkIndex));
         const promisesNoTLS = csvs.map(url => fetchAndParseCSV(url, false, ctx.httpsPorts, DLS, remarkIndex));
         
@@ -120,17 +114,14 @@ export async function prepareSubscriptionData(ctx, env) {
         resNoTLS.forEach(r => addressesNoTls = addressesNoTls.concat(r));
     }
 
-    // 8. 处理 LINK (硬编码链接)
     if (linkStr) {
         links = await cleanList(linkStr);
     }
 
-    // 9. 去重与兜底
     ctx.addresses = [...new Set(addresses)].filter(Boolean);
     ctx.addressesnotls = [...new Set(addressesNoTls)].filter(Boolean);
     ctx.hardcodedLinks = links;
 
-    // 兜底：如果完全没有节点，添加官方默认
     if (ctx.addresses.length === 0 && ctx.hardcodedLinks.length === 0) {
         ctx.addresses.push("www.visa.com.tw:443#CF-Default-1");
         ctx.addresses.push("usa.visa.com:8443#CF-Default-2");
@@ -141,11 +132,16 @@ export async function prepareSubscriptionData(ctx, env) {
 export async function handleSubscription(request, env, ctx, subPath, hostName) {
     const FileName = await getConfig(env, 'SUBNAME', 'sub');
     
-    // 1. 准备数据
     await prepareSubscriptionData(ctx, env);
 
     const subHashLength = CONSTANTS.SUB_HASH_LENGTH;
     const enableXhttp = ctx.enableXhttp;
+
+    // [新增] 协议启用检查函数
+    const isEnabled = (p) => {
+        if (p === 'socks5' && ctx.disabledProtocols.includes('socks')) return false;
+        return !ctx.disabledProtocols.includes(p);
+    };
 
     // 2. 构造路径映射表 (Path -> Hash)
     const subPathNames = [
@@ -154,57 +150,54 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
         'trojan', 'trojan-tls', 'trojan-clash', 'trojan-clash-tls', 'trojan-sb', 'trojan-sb-tls',
         'ss', 'ss-tls', 'ss-clash', 'ss-clash-tls', 'ss-sb', 'ss-sb-tls',
         'socks', 'socks-tls', 'socks-clash', 'socks-clash-tls', 'socks-sb', 'socks-sb-tls',
-        'mandala-tls', // [新增]
+        'mandala-tls',
         'xhttp-tls', 'xhttp-clash-tls', 'xhttp-sb-tls'
     ];
     
-    // 计算 Hash
     const hashPromises = subPathNames.map(p => sha1(p));
     const hashes = (await Promise.all(hashPromises)).map(h => h.toLowerCase().substring(0, subHashLength));
     
     const hashToName = {};
     hashes.forEach((h, i) => hashToName[h] = subPathNames[i]);
     
-    // 3. 匹配路径
     const requestedHash = subPath.toLowerCase().substring(0, subHashLength);
     const pathName = hashToName[requestedHash];
     
-    if (!pathName) return null; // Not a subscription request
+    if (!pathName) return null;
 
-    // 4. 生成内容
     const plainHeader = { "Content-Type": "text/plain;charset=utf-8" };
     const plainDownloadHeader = { ...plainHeader, "Content-Disposition": `attachment; filename="${FileName}"` };
     const jsonHeader = { "Content-Type": "application/json;charset=utf-8" };
     const jsonDownloadHeader = { ...jsonHeader, "Content-Disposition": `attachment; filename="${FileName}.json"` };
 
-    // 辅助函数：简化调用
     const genB64 = (proto, tls) => generateBase64Subscription(proto, (proto==='ss'||proto==='trojan'||proto==='mandala')?ctx.dynamicUUID:ctx.userID, hostName, tls, ctx);
     
     // --- 通用订阅 ---
     if (pathName === 'all' || pathName === 'sub') {
-        const content = [
-            genB64('vless', false),
-            genB64('trojan', false),
-            genB64('mandala', false), // [新增]
-            genB64('ss', false),
-            genB64('socks', false),
-            enableXhttp ? genB64('xhttp', true) : ''
-        ].join('\n');
-        return new Response(btoa(unescape(encodeURIComponent(content))), { headers: plainDownloadHeader });
+        const content = [];
+        if (isEnabled('vless')) content.push(genB64('vless', false));
+        if (isEnabled('trojan')) content.push(genB64('trojan', false));
+        if (isEnabled('mandala')) content.push(genB64('mandala', false));
+        if (isEnabled('ss')) content.push(genB64('ss', false));
+        if (isEnabled('socks5')) content.push(genB64('socks', false));
+        if (isEnabled('xhttp')) content.push(genB64('xhttp', true));
+        
+        return new Response(btoa(unescape(encodeURIComponent(content.join('\n')))), { headers: plainDownloadHeader });
     }
     if (pathName === 'all-tls') {
-        const content = [
-            genB64('vless', true),
-            genB64('trojan', true),
-            genB64('mandala', true), // [新增]
-            genB64('ss', true),
-            genB64('socks', true),
-            enableXhttp ? genB64('xhttp', true) : ''
-        ].join('\n');
-        return new Response(content, { headers: plainHeader });
+        const content = [];
+        if (isEnabled('vless')) content.push(genB64('vless', true));
+        if (isEnabled('trojan')) content.push(genB64('trojan', true));
+        if (isEnabled('mandala')) content.push(genB64('mandala', true));
+        if (isEnabled('ss')) content.push(genB64('ss', true));
+        if (isEnabled('socks5')) content.push(genB64('socks', true));
+        if (isEnabled('xhttp')) content.push(genB64('xhttp', true));
+
+        return new Response(content.join('\n'), { headers: plainHeader });
     }
 
     // --- Clash 混合订阅 ---
+    // generators.js 中的 generateMixedClashConfig 已经内置了 disabledProtocols 过滤，直接调用即可
     if (pathName === 'all-clash') {
         return new Response(generateMixedClashConfig(ctx.userID, ctx.dynamicUUID, hostName, false, enableXhttp, ctx), { headers: plainDownloadHeader });
     }
@@ -213,6 +206,7 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
     }
 
     // --- SingBox 混合订阅 ---
+    // generators.js 中的 generateMixedSingBoxConfig 已经内置了 disabledProtocols 过滤
     if (pathName === 'all-sb') {
         return new Response(generateMixedSingBoxConfig(ctx.userID, ctx.dynamicUUID, hostName, false, enableXhttp, ctx), { headers: jsonDownloadHeader });
     }
@@ -228,9 +222,13 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
     const isSb = parts.includes('sb');
 
     if (['vless', 'trojan', 'ss', 'socks', 'xhttp', 'mandala'].includes(protocol)) {
-        if (protocol === 'xhttp' && !enableXhttp) return new Response('XHTTP disabled', { status: 404 });
+        // [修改] 检查协议是否被禁用
+        // 将 URL 路径中的 'socks' 映射为 'socks5' 进行检查
+        const checkProto = protocol === 'socks' ? 'socks5' : protocol;
+        if (!isEnabled(checkProto)) {
+            return new Response(`${protocol.toUpperCase()} is disabled by admin`, { status: 403 });
+        }
         
-        // [修改] 密码选择
         const id = (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') ? ctx.dynamicUUID : ctx.userID;
 
         if (isClash) {
@@ -240,9 +238,8 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
             if (protocol === 'mandala') return new Response('SingBox not supported for Mandala', { status: 400 });
             return new Response(generateSingBoxConfig(protocol, id, hostName, isTls, ctx), { headers: jsonDownloadHeader });
         } else {
-            // Base64
             const content = genB64(protocol, isTls);
-            if (isTls) return new Response(content, { headers: plainHeader }); // TLS 预览用明文
+            if (isTls) return new Response(content, { headers: plainHeader }); 
             else return new Response(btoa(unescape(encodeURIComponent(content))), { headers: plainDownloadHeader });
         }
     }
