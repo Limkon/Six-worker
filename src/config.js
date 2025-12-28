@@ -1,6 +1,6 @@
 /**
  * 文件名: src/config.js
- * 修改内容: 解析 DIS 配置项，支持禁用特定协议，默认不禁用任何协议 (原默认禁用 XHTTP)。
+ * 修改内容: 修复禁用协议列表解析问题（增加 trim 去空格、中文逗号兼容、Shadowsocks 别名映射）。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -86,8 +86,18 @@ export async function initializeContext(request, env) {
     
     // [修改] 处理禁用协议逻辑 (取代原 EX 逻辑)
     // 获取禁用列表，默认值为 '' (即默认不禁用任何协议)
-    const disStr = await getConfig(env, 'DIS', ''); 
-    ctx.disabledProtocols = (await cleanList(disStr)).map(p => p.toLowerCase());
+    let disStr = await getConfig(env, 'DIS', '');
+    
+    // 预处理：替换中文逗号，避免 split 失败
+    if (disStr) disStr = disStr.replace(/，/g, ',');
+
+    ctx.disabledProtocols = (await cleanList(disStr)).map(p => {
+        // 去除空格并转小写
+        const protocol = p.trim().toLowerCase();
+        // 处理别名：将 shadowsocks 映射为内部使用的 ss
+        if (protocol === 'shadowsocks') return 'ss';
+        return protocol;
+    });
 
     // 根据禁用列表推导 enableXhttp
     // 只有当 'xhttp' 不在禁用列表中时，才启用 XHTTP
