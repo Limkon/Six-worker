@@ -1,3 +1,7 @@
+/**
+ * 文件名: src/config.js
+ * 修改内容: 解析 DIS 配置项，支持禁用特定协议，默认关闭 XHTTP。
+ */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
 
@@ -54,7 +58,9 @@ export async function initializeContext(request, env) {
     // [修改] 虽已禁用内部逻辑，但为了清晰也注释掉调用
     // await loadRemoteConfig(env);
     const ctx = {
-        userID: '', dynamicUUID: '', userIDLow: '', proxyIP: '', dns64: '', socks5: '', go2socks5: [], banHosts: [], enableXhttp: false,
+        userID: '', dynamicUUID: '', userIDLow: '', proxyIP: '', dns64: '', socks5: '', go2socks5: [], banHosts: [], 
+        enableXhttp: false,
+        disabledProtocols: [], // [新增] 禁用协议列表
         httpsPorts: CONSTANTS.HTTPS_PORTS, startTime: Date.now(), adminPass: await getConfig(env, 'ADMIN_PASS'),
     };
     let rawUUID = await getConfig(env, 'UUID');
@@ -77,8 +83,16 @@ export async function initializeContext(request, env) {
     ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
     const banStr = await getConfig(env, 'BAN');
     if (banStr) ctx.banHosts = await cleanList(banStr);
-    const exVal = await getConfig(env, 'EX', 'false');
-    ctx.enableXhttp = exVal.toLowerCase() === 'true';
+    
+    // [修改] 处理禁用协议逻辑 (取代原 EX 逻辑)
+    // 获取禁用列表，默认值为 'xhttp' (即默认关闭 XHTTP)
+    const disStr = await getConfig(env, 'DIS', 'xhttp'); 
+    ctx.disabledProtocols = (await cleanList(disStr)).map(p => p.toLowerCase());
+
+    // 根据禁用列表推导 enableXhttp
+    // 只有当 'xhttp' 不在禁用列表中时，才启用 XHTTP
+    ctx.enableXhttp = !ctx.disabledProtocols.includes('xhttp');
+
     const url = new URL(request.url);
     if (url.searchParams.has('proxyip')) ctx.proxyIP = url.searchParams.get('proxyip');
     if (url.searchParams.has('socks5')) ctx.socks5 = url.searchParams.get('socks5');
