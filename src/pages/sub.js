@@ -1,9 +1,9 @@
 /**
  * 文件名: src/pages/sub.js
  * 修改内容: 
- * 1. 引入协议禁用检查逻辑 (isEnabled)。
- * 2. 生成 all/all-tls 订阅时过滤被禁用的协议。
- * 3. 单协议订阅请求时，如果协议被禁用则拦截。
+ * 1. [优化] 引入 KV 缓存机制 (SUB_REMOTE_CACHE) 存储远程节点数据。
+ * 2. [优化] 实现 Stale-While-Revalidate 策略，缓存过期时后台异步更新 (ctx.waitUntil)，加速订阅响应。
+ * 3. [重构] 将远程资源抓取逻辑提取为 fetchRemoteNodes 函数。
  */
 import { cleanList, sha1 } from '../utils/helpers.js';
 import { getConfig } from '../config.js';
@@ -15,15 +15,18 @@ async function fetchAndParseAPI(apiUrl, httpsPorts) {
     if (!apiUrl) return [];
     try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 2000); // 2秒超时
-        const response = await fetch(apiUrl, { signal: controller.signal });
+        const timeout = setTimeout(() => controller.abort(), 5000); // 适当放宽超时至5秒
+        const response = await fetch(apiUrl, { 
+            signal: controller.signal,
+            headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
         clearTimeout(timeout);
         if (response.ok) {
             const text = await response.text();
             return await cleanList(text);
         }
     } catch (e) {
-        console.error(`Fetch API ${apiUrl} failed:`, e);
+        console.error(`Fetch API ${apiUrl} failed:`, e.message);
     }
     return [];
 }
@@ -32,7 +35,7 @@ async function fetchAndParseAPI(apiUrl, httpsPorts) {
 async function fetchAndParseCSV(csvUrl, isTLS, httpsPorts, DLS, remarkIndex) {
     if (!csvUrl) return [];
     try {
-        const response = await fetch(csvUrl);
+        const response = await fetch(csvUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
         if (!response.ok) return [];
         const text = await response.text();
         const lines = text.split(/\r?\n/);
@@ -52,9 +55,89 @@ async function fetchAndParseCSV(csvUrl, isTLS, httpsPorts, DLS, remarkIndex) {
         }
         return results;
     } catch (e) {
-        console.error('Fetch CSV failed:', e);
+        console.error('Fetch CSV failed:', e.message);
     }
     return [];
+}
+
+// [新增] 执行远程资源抓取的核心逻辑
+async function fetchRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex) {
+    let remoteAddresses = [];
+    let remoteAddressesNoTls = [];
+
+    // 1. Fetch TLS APIs
+    if (apiLinks.length > 0) {
+        const promises = apiLinks.map(url => fetchAndParseAPI(url, ctx.httpsPorts));
+        const results = await Promise.all(promises);
+        results.forEach(res => remoteAddresses = remoteAddresses.concat(res));
+    }
+
+    // 2. Fetch NoTLS APIs
+    if (noTlsApiLinks.length > 0) {
+        const promises = noTlsApiLinks.map(url => fetchAndParseAPI(url, CONSTANTS.HTTP_PORTS));
+        const results = await Promise.all(promises);
+        results.forEach(res => remoteAddressesNoTls = remoteAddressesNoTls.concat(res));
+    }
+
+    // 3. Fetch CSVs
+    if (csvLinks.length > 0) {
+        const promisesTLS = csvLinks.map(url => fetchAndParseCSV(url, true, ctx.httpsPorts, DLS, remarkIndex));
+        const promisesNoTLS = csvLinks.map(url => fetchAndParseCSV(url, false, ctx.httpsPorts, DLS, remarkIndex));
+        
+        const [resTLS, resNoTLS] = await Promise.all([Promise.all(promisesTLS), Promise.all(promisesNoTLS)]);
+        resTLS.forEach(r => remoteAddresses = remoteAddresses.concat(r));
+        resNoTLS.forEach(r => remoteAddressesNoTls = remoteAddressesNoTls.concat(r));
+    }
+
+    return {
+        addresses: remoteAddresses,
+        addressesnotls: remoteAddressesNoTls
+    };
+}
+
+// [新增] 缓存管理函数 (Stale-While-Revalidate)
+async function getCachedRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex) {
+    const cacheKey = 'SUB_REMOTE_CACHE';
+    const CACHE_TTL = 3600 * 1000; // 1小时缓存失效
+
+    // 内部函数：执行更新并写入 KV
+    const doRefresh = async () => {
+        // console.log('[Cache] Refreshing remote nodes...');
+        const data = await fetchRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex);
+        const entry = { ts: Date.now(), data };
+        if (env.KV) await env.KV.put(cacheKey, JSON.stringify(entry));
+        return data;
+    };
+
+    // 1. 尝试读取缓存
+    let cached = null;
+    if (env.KV) {
+        try {
+            const str = await env.KV.get(cacheKey);
+            if (str) cached = JSON.parse(str);
+        } catch (e) {
+            console.error('KV Cache Read Error:', e);
+        }
+    }
+
+    // 2. 如果有缓存
+    if (cached && cached.data) {
+        // 检查过期
+        if (Date.now() - cached.ts > CACHE_TTL) {
+            // 已过期：后台异步更新，立刻返回旧数据 (Stale-While-Revalidate)
+            if (ctx.waitUntil) {
+                ctx.waitUntil(doRefresh().catch(e => console.error('Background Refresh Error:', e)));
+            } else {
+                // 如果没有 waitUntil 环境，不阻塞，但也无法后台更新，只能下次再试或忽略
+                // 这里选择不阻塞
+                doRefresh().catch(() => {});
+            }
+        }
+        return cached.data;
+    }
+
+    // 3. 如果没有缓存 (冷启动)，必须等待更新
+    return await doRefresh();
 }
 
 // 准备订阅数据
@@ -69,59 +152,61 @@ export async function prepareSubscriptionData(ctx, env) {
     const DLS = Number(await getConfig(env, 'DLS', '8'));
     const remarkIndex = Number(await getConfig(env, 'CSVREMARK', '1'));
 
-    let addresses = [];
-    let addressesApi = [];
-    let addressesNoTls = [];
-    let addressesNoTlsApi = [];
-    let addressesCsv = [];
-    let links = [];
+    // 本地静态节点 (Static)
+    let localAddresses = [];
+    let localAddressesNoTls = [];
+    
+    // 待抓取的远程链接 (To Fetch)
+    let apiLinks = [];
+    let noTlsApiLinks = [];
+    let csvLinks = [];
 
+    // 1. 解析 ADD/ADD.txt (混合了 IP 和 HTTP 链接)
     if (addStr) {
         const list = await cleanList(addStr);
         list.forEach(item => {
-            if (item.startsWith('http')) addressesApi.push(item);
-            else addresses.push(item);
+            if (item.startsWith('http')) apiLinks.push(item);
+            else localAddresses.push(item);
         });
     }
 
+    // 2. 解析 ADDAPI
     if (addApiStr) {
         const apis = await cleanList(addApiStr);
-        addressesApi = addressesApi.concat(apis);
+        apiLinks = apiLinks.concat(apis);
     }
     
-    if (addressesApi.length > 0) {
-        const promises = addressesApi.map(url => fetchAndParseAPI(url, ctx.httpsPorts));
-        const results = await Promise.all(promises);
-        results.forEach(res => addresses = addresses.concat(res));
+    // 3. 解析 ADDNOTLS
+    if (addNoTlsStr) {
+        localAddressesNoTls = await cleanList(addNoTlsStr);
     }
 
-    if (addNoTlsStr) addressesNoTls = await cleanList(addNoTlsStr);
-    
+    // 4. 解析 ADDNOTLSAPI
     if (addNoTlsApiStr) {
         const apis = await cleanList(addNoTlsApiStr);
-        const promises = apis.map(url => fetchAndParseAPI(url, CONSTANTS.HTTP_PORTS)); 
-        const results = await Promise.all(promises);
-        results.forEach(res => addressesNoTls = addressesNoTls.concat(res));
+        noTlsApiLinks = noTlsApiLinks.concat(apis);
     }
 
+    // 5. 解析 ADDCSV
     if (addCsvStr) {
-        const csvs = await cleanList(addCsvStr);
-        const promisesTLS = csvs.map(url => fetchAndParseCSV(url, true, ctx.httpsPorts, DLS, remarkIndex));
-        const promisesNoTLS = csvs.map(url => fetchAndParseCSV(url, false, ctx.httpsPorts, DLS, remarkIndex));
-        
-        const [resTLS, resNoTLS] = await Promise.all([Promise.all(promisesTLS), Promise.all(promisesNoTLS)]);
-        resTLS.forEach(r => addresses = addresses.concat(r));
-        resNoTLS.forEach(r => addressesNoTls = addressesNoTls.concat(r));
+        csvLinks = await cleanList(addCsvStr);
     }
 
+    // 6. 获取远程节点 (优先读取缓存)
+    const remoteData = await getCachedRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex);
+
+    // 7. 合并结果
+    let hardcodedLinks = [];
     if (linkStr) {
-        links = await cleanList(linkStr);
+        hardcodedLinks = await cleanList(linkStr);
     }
 
-    ctx.addresses = [...new Set(addresses)].filter(Boolean);
-    ctx.addressesnotls = [...new Set(addressesNoTls)].filter(Boolean);
-    ctx.hardcodedLinks = links;
+    // 合并去重
+    ctx.addresses = [...new Set([...localAddresses, ...remoteData.addresses])].filter(Boolean);
+    ctx.addressesnotls = [...new Set([...localAddressesNoTls, ...remoteData.addressesnotls])].filter(Boolean);
+    ctx.hardcodedLinks = hardcodedLinks;
 
+    // 保底逻辑
     if (ctx.addresses.length === 0 && ctx.hardcodedLinks.length === 0) {
         ctx.addresses.push("www.visa.com.tw:443#CF-Default-1");
         ctx.addresses.push("usa.visa.com:8443#CF-Default-2");
@@ -197,7 +282,6 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
     }
 
     // --- Clash 混合订阅 ---
-    // generators.js 中的 generateMixedClashConfig 已经内置了 disabledProtocols 过滤，直接调用即可
     if (pathName === 'all-clash') {
         return new Response(generateMixedClashConfig(ctx.userID, ctx.dynamicUUID, hostName, false, enableXhttp, ctx), { headers: plainDownloadHeader });
     }
@@ -206,7 +290,6 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
     }
 
     // --- SingBox 混合订阅 ---
-    // generators.js 中的 generateMixedSingBoxConfig 已经内置了 disabledProtocols 过滤
     if (pathName === 'all-sb') {
         return new Response(generateMixedSingBoxConfig(ctx.userID, ctx.dynamicUUID, hostName, false, enableXhttp, ctx), { headers: jsonDownloadHeader });
     }
@@ -223,7 +306,6 @@ export async function handleSubscription(request, env, ctx, subPath, hostName) {
 
     if (['vless', 'trojan', 'ss', 'socks', 'xhttp', 'mandala'].includes(protocol)) {
         // [修改] 检查协议是否被禁用
-        // 将 URL 路径中的 'socks' 映射为 'socks5' 进行检查
         const checkProto = protocol === 'socks' ? 'socks5' : protocol;
         if (!isEnabled(checkProto)) {
             return new Response(`${protocol.toUpperCase()} is disabled by admin`, { status: 403 });
