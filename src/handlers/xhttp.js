@@ -1,8 +1,8 @@
 /**
  * 文件名: src/handlers/xhttp.js
- * 修复说明:
- * 1. 修复 createUnifiedConnection 调用，传入 ctx.proxyIP 作为 fallbackAddress。
- * 2. 增加对 ctx.banHosts 的检查。
+ * 修改说明:
+ * 1. [优化] createUnifiedConnection 调用移除显式传入的 ctx.proxyIP，以启用 outbound.js 中的多 IP 重试逻辑。
+ * 2. [保留] 增加对 ctx.banHosts 的检查。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -242,8 +242,8 @@ export async function handleXhttpClient(request, ctx) {
             return null;
         }
 
-        // [重要修复] 传入 ctx.proxyIP 作为 fallbackAddress
-        const remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, console.log, ctx.proxyIP);
+        // [优化] 移除最后一个参数 ctx.proxyIP，让 createUnifiedConnection 使用内部的列表重试逻辑
+        const remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, console.log);
         
         const uploader = {
             done: (async () => {
