@@ -1,9 +1,9 @@
 /**
  * 文件名: src/handlers/outbound.js
- * 修改内容:
- * 1. [优化] createUnifiedConnection: Phase 2 增加 ProxyIP 列表轮询重试机制，提高连接成功率。
- * 2. [优化] handleTCPOutBound: proxyIPRetry 闭包同步增加多 IP 重试逻辑。
- * 3. [保留] 修复 socks5Connect 中认证长度计算错误 (使用字节长度)。
+ * 修复说明:
+ * 1. [Critical Fix] 在 nat64Retry 和 proxyIPRetry 重试逻辑中，连接建立后立即重发 rawClientData。
+ * 解决“连接退回机制失效”导致的有连接无数据问题。
+ * 2. 保持之前的 createUnifiedConnection 多 IP 尝试逻辑。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -155,7 +155,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     // -----------------------------------------------------------
     // Phase 2: ProxyIP Fallback (With List Retry)
     // -----------------------------------------------------------
-    // [修改] 构建尝试列表：首选 IP + 随机重试 IP
     let proxyAttempts = [];
     if (fallbackAddress) {
         proxyAttempts.push(fallbackAddress);
@@ -172,16 +171,14 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         }
     }
     
-    // 去重
     proxyAttempts = [...new Set(proxyAttempts)].filter(Boolean);
 
-    // 遍历尝试
     let proxySocket = null;
     for (const ip of proxyAttempts) {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
         try {
             proxySocket = await connectAndWrite(proxyHost.toLowerCase(), proxyPort, false);
-            if (proxySocket) break; // 连接成功，跳出循环
+            if (proxySocket) break; 
         } catch (err2) {
             log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
         }
@@ -213,8 +210,6 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             async write(chunk, controller) {
                 hasIncomingData = true;
                 if (webSocket.readyState !== 1) { 
-                    // 这里通常意味着客户端断开了连接，不再报错，优雅退出
-                    // controller.error('webSocket is not open'); 
                     return;
                 }
                 if (responseHeader) {
@@ -228,7 +223,6 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             abort(reason) { console.error('Remote socket aborted', reason); },
         })
     ).catch((error) => {
-        // 忽略正常的连接关闭错误
         if (error.message !== 'webSocket is not open') {
             console.error('remoteSocketToWS error:', error);
         }
@@ -258,6 +252,13 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             remoteSocketWrapper.value = natSocket;
             remoteSocketWrapper.isConnecting = false;
             
+            // [Fix] 重发客户端原始数据，否则服务端会超时
+            const writer = natSocket.writable.getWriter();
+            if (rawClientData && rawClientData.byteLength > 0) {
+                await writer.write(rawClientData);
+            }
+            writer.releaseLock();
+            
             remoteSocketToWS(natSocket, webSocket, vlessResponseHeader, null, log);
         } catch (e) {
             log('[Retry] NAT64 failed: ' + e.message);
@@ -269,7 +270,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     const proxyIPRetry = async () => {
         log('[Retry] Switching to ProxyIP...');
         
-        // [修改] 构建重试列表
         let attempts = [];
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
         if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
@@ -278,11 +278,9 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 if (randomIP && !attempts.includes(randomIP)) attempts.push(randomIP);
             }
         }
-        // 去重并过滤
         attempts = [...new Set(attempts)].filter(Boolean);
-        if (attempts.length === 0) attempts.push(CONSTANTS.DEFAULT_PROXY_IP); // 保底
+        if (attempts.length === 0) attempts.push(CONSTANTS.DEFAULT_PROXY_IP);
 
-        // 遍历尝试
         for (const ip of attempts) {
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
@@ -292,17 +290,23 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 remoteSocketWrapper.value = proxySocket;
                 remoteSocketWrapper.isConnecting = false;
                 
+                // [Fix] 重发客户端原始数据，解决“连接成功但无数据”问题
+                const writer = proxySocket.writable.getWriter();
+                if (rawClientData && rawClientData.byteLength > 0) {
+                    await writer.write(rawClientData);
+                }
+                writer.releaseLock();
+                
                 const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
                 const nextRetry = (!useSocks && ctx.dns64) ? nat64Retry : null;
                 
                 remoteSocketToWS(proxySocket, webSocket, vlessResponseHeader, nextRetry, log);
-                return; // 成功则退出
+                return; 
             } catch (e) {
                 log(`[Retry] ProxyIP (${ip}) failed: ${e.message}`);
             }
         }
 
-        // 所有 ProxyIP 都失败，尝试 NAT64 作为最后的救命稻草
         if (ctx.dns64 && !(ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5))) {
             await nat64Retry();
         } else {
