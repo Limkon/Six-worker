@@ -1,9 +1,8 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Critical Fix] 在 nat64Retry 和 proxyIPRetry 重试逻辑中，连接建立后立即重发 rawClientData。
- * 解决“连接退回机制失效”导致的有连接无数据问题。
- * 2. 保持之前的 createUnifiedConnection 多 IP 尝试逻辑。
+ * 1. [Critical Fix] createUnifiedConnection: 修复当 ctx.proxyIP 为空时，proxyAttempts 列表为空导致无法连接默认 IP 的严重 Bug。
+ * 2. [Critical Fix] 保持 retry 逻辑中重发 rawClientData 的修复。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -86,7 +85,6 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     if (res[1] === 0x02) {
         if (!username || !password) throw new Error('SOCKS5 auth required');
         
-        // [修复] 获取 UTF-8 编码后的字节数组及其长度
         const uBytes = encoder.encode(username);
         const pBytes = encoder.encode(password);
         
@@ -138,7 +136,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         const remote = doConnect();
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Connect timeout')), CONNECT_TIMEOUT_MS));
         const socket = await remote;
-        // 如果是直连，等待 opened 状态；SOCKS5 内部已处理握手
         if (!isSocks) await Promise.race([socket.opened, timeoutPromise]);
         return socket;
     };
@@ -159,8 +156,15 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     if (fallbackAddress) {
         proxyAttempts.push(fallbackAddress);
     } else {
-        if (ctx.proxyIP) proxyAttempts.push(ctx.proxyIP);
-        // 如果有列表，随机追加最多 2 个不同的 IP 进行重试
+        // [修复] 确保至少有一个 ProxyIP 可用
+        if (ctx.proxyIP) {
+            proxyAttempts.push(ctx.proxyIP);
+        } else {
+            // 如果 ctx.proxyIP 为空，必须加入默认 IP，否则列表为空将导致 Phase 2 被跳过
+            proxyAttempts.push(CONSTANTS.DEFAULT_PROXY_IP);
+        }
+
+        // 随机追加其他 IP
         if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
             for (let i = 0; i < 2; i++) {
                 const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
@@ -171,6 +175,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         }
     }
     
+    // 去重
     proxyAttempts = [...new Set(proxyAttempts)].filter(Boolean);
 
     let proxySocket = null;
@@ -178,7 +183,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
         try {
             proxySocket = await connectAndWrite(proxyHost.toLowerCase(), proxyPort, false);
-            if (proxySocket) break; 
+            if (proxySocket) break; // 连接成功
         } catch (err2) {
             log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
         }
@@ -252,7 +257,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             remoteSocketWrapper.value = natSocket;
             remoteSocketWrapper.isConnecting = false;
             
-            // [Fix] 重发客户端原始数据，否则服务端会超时
+            // [Fix] 重发数据
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) {
                 await writer.write(rawClientData);
@@ -272,13 +277,18 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         
         let attempts = [];
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
+        
         if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
             for (let i = 0; i < 2; i++) {
                 const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
                 if (randomIP && !attempts.includes(randomIP)) attempts.push(randomIP);
             }
         }
+        
+        // 去重
         attempts = [...new Set(attempts)].filter(Boolean);
+        
+        // [关键] 如果列表为空（例如 ProxyIP 未配置），加入默认 IP 作为保底
         if (attempts.length === 0) attempts.push(CONSTANTS.DEFAULT_PROXY_IP);
 
         for (const ip of attempts) {
@@ -290,7 +300,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 remoteSocketWrapper.value = proxySocket;
                 remoteSocketWrapper.isConnecting = false;
                 
-                // [Fix] 重发客户端原始数据，解决“连接成功但无数据”问题
+                // [Fix] 重发数据
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) {
                     await writer.write(rawClientData);
