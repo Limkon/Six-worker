@@ -1,6 +1,8 @@
 /**
  * 文件名: src/config.js
- * 修改内容: 修复禁用协议列表解析问题（增加 trim 去空格、中文逗号兼容、Shadowsocks 别名映射）。
+ * 修改内容: 
+ * 1. [优化] initializeContext 中使用 Promise.all 并行读取 KV 配置，提升启动速度。
+ * 2. [优化] 在 ctx 中增加 proxyIPList 字段，存储完整优选 IP 列表，用于后续重试机制。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -8,7 +10,7 @@ import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.
 let remoteConfigCache = {};
 
 export async function loadRemoteConfig(env) {
-    // [修改] 注释掉远程配置加载逻辑
+    // [修改] 注释掉远程配置加载逻辑 (保持原样)
     /*
     let remoteUrl = "";
     if (env.KV) remoteUrl = await env.KV.get('REMOTE_CONFIG');
@@ -57,54 +59,93 @@ export async function getConfig(env, key, defaultValue = undefined) {
 export async function initializeContext(request, env) {
     // [修改] 虽已禁用内部逻辑，但为了清晰也注释掉调用
     // await loadRemoteConfig(env);
+
+    // 1. [优化] 并行读取所有配置项
+    const [
+        adminPass,
+        rawUUID,
+        rawKey,
+        timeDaysStr,
+        updateHourStr,
+        proxyIPStr,
+        dns64,
+        socks5Addr,
+        go2socksStr,
+        banStr,
+        disStrRaw
+    ] = await Promise.all([
+        getConfig(env, 'ADMIN_PASS'),
+        getConfig(env, 'UUID'),
+        getConfig(env, 'KEY'),
+        getConfig(env, 'TIME'),
+        getConfig(env, 'UPTIME'),
+        getConfig(env, 'PROXYIP'),
+        getConfig(env, 'DNS64'),
+        getConfig(env, 'SOCKS5'),
+        getConfig(env, 'GO2SOCKS5'),
+        getConfig(env, 'BAN'),
+        getConfig(env, 'DIS', '')
+    ]);
+
     const ctx = {
-        userID: '', dynamicUUID: '', userIDLow: '', proxyIP: '', dns64: '', socks5: '', go2socks5: [], banHosts: [], 
+        userID: '', 
+        dynamicUUID: '', 
+        userIDLow: '', 
+        proxyIP: '', 
+        proxyIPList: [], // [新增] 存储完整列表
+        dns64: dns64 || '', 
+        socks5: socks5Addr || '', 
+        go2socks5: [], 
+        banHosts: [], 
         enableXhttp: false,
-        disabledProtocols: [], // [新增] 禁用协议列表
-        httpsPorts: CONSTANTS.HTTPS_PORTS, startTime: Date.now(), adminPass: await getConfig(env, 'ADMIN_PASS'),
+        disabledProtocols: [], 
+        httpsPorts: CONSTANTS.HTTPS_PORTS, 
+        startTime: Date.now(), 
+        adminPass: adminPass,
     };
-    let rawUUID = await getConfig(env, 'UUID');
-    let rawKey = await getConfig(env, 'KEY');
+
+    // 处理 UUID 逻辑
     ctx.userID = rawUUID;
     ctx.dynamicUUID = rawUUID;
     if (rawKey || (rawUUID && !isStrictV4UUID(rawUUID))) {
         const seed = rawKey || rawUUID;
-        const timeDays = Number(await getConfig(env, 'TIME')) || 99999;
-        const updateHour = Number(await getConfig(env, 'UPTIME')) || 0;
+        const timeDays = Number(timeDaysStr) || 99999;
+        const updateHour = Number(updateHourStr) || 0;
         const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
-        ctx.userID = userIDs[0]; ctx.userIDLow = userIDs[1]; ctx.dynamicUUID = seed;
+        ctx.userID = userIDs[0]; 
+        ctx.userIDLow = userIDs[1]; 
+        ctx.dynamicUUID = seed;
     }
-    const proxyIPStr = await getConfig(env, 'PROXYIP');
-    if (proxyIPStr) { const list = await cleanList(proxyIPStr); ctx.proxyIP = list[Math.floor(Math.random() * list.length)] || ''; }
-    ctx.dns64 = await getConfig(env, 'DNS64');
-    let socks5Addr = await getConfig(env, 'SOCKS5');
-    if (socks5Addr) ctx.socks5 = socks5Addr;
-    const go2socksStr = await getConfig(env, 'GO2SOCKS5');
+
+    // 处理 ProxyIP 逻辑
+    if (proxyIPStr) { 
+        const list = await cleanList(proxyIPStr); 
+        ctx.proxyIPList = list; // 保存完整列表
+        ctx.proxyIP = list[Math.floor(Math.random() * list.length)] || ''; 
+    }
+
+    // 处理 SOCKS5 分流规则
     ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
-    const banStr = await getConfig(env, 'BAN');
+
+    // 处理 Ban 列表
     if (banStr) ctx.banHosts = await cleanList(banStr);
     
-    // [修改] 处理禁用协议逻辑 (取代原 EX 逻辑)
-    // 获取禁用列表，默认值为 '' (即默认不禁用任何协议)
-    let disStr = await getConfig(env, 'DIS', '');
-    
-    // 预处理：替换中文逗号，避免 split 失败
+    // 处理禁用协议逻辑
+    let disStr = disStrRaw;
     if (disStr) disStr = disStr.replace(/，/g, ',');
 
     ctx.disabledProtocols = (await cleanList(disStr)).map(p => {
-        // 去除空格并转小写
         const protocol = p.trim().toLowerCase();
-        // 处理别名：将 shadowsocks 映射为内部使用的 ss
         if (protocol === 'shadowsocks') return 'ss';
         return protocol;
     });
 
-    // 根据禁用列表推导 enableXhttp
-    // 只有当 'xhttp' 不在禁用列表中时，才启用 XHTTP
     ctx.enableXhttp = !ctx.disabledProtocols.includes('xhttp');
 
+    // 处理 URL 参数覆盖
     const url = new URL(request.url);
     if (url.searchParams.has('proxyip')) ctx.proxyIP = url.searchParams.get('proxyip');
     if (url.searchParams.has('socks5')) ctx.socks5 = url.searchParams.get('socks5');
+    
     return ctx;
 }
