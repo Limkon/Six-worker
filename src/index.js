@@ -1,8 +1,7 @@
 /**
  * 文件名: src/index.js
- * 说明: 
- * 1. [重构] 引入 src/templates/auth.js 模板，移除硬编码 HTML。
- * 2. [清理] 恢复 scheduled 事件，调用封装好的 WebDAV 模块 (如果不配置触发器不会运行)。
+ * 修改内容: 
+ * 1. 修改根路径 (path === '/') 的默认返回 HTML，将其更新为用户指定的 Nginx 欢迎页面。
  */
 import { initializeContext, getConfig } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -158,7 +157,8 @@ export default {
                     if (resp) return resp;
                 }
 
-                return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working.</p></body></html>', { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+                // [修改] 更新为新的默认主页 HTML
+                return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
             }
 
             return new Response('404 Not Found', { status: 404 });
