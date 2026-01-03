@@ -1,68 +1,62 @@
 /**
  * 文件名: src/handlers/webdav.js
- * 修改说明: 注释掉所有 WebDAV 推送逻辑
+ * 修改说明: 
+ * 1. [恢复] 去除注释，恢复 WebDAV 推送逻辑。
+ * 2. [重构] 作为一个可调用的独立模块，不再包含硬编码的配置（配置应从 env 或 KV 读取，或者作为参数传入）。
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
 import { getConfig } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
 
-export async function executeWebDavPush(env, hostName, ctx, force = false) {
-    // [修改] 注释掉所有 WebDAV 推送逻辑
-    /*
+export async function executeWebDavPush(env, ctx, force = false) {
     try {
-        // ==========================================
-        // WebDAV 配置 (请确认此处信息是否正确)
-        // 注意：URL 必须以 / 结尾
-        const WEBDAV_CONFIG = {
-            URL:  'https://wani.teracloud.jp/dav/', 
-            USER: 'zoten',
-            PASS: 'N6f7pgwoU5QB6noh'
-        };
-        // ==========================================
+        // 1. 获取 WebDAV 配置 (建议存储在 KV 或环境变量中)
+        const webdavUrl = await getConfig(env, 'WEBDAV_URL');
+        const webdavUser = await getConfig(env, 'WEBDAV_USER');
+        const webdavPass = await getConfig(env, 'WEBDAV_PASS');
 
-        if (!WEBDAV_CONFIG.URL || !WEBDAV_CONFIG.USER || !WEBDAV_CONFIG.PASS) {
-            console.error('[WebDAV] Configuration missing.');
+        if (!webdavUrl || !webdavUser || !webdavPass) {
+            console.log('[WebDAV] Configuration missing (WEBDAV_URL/USER/PASS), skipping push.');
             return;
         }
 
-        console.log(`[WebDAV] Starting push to ${WEBDAV_CONFIG.URL}`);
+        console.log(`[WebDAV] Starting push to ${webdavUrl}`);
 
-        // 1. 注入 Socks5 密码 (用户要求的 KEY)
-        const userKey = await getConfig(env, 'KEY');
-        if (userKey) {
-            ctx.socksPassword = userKey;
-        }
+        // 2. 准备请求上下文
+        // 模拟一个 hostName，通常使用当前 worker 的域名，或者默认值
+        const hostName = 'worker.local'; // 这里可能需要从外部传入真实的 hostName
 
-        // 2. 调用通用订阅生成逻辑 (模拟访问 /all)
+        // 3. 计算 /all 路径的 hash
         const subHashLength = CONSTANTS.SUB_HASH_LENGTH;
         const allPathHash = (await sha1('all')).toLowerCase().substring(0, subHashLength);
 
-        // 直接调用 sub.js 的处理器获取 Response
-        // 传入 null 作为 request，因为 handleSubscription 内部主要依赖 env, ctx, subPath
-        const response = await handleSubscription(null, env, ctx, allPathHash, hostName);
+        // 4. 调用 handleSubscription 生成内容
+        // 注意：handleSubscription 需要 request 对象，这里我们伪造一个
+        const mockRequest = new Request(`https://${hostName}/${ctx.dynamicUUID}/${allPathHash}`);
+        
+        // 调用订阅处理函数
+        // 注意：我们需要确保 handleSubscription 能处理这种内部调用
+        const response = await handleSubscription(mockRequest, env, ctx, allPathHash, hostName);
 
         if (!response || !response.ok) {
-            console.error('[WebDAV] Failed to generate subscription content via handleSubscription');
+            console.error('[WebDAV] Failed to generate subscription content.');
             return;
         }
 
-        // 3. 获取内容并处理
+        // 5. 获取内容并处理 (Base64 解码)
         let content = await response.text();
-
-        // 要求：推送明文 (Response 默认是 Base64，需要解码)
         try {
             content = atob(content);
         } catch (e) {
-            console.warn('[WebDAV] Content decode failed, pushing original content.', e);
+            console.warn('[WebDAV] Content decode failed, using original.', e);
         }
 
-        // 要求：解决重复节点 (利用 Set 进行行级去重)
-        // 这会自动合并重复的 hardcodedLinks
+        // 6. 去重
         const uniqueLines = [...new Set(content.split('\n'))].filter(line => line.trim() !== '');
         const finalContent = uniqueLines.join('\n');
 
-        // 4. 检查 Hash 避免重复推送
+        // 7. 检查 Hash (防重复推送)
         if (env.KV && !force) {
             const currentHash = await sha1(finalContent);
             const lastHash = await env.KV.get('WEBDAV_HASH');
@@ -70,20 +64,19 @@ export async function executeWebDavPush(env, hostName, ctx, force = false) {
                 console.log('[WebDAV] Content unchanged, skipping.');
                 return;
             }
-            ctx.waitUntil && ctx.waitUntil(env.KV.put('WEBDAV_HASH', currentHash));
+            if (ctx.waitUntil) ctx.waitUntil(env.KV.put('WEBDAV_HASH', currentHash));
         }
 
-        // 5. 生成文件名
+        // 8. 生成文件名并推送
         const subName = await getConfig(env, 'SUBNAME', 'sub');
         const now = new Date();
         const timestamp = now.toISOString().replace(/[-:T.]/g, '').slice(0, 14);
         const fileName = `${subName}_${timestamp}.txt`;
         
-        // 6. 推送
-        const targetUrl = WEBDAV_CONFIG.URL.endsWith('/') ? WEBDAV_CONFIG.URL + fileName : WEBDAV_CONFIG.URL + '/' + fileName;
-        const auth = btoa(`${WEBDAV_CONFIG.USER}:${WEBDAV_CONFIG.PASS}`);
+        const targetUrl = webdavUrl.endsWith('/') ? webdavUrl + fileName : webdavUrl + '/' + fileName;
+        const auth = btoa(`${webdavUser}:${webdavPass}`);
         
-        const request = fetch(targetUrl, {
+        const pushRequest = fetch(targetUrl, {
             method: 'PUT',
             headers: {
                 'Authorization': `Basic ${auth}`,
@@ -93,14 +86,12 @@ export async function executeWebDavPush(env, hostName, ctx, force = false) {
             body: finalContent
         });
 
-        if (ctx.waitUntil) ctx.waitUntil(request);
-        else await request;
+        if (ctx.waitUntil) ctx.waitUntil(pushRequest);
+        else await pushRequest;
         
         console.log('[WebDAV] Push triggered successfully.');
 
     } catch (e) {
-        console.error('WebDAV 推送逻辑错误:', e);
+        console.error('WebDAV Logic Error:', e);
     }
-    */
-    console.log('[WebDAV] Feature disabled in code.');
 }
