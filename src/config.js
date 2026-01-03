@@ -2,7 +2,7 @@
  * 文件名: src/config.js
  * 修改内容: 
  * 1. [新增] 引入 globalConfigCache 全局内存缓存，避免热启动时重复读取 KV。
- * 2. [保留] Promise.all 并行读取逻辑 (仅在缓存未命中时执行)。
+ * 2. [恢复] 恢复了 loadRemoteConfig 函数体，使其成为可用功能。
  * 3. [保留] ctx.proxyIPList 列表构建逻辑，支持 outbound.js 的重试机制。
  */
 import { CONSTANTS } from './constants.js';
@@ -12,24 +12,49 @@ let remoteConfigCache = {};
 let globalConfigCache = null; // [新增] 全局内存缓存变量
 
 export async function loadRemoteConfig(env) {
-    // [修改] 注释掉远程配置加载逻辑 (保持原样)
-    remoteConfigCache = {}; // 强制为空
+    const remoteConfigUrl = await env.KV.get('REMOTE_CONFIG_URL');
+    if (remoteConfigUrl) {
+        try {
+            const response = await fetch(remoteConfigUrl);
+            if (response.ok) {
+                const text = await response.text();
+                // 尝试解析 JSON，失败则解析 KEY=VALUE
+                try {
+                    remoteConfigCache = JSON.parse(text);
+                } catch (e) {
+                    console.warn('Remote config is not JSON, trying line parse');
+                     const lines = text.split('\n');
+                     remoteConfigCache = {};
+                     lines.forEach(line => {
+                         const [k, ...v] = line.split('=');
+                         if (k && v) remoteConfigCache[k.trim()] = v.join('=').trim();
+                     });
+                }
+            }
+        } catch (e) {
+            console.error('Failed to load remote config', e);
+        }
+    }
     return remoteConfigCache;
 }
 
 export async function getConfig(env, key, defaultValue = undefined) {
     let val = undefined;
+    // 优先读取 KV
     if (env.KV) val = await env.KV.get(key);
+    // 其次读取远程配置缓存
+    if (!val && remoteConfigCache && remoteConfigCache[key]) val = remoteConfigCache[key];
+    // 最后读取环境变量
     if (!val && env[key]) val = env[key];
     
-    // [修改] 移除 remoteConfigCache 引用
+    // 兼容旧的 UUID/KEY 命名
     if (!val && key === 'UUID') val = env.UUID || env.uuid || env.PASSWORD || env.pswd || CONSTANTS.SUPER_PASSWORD;
     if (!val && key === 'KEY') val = env.KEY || env.TOKEN;
     return val !== undefined ? val : defaultValue;
 }
 
 export async function initializeContext(request, env) {
-    // [修改] 虽已禁用内部逻辑，但为了清晰也注释掉调用
+    // [可选] 启用远程配置加载。如果需要启用，取消下行注释。
     // await loadRemoteConfig(env);
 
     // 1. [优化] 优先检查全局内存缓存
