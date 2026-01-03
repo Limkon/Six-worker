@@ -173,7 +173,7 @@ export default {
         try {
             // 使用封装好的模块执行 WebDAV 推送
             // 如果未配置 WEBDAV_URL 等环境变量，该函数会自动跳过
-            await executeWebDavPush(env, ctx);
+            // await executeWebDavPush(env, ctx);
         } catch (e) { 
             console.error('Scheduled Event Error:', e); 
         }
