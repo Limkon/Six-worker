@@ -1,15 +1,19 @@
 /**
  * 文件名: src/config.js
  * 修改内容: 
- * 1. [新增] 引入 globalConfigCache 全局内存缓存，避免热启动时重复读取 KV。
- * 2. [恢复] 恢复了 loadRemoteConfig 函数体，使其成为可用功能。
- * 3. [保留] ctx.proxyIPList 列表构建逻辑，支持 outbound.js 的重试机制。
+ * 1. [新增] 导出 cleanConfigCache 函数，用于在修改配置后手动清除全局缓存。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
 
 let remoteConfigCache = {};
-let globalConfigCache = null; // [新增] 全局内存缓存变量
+let globalConfigCache = null; // 全局内存缓存变量
+
+// [新增] 清除全局缓存函数
+export function cleanConfigCache() {
+    globalConfigCache = null;
+    // console.log('Global config cache cleaned.');
+}
 
 export async function loadRemoteConfig(env) {
     const remoteConfigUrl = await env.KV.get('REMOTE_CONFIG_URL');
@@ -60,7 +64,7 @@ export async function initializeContext(request, env) {
     // 1. [优化] 优先检查全局内存缓存
     let configData = globalConfigCache;
 
-    // 如果没有缓存 (冷启动)，则执行并行读取
+    // 如果没有缓存 (冷启动或被清除)，则执行并行读取
     if (!configData) {
         const [
             adminPass,
