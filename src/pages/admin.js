@@ -1,9 +1,9 @@
 /**
  * 文件名: src/pages/admin.js
  * 说明: 
- * 1. [重构] 引入 src/templates/admin.js 模板，分离视图层。
+ * 1. [修复] 保存配置后调用 cleanConfigCache() 清除内存缓存，确保新配置即时生效。
  */
-import { getConfig } from '../config.js'; 
+import { getConfig, cleanConfigCache } from '../config.js'; // [修改] 引入 cleanConfigCache
 import { CONSTANTS } from '../constants.js';
 import { cleanList } from '../utils/helpers.js';
 import { getAdminConfigHtml, getBestIPHtml } from '../templates/admin.js';
@@ -69,6 +69,10 @@ export async function handleEditConfig(request, env, ctx) {
                 }
             }
             await Promise.all(savePromises);
+            
+            // [新增] 保存成功后清除内存缓存
+            cleanConfigCache();
+
             return new Response('保存成功', { status: 200 });
         } catch (e) {
             return new Response('保存失败: ' + e.message, { status: 500 });
@@ -199,7 +203,6 @@ export async function handleBestIP(request, env) {
     if (url.searchParams.has('loadIPs')) {
         const ipSourceName = url.searchParams.get('loadIPs');
         async function GetCFIPs(sourceName) {
-            // ... (省略了具体的 IP 获取逻辑以节省篇幅，实际应保持原样)
              try {
                 let response;
                 const source = allIpSources.find(s => s.name === sourceName);
