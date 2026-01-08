@@ -1,9 +1,9 @@
 /**
  * 文件名: src/index.js
  * 修改内容: 
- * 1. 修改根路径 (path === '/') 的默认返回 HTML，将其更新为用户指定的 Nginx 欢迎页面。
+ * 1. [修复] 初始密码设置成功后调用 cleanConfigCache()，确保无需重启即可生效。
  */
-import { initializeContext, getConfig } from './config.js';
+import { initializeContext, getConfig, cleanConfigCache } from './config.js'; // [修改] 引入 cleanConfigCache
 import { handleWebSocketRequest } from './handlers/websocket.js';
 import { handleXhttpClient } from './handlers/xhttp.js';
 import { handleEditConfig, handleBestIP } from './pages/admin.js';
@@ -21,6 +21,10 @@ async function handlePasswordSetup(request, env) {
         if (!password || password.length < 6) return new Response('密码太短', { status: 400 });
         if (!env.KV) return new Response('未绑定 KV', { status: 500 });
         await env.KV.put('UUID', password);
+        
+        // [新增] 清除缓存，使 UUID 立即生效
+        cleanConfigCache();
+
         return new Response('设置成功，请刷新页面', { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8' } });
     }
     return new Response(getPasswordSetupHtml(), { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
