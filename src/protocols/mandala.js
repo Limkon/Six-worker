@@ -1,8 +1,8 @@
 /**
  * 文件名: src/protocols/mandala.js
  * 修改内容: 
- * 1. [修改] 验证逻辑：在解密数据中搜索 expectedHash (SHA224)，支持前后存在垃圾数据的虚位验证。
- * 2. [新增] 动态指针：根据 Hash 实际出现的位置，动态调整后续 PadLen、CMD、Address 的读取偏移量，防止解析错位。
+ * 1. [新增] 密码长度限制：在计算哈希前，将密码截断为最大 128 字符。
+ * 2. [保留] 虚位密码逻辑：支持在解密数据中搜索 SHA224 哈希，并动态调整读取游标。
  */
 import { CONSTANTS } from '../constants.js';
 import { textDecoder, sha224Hash } from '../utils/helpers.js';
@@ -25,9 +25,15 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         decrypted[i] = buffer[i + 4] ^ salt[i % 4];
     }
 
-    // 4. 验证哈希 (支持虚位密码)
-    // 计算标准 SHA224 哈希 (56字符 hex 字符串)
-    const expectedHash = sha224Hash(String(password));
+    // 4. 验证哈希 (支持虚位密码 + 长度限制)
+    
+    // [新增] 密码长度限制
+    // 限制密码不超过 128 位（字符/字节），超过部分直接舍弃
+    // 例如：如果密码是 200 位的字符串，只取前 128 位参与哈希计算
+    const safePassword = String(password).slice(0, 128);
+
+    // 计算标准 SHA224 哈希 (基于截断后的密码)
+    const expectedHash = sha224Hash(safePassword);
     
     // 将解密后的缓冲区转为字符串进行搜索
     let decryptedString;
@@ -37,17 +43,15 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         return { hasError: true, message: 'Mandala decode failed' };
     }
 
-    // [核心修改] 搜索哈希位置
-    // indexOf 返回 -1 表示未找到，否则返回哈希起始索引
+    // [搜索哈希位置]
     const hashIndex = decryptedString.indexOf(expectedHash);
 
     if (hashIndex === -1) {
         return { hasError: true, message: 'Invalid Mandala Auth' };
     }
 
-    // [关键] 重新计算数据偏移量
-    // 标准情况下 hashIndex 应为 0。如果是虚位密码，hashIndex > 0。
-    // 哈希长度固定为 56 字节。
+    // [动态调整游标]
+    // 哈希长度固定为 56 字节
     const hashEnd = hashIndex + 56;
 
     // 5. 跳过随机混淆填充 (PadLen 位于 Hash 之后 1 字节)
@@ -56,7 +60,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     }
     
     const padLen = decrypted[hashEnd]; // 获取填充长度
-    let cursor = hashEnd + 1 + padLen; // 动态调整游标：Hash结束位置 + 1(PadLen字节) + PadLen长度
+    let cursor = hashEnd + 1 + padLen; // 动态调整游标
 
     if (cursor >= decrypted.length) return { hasError: true, message: 'Buffer too short after padding' };
 
@@ -109,7 +113,6 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         portRemote: port,
         addressType: atyp,
         isUDP: false,
-        // 原始客户端数据 = 解密后去掉头部的剩余部分
         rawClientData: decrypted.slice(headerEnd + 2),
         protocol: 'mandala'
     };
