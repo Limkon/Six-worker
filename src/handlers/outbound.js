@@ -1,9 +1,11 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修改内容:
- * 1. [性能优化] Fail-Fast: 连接超时从 5000ms 降至 2500ms，加速故障切换。
- * 2. [性能优化] remoteSocketToWS 保持移除 Blob 的高效实现。
- * 3. [稳定性] 保留 Socks5 超时控制和 ProxyIP 列表修复。
+ * 1. [智能策略] 引入阶梯式超时 (Stepped Timeout): 
+ * - 第1次尝试: 500ms (极速/Direct)
+ * - 第2次尝试: 1500ms (快速重试/ProxyIP 1)
+ * - 第3次+尝试: 2500ms (稳定兜底)
+ * 2. [日志] 连接日志增加当前超时时间显示。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -122,27 +124,30 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 }
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress) {
-    // [优化] 缩短超时时间，加快故障转移速度
-    const CONNECT_TIMEOUT_MS = 2500;
-    
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
+    
+    // [智能策略] 定义超时阶梯: [第1次, 第2次, 第3次及以后]
+    const STEPPED_TIMEOUTS = [500, 1500, 2500];
+    let attemptCounter = 0;
 
     const connectAndWrite = async (host, port, isSocks) => {
-        log(`[connect] Target: ${host}:${port} (Socks: ${isSocks})`);
+        // 计算当前尝试的超时时间
+        const currentTimeout = STEPPED_TIMEOUTS[Math.min(attemptCounter, STEPPED_TIMEOUTS.length - 1)];
+        attemptCounter++;
+
+        log(`[connect] Target: ${host}:${port} (Socks: ${isSocks}) (Timeout: ${currentTimeout}ms)`);
         
         const doConnect = async () => {
              if (isSocks) {
-                // socks5Connect 包含多次 IO 等待
                 return await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
             } else {
-                // connect 返回 socket 对象
                 return connect({ hostname: host, port: port });
             }
         };
 
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Connect timeout')), CONNECT_TIMEOUT_MS));
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error(`Connect timeout (${currentTimeout}ms)`)), currentTimeout));
 
-        // [优化] 竞态超时控制
+        // 竞态超时控制
         const socket = await Promise.race([doConnect(), timeoutPromise]);
         
         if (!isSocks) {
@@ -153,7 +158,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     };
 
     // -----------------------------------------------------------
-    // Phase 1: Direct / Socks5
+    // Phase 1: Direct / Socks5 (Attempt #1 -> 500ms)
     // -----------------------------------------------------------
     try {
         return await connectAndWrite(addressRemote, portRemote, useSocks);
@@ -162,21 +167,18 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
 
     // -----------------------------------------------------------
-    // Phase 2: ProxyIP Fallback (With List Retry)
+    // Phase 2: ProxyIP Fallback (Attempt #2 -> 1500ms, Attempt #3 -> 2500ms...)
     // -----------------------------------------------------------
     let proxyAttempts = [];
     if (fallbackAddress) {
         proxyAttempts.push(fallbackAddress);
     } else {
-        // [修复] 确保至少有一个 ProxyIP 可用
         if (ctx.proxyIP) {
             proxyAttempts.push(ctx.proxyIP);
         } else {
-            // 如果 ctx.proxyIP 为空，必须加入默认 IP
             proxyAttempts.push(CONSTANTS.DEFAULT_PROXY_IP);
         }
 
-        // 随机追加其他 IP
         if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
             for (let i = 0; i < 2; i++) {
                 const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
@@ -187,7 +189,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         }
     }
     
-    // 去重
     proxyAttempts = [...new Set(proxyAttempts)].filter(Boolean);
 
     let proxySocket = null;
@@ -195,7 +196,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
         try {
             proxySocket = await connectAndWrite(proxyHost.toLowerCase(), proxyPort, false);
-            if (proxySocket) break; // 连接成功
+            if (proxySocket) break; 
         } catch (err2) {
             log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
         }
@@ -203,7 +204,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     if (proxySocket) return proxySocket;
 
     // -----------------------------------------------------------
-    // Phase 3: NAT64 Fallback (Only if not using Socks)
+    // Phase 3: NAT64 Fallback (Final Attempt -> 2500ms)
     // -----------------------------------------------------------
     if (!useSocks && ctx.dns64) {
         try {
@@ -230,7 +231,6 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
                     return;
                 }
                 if (responseHeader) {
-                    // [优化] 移除 Blob，使用 Uint8Array 拼接，减少开销
                     const header = responseHeader;
                     const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
                     const combined = new Uint8Array(header.length + data.length);
@@ -264,7 +264,6 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
 }
 
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-    // 闭包重试逻辑：NAT64
     const nat64Retry = async () => {
         if (!ctx.dns64) { safeCloseWebSocket(webSocket); return; }
         log('[Retry] Switching to NAT64...');
@@ -275,7 +274,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             remoteSocketWrapper.value = natSocket;
             remoteSocketWrapper.isConnecting = false;
             
-            // [Fix] 重发数据
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) {
                 await writer.write(rawClientData);
@@ -289,7 +287,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         }
     };
 
-    // 闭包重试逻辑：ProxyIP (支持列表重试)
     const proxyIPRetry = async () => {
         log('[Retry] Switching to ProxyIP...');
         
