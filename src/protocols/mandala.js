@@ -2,6 +2,9 @@ import { CONSTANTS } from '../constants.js';
 import { textDecoder, sha224Hash } from '../utils/helpers.js';
 import { parseAddressAndPort } from './utils.js';
 
+// [新增] 缓存 Password Hash，避免重复计算带来的性能开销
+const passwordHashCache = new Map();
+
 export async function parseMandalaHeader(mandalaBuffer, password) {
     // 1. 基础长度检查 (Salt(4) + Hash(56) + PadLen(1) + Cmd(1) + Atyp(1) + Port(2) + CRLF(2) = 67字节)
     if (mandalaBuffer.byteLength < 67) {
@@ -11,21 +14,30 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
 
     // 2. 提取随机盐 (前4字节)
-    const salt = buffer.slice(0, 4);
+    // [优化] 使用 subarray 避免不必要的内存复制 (虽然此处只有4字节，但保持一致的视图操作是个好习惯)
+    const salt = buffer.subarray(0, 4);
 
     // 3. 异或解密 (XOR) - 仅解密头部潜在的最大范围，避免性能损耗
     // 这里我们解密整个 chunk，因为 payload 也可能包含在内
     const decrypted = new Uint8Array(buffer.length - 4);
+    
+    // [优化] 循环中使用位运算 & 3 代替模运算 % 4，提升微小但密集的计算性能
     for (let i = 0; i < decrypted.length; i++) {
-        decrypted[i] = buffer[i + 4] ^ salt[i % 4];
+        decrypted[i] = buffer[i + 4] ^ salt[i & 3];
     }
 
     // 4. 验证哈希 (Offset 0-56)
-    // 使用与 Trojan 相同的 SHA224 逻辑
-    const expectedHash = sha224Hash(String(password));
+    // [优化] 优先从缓存读取 Hash，显著减少 CPU 计算量
+    let expectedHash = passwordHashCache.get(password);
+    if (!expectedHash) {
+        expectedHash = sha224Hash(String(password));
+        passwordHashCache.set(password, expectedHash);
+    }
+
     let receivedHash;
     try {
-        receivedHash = textDecoder.decode(decrypted.slice(0, 56));
+        // [优化] 使用 subarray 创建视图而非 slice 复制内存，减少 GC 压力
+        receivedHash = textDecoder.decode(decrypted.subarray(0, 56));
     } catch (e) {
         return { hasError: true, message: 'Mandala hash decode failed' };
     }
@@ -36,7 +48,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
 
     // 5. 跳过随机混淆填充
     const padLen = decrypted[56]; // 获取填充长度
-    let cursor = 57 + padLen;     //以此跳过垃圾数据
+    let cursor = 57 + padLen;     // 以此跳过垃圾数据
 
     if (cursor >= decrypted.length) return { hasError: true, message: 'Buffer too short after padding' };
 
@@ -46,9 +58,9 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     cursor++;
 
     // 7. 解析地址 (ATYP + Addr)
-    const atyp = decrypted[cursor];
     // parseAddressAndPort 需要传入 buffer, offset (指向ATYP的下一位), atyp
     // 注意：我们要传 decrypted buffer
+    const atyp = decrypted[cursor];
     const addrResult = parseAddressAndPort(decrypted.buffer, cursor + 1, atyp);
     
     if (addrResult.hasError) return addrResult;
@@ -91,10 +103,9 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         portRemote: port,
         addressType: atyp,
         isUDP: false,
-        // 原始客户端数据 = 解密后去掉头部的剩余部分
-        // 注意：Mandala 仅对 WebSocket 第一帧 (握手帧) 进行了 XOR 混淆
-        // 后续数据流是否混淆取决于客户端实现，这里假设仅混淆头部
-        rawClientData: decrypted.slice(headerEnd + 2),
+        // [优化] 原始客户端数据 = 解密后去掉头部的剩余部分
+        // 使用 subarray 返回视图，避免对潜在的大包进行二次复制
+        rawClientData: decrypted.subarray(headerEnd + 2),
         protocol: 'mandala'
     };
 }
