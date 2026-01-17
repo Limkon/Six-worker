@@ -4,13 +4,13 @@ import { textDecoder, stringifyUUID } from '../utils/helpers.js';
 export async function processVlessHeader(vlessBuffer, expectedUserIDs) {
     if (vlessBuffer.byteLength < 24) return { hasError: true, message: "Buffer too short" };
     
-    // [修复] 防止 Uint8Array 导致 DataView 崩溃
     const buffer = vlessBuffer instanceof Uint8Array ? vlessBuffer : new Uint8Array(vlessBuffer);
     
     const version = buffer[0];
     if (version !== 0) return { hasError: true, message: "Invalid VLESS version" };
     
-    const uuid = stringifyUUID(buffer.slice(1, 17));
+    // [优化] slice -> subarray
+    const uuid = stringifyUUID(buffer.subarray(1, 17));
     if (!expectedUserIDs.map(id => id.toLowerCase()).includes(uuid)) {
         return { hasError: true, message: "Invalid VLESS user" };
     }
@@ -24,7 +24,6 @@ export async function processVlessHeader(vlessBuffer, expectedUserIDs) {
     const portIndex = 19 + optLength;
     if (buffer.byteLength < portIndex + 2) return { hasError: true, message: "Buffer too short" };
 
-    // [修复] 使用 buffer.buffer
     const portRemote = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength).getUint16(portIndex, false);
     
     let addressIndex = portIndex + 2;
@@ -37,12 +36,12 @@ export async function processVlessHeader(vlessBuffer, expectedUserIDs) {
     switch (addressType) {
         case CONSTANTS.ADDRESS_TYPE_IPV4: 
             addressLength = 4; 
-            addressRemote = buffer.slice(addressIndex, addressIndex + 4).join('.'); 
+            addressRemote = buffer.subarray(addressIndex, addressIndex + 4).join('.'); 
             break;
         case CONSTANTS.ADDRESS_TYPE_URL: 
             addressLength = buffer[addressIndex]; 
             addressIndex++; 
-            addressRemote = textDecoder.decode(buffer.slice(addressIndex, addressIndex + addressLength)); 
+            addressRemote = textDecoder.decode(buffer.subarray(addressIndex, addressIndex + addressLength)); 
             break;
         case CONSTANTS.ADDRESS_TYPE_IPV6: 
             addressLength = 16;
@@ -57,5 +56,6 @@ export async function processVlessHeader(vlessBuffer, expectedUserIDs) {
     
     if (!addressRemote) return { hasError: true, message: "VLESS address is empty" };
     
+    // cloudflareVersion 仅 2 字节，创建一个新的 Uint8Array 开销很小，可以保留
     return { hasError: false, addressRemote, addressType, portRemote, isUDP, rawDataIndex: addressIndex + addressLength, cloudflareVersion: new Uint8Array([version]) };
 }
