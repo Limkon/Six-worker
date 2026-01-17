@@ -2,7 +2,8 @@ import { CONSTANTS } from '../constants.js';
 import { textDecoder } from '../utils/helpers.js';
 
 export const parseAddressAndPort = (buffer, offset, addrType) => {
-    const bufferView = new Uint8Array(buffer);
+    // [优化] 如果 buffer 已经是 Uint8Array，直接使用，避免复制
+    const bufferView = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
     let addressLength;
     
     if (addrType === CONSTANTS.ATYP_SS_DOMAIN) { // Domain
@@ -22,6 +23,7 @@ export const parseAddressAndPort = (buffer, offset, addrType) => {
         return { hasError: true, message: 'Buffer too short for address' };
     }
     
-    const targetAddrBytes = bufferView.slice(offset, newOffset);
+    // [优化] 使用 subarray 返回视图，避免内存复制
+    const targetAddrBytes = bufferView.subarray(offset, newOffset);
     return { hasError: false, targetAddrBytes, dataOffset: newOffset };
 };
