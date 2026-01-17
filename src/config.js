@@ -1,7 +1,7 @@
 /**
  * 文件名: src/config.js
  * 修改内容: 
- * 1. [新增] 导出 cleanConfigCache 函数，用于在修改配置后手动清除全局缓存。
+ * 1. [修复] getConfig 中 KV.get 返回 null 导致默认值失效的问题 (解决 "null 配置设置" 显示错误)。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -45,7 +45,14 @@ export async function loadRemoteConfig(env) {
 export async function getConfig(env, key, defaultValue = undefined) {
     let val = undefined;
     // 优先读取 KV
-    if (env.KV) val = await env.KV.get(key);
+    if (env.KV) {
+        const kvVal = await env.KV.get(key);
+        // [修复] 只有当 KV 返回非 null 值时才赋值，避免 null 覆盖 undefined 导致后续 fallback 逻辑和默认值失效
+        if (kvVal !== null) {
+            val = kvVal;
+        }
+    }
+
     // 其次读取远程配置缓存
     if (!val && remoteConfigCache && remoteConfigCache[key]) val = remoteConfigCache[key];
     // 最后读取环境变量
