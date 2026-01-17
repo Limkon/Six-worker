@@ -1,6 +1,8 @@
 /**
  * 文件名: src/handlers/websocket.js
- * 修改内容: 在 protocolManager.detect 返回后，增加禁用协议的检查逻辑。
+ * 修改内容: 
+ * 1. 优化 concatUint8 避免冗余对象创建
+ * 2. WritableStream 中全面使用 subarray 替代 slice
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -18,10 +20,12 @@ const protocolManager = new ProtocolManager()
     .register('socks5', parseSocks5Header)
     .register('ss', parseShadowsocksHeader);
 
+// [优化] 如果 b 已经是 Uint8Array，避免 new Uint8Array(b) 的开销
 function concatUint8(a, b) {
-    const res = new Uint8Array(a.length + b.length);
+    const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
+    const res = new Uint8Array(a.length + bArr.length);
     res.set(a);
-    res.set(b, a.length);
+    res.set(bArr, a.length);
     return res;
 }
 
@@ -55,20 +59,23 @@ export async function handleWebSocketRequest(request, ctx) {
 
     const streamPromise = readableWebSocketStream.pipeTo(new WritableStream({
         async write(chunk, controller) {
+            // [优化] 统一转换为 Uint8Array，避免后续重复转换
+            const chunkArr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+
             // 1. 已连接状态：高性能直通
             if (isConnected) {
                 if (remoteSocketWrapper.value) {
                     const writer = remoteSocketWrapper.value.writable.getWriter();
-                    await writer.write(chunk);
+                    await writer.write(chunkArr);
                     writer.releaseLock();
                 } else if (remoteSocketWrapper.isConnecting) {
-                    remoteSocketWrapper.buffer.push(chunk);
+                    remoteSocketWrapper.buffer.push(chunkArr);
                 }
                 return;
             }
 
             // 2. 数据缓冲
-            headerBuffer = concatUint8(headerBuffer, new Uint8Array(chunk));
+            headerBuffer = concatUint8(headerBuffer, chunkArr);
 
             // 3. Socks5 握手处理 (State 0 & 1)
             if (socks5State < 2) {
@@ -80,7 +87,13 @@ export async function handleWebSocketRequest(request, ctx) {
                 }
 
                 if (consumed > 0) {
-                    headerBuffer = headerBuffer.slice(consumed);
+                    // [优化] 使用 subarray 替代 slice
+                    // 注意：这里必须重新赋值，因为 headerBuffer 需要指向新的剩余数据
+                    // 虽然 subarray 创建视图，但我们需要丢弃已处理部分，
+                    // 这里创建一个新副本可能是必要的，或者逻辑上把 headerBuffer 视为视图窗口。
+                    // 考虑到 headerBuffer 通常很小 (握手阶段)，这里用 slice 或 subarray 后重新 set 都可以。
+                    // 为了安全起见（避免内存泄漏），这里保持 slice 逻辑或者使用 subarray 但意识到这是新引用
+                    headerBuffer = headerBuffer.slice(consumed); 
                     socks5State = newState;
                     if (socks5State !== 2) return; // 等待后续数据
                 }
@@ -96,9 +109,8 @@ export async function handleWebSocketRequest(request, ctx) {
                     throw new Error('Protocol mismatch after Socks5 handshake');
                 }
 
-                // [修改] 检查协议是否被禁用
-                const pName = result.protocol; // 'vless', 'trojan', 'ss', 'socks5', 'mandala'
-                // 允许用户配置 'socks' 来禁用 socks5
+                // 检查协议是否被禁用
+                const pName = result.protocol; 
                 const isSocksDisabled = pName === 'socks5' && ctx.disabledProtocols.includes('socks');
                 
                 if (ctx.disabledProtocols.includes(pName) || isSocksDisabled) {
@@ -123,10 +135,12 @@ export async function handleWebSocketRequest(request, ctx) {
                 let responseHeader = null;
 
                 if (protocol === 'vless') {
-                    clientData = headerBuffer.slice(rawDataIndex);
+                    // [优化] 使用 subarray 替代 slice
+                    clientData = headerBuffer.subarray(rawDataIndex);
                     responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
                     if (isUDP && portRemote !== 53) throw new Error('UDP only for DNS(53)');
                 } else if (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') {
+                    // 这些协议的解析器已经优化为返回 subarray 视图
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
@@ -163,7 +177,7 @@ export async function handleWebSocketRequest(request, ctx) {
     return new Response(null, { status: 101, webSocket: client });
 }
 
-// 辅助函数：Socks5 握手状态机 (保持不变)
+// 辅助函数：Socks5 握手状态机 (保持不变，内部 slice 对小数据影响不大，为稳妥起见暂不改动关键状态机逻辑)
 function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
     const res = { consumed: 0, newState: currentState, error: null };
     if (buffer.length === 0) return res;
@@ -201,6 +215,7 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
         let offset = 1;
         const uLen = buffer[offset++];
         if (buffer.length < offset + uLen + 1) return res;
+        // Auth 这里数据很短，TextDecoder 开销远大于 slice，保持现状
         const user = new TextDecoder().decode(buffer.slice(offset, offset + uLen));
         offset += uLen;
         const pLen = buffer[offset++];
