@@ -1,8 +1,9 @@
 /**
  * 文件名: src/handlers/outbound.js
- * 修复说明:
- * 1. [Critical Fix] createUnifiedConnection: 修复当 ctx.proxyIP 为空时，proxyAttempts 列表为空导致无法连接默认 IP 的严重 Bug。
- * 2. [Critical Fix] 保持 retry 逻辑中重发 rawClientData 的修复。
+ * 修改内容:
+ * 1. [优化] Socks5 连接加入超时控制 (通过 Promise.race 竞态 doConnect)
+ * 2. [优化] remoteSocketToWS 移除 Blob 操作，使用 Uint8Array 手动拼接，提升转发性能
+ * 3. [保留] ProxyIP 回退逻辑修复 & 重试重发数据修复
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -126,17 +127,27 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 
     const connectAndWrite = async (host, port, isSocks) => {
         log(`[connect] Target: ${host}:${port} (Socks: ${isSocks})`);
+        
         const doConnect = async () => {
              if (isSocks) {
+                // socks5Connect 包含多次 IO 等待，本身可能耗时较长
                 return await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
             } else {
+                // connect 返回的是 socket 对象，需要进一步 wait .opened
                 return connect({ hostname: host, port: port });
             }
         };
-        const remote = doConnect();
+
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Connect timeout')), CONNECT_TIMEOUT_MS));
-        const socket = await remote;
-        if (!isSocks) await Promise.race([socket.opened, timeoutPromise]);
+
+        // [优化] 将 SOCKS 的握手过程也放入竞态，防止挂死
+        // 如果是 Direct，doConnect 立即返回 socket，随后进入下面的 opened 竞态
+        const socket = await Promise.race([doConnect(), timeoutPromise]);
+        
+        if (!isSocks) {
+            // Direct connection: 等待 TCP 握手完成
+            await Promise.race([socket.opened, timeoutPromise]);
+        }
         return socket;
     };
 
@@ -218,7 +229,13 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
                     return;
                 }
                 if (responseHeader) {
-                    webSocket.send(await new Blob([responseHeader, chunk]).arrayBuffer());
+                    // [优化] 移除 Blob，使用 Uint8Array 拼接，减少开销
+                    const header = responseHeader;
+                    const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+                    const combined = new Uint8Array(header.length + data.length);
+                    combined.set(header);
+                    combined.set(data, header.length);
+                    webSocket.send(combined);
                     responseHeader = null;
                 } else {
                     webSocket.send(chunk);
