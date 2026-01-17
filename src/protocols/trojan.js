@@ -48,6 +48,7 @@ export async function parseTrojanHeader(trojanBuffer, password) {
         case CONSTANTS.ATYP_TROJAN_DOMAIN: 
             const domainLen = requestView.getUint8(2); 
             addressEndIndex = 3 + domainLen; 
+            // [优化] 使用 subarray
             host = textDecoder.decode(requestData.subarray(3, addressEndIndex)); 
             break;
         case CONSTANTS.ATYP_TROJAN_IPV6: 
