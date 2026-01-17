@@ -1,8 +1,8 @@
 /**
  * 文件名: src/handlers/websocket.js
  * 修改内容: 
- * 1. 优化 concatUint8 避免冗余对象创建
- * 2. WritableStream 中全面使用 subarray 替代 slice
+ * 1. [性能优化] 实现持久化 Writer 锁，避免每包数据重复 getWriter/releaseLock，显著提升吞吐量。
+ * 2. [稳健性] 增加对 Socket 变更(重试)的自动检测和 Writer 更新逻辑。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -20,7 +20,6 @@ const protocolManager = new ProtocolManager()
     .register('socks5', parseSocks5Header)
     .register('ss', parseShadowsocksHeader);
 
-// [优化] 如果 b 已经是 Uint8Array，避免 new Uint8Array(b) 的开销
 function concatUint8(a, b) {
     const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
     const res = new Uint8Array(a.length + bArr.length);
@@ -40,13 +39,15 @@ export async function handleWebSocketRequest(request, ctx) {
     let socks5State = 0; 
     let headerBuffer = new Uint8Array(0); 
     
-    // 常量配置
-    const MAX_HEADER_BUFFER = 4096; // 4KB 防御大包攻击
-    const DETECT_TIMEOUT_MS = 10000; // 10秒 协议检测超时
+    // [优化] 持久化 Writer 状态变量
+    let activeWriter = null;
+    let activeSocket = null;
+    
+    const MAX_HEADER_BUFFER = 4096; 
+    const DETECT_TIMEOUT_MS = 10000; 
 
     const log = (info, event) => console.log(`[WS] ${info}`, event || '');
 
-    // 超时熔断器
     const timeoutTimer = setTimeout(() => {
         if (!isConnected) {
             log('Timeout: Protocol detection took too long');
@@ -59,47 +60,54 @@ export async function handleWebSocketRequest(request, ctx) {
 
     const streamPromise = readableWebSocketStream.pipeTo(new WritableStream({
         async write(chunk, controller) {
-            // [优化] 统一转换为 Uint8Array，避免后续重复转换
             const chunkArr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
 
-            // 1. 已连接状态：高性能直通
+            // 1. 已连接状态：高性能直通 (核心优化区域)
             if (isConnected) {
-                if (remoteSocketWrapper.value) {
-                    const writer = remoteSocketWrapper.value.writable.getWriter();
-                    await writer.write(chunkArr);
-                    writer.releaseLock();
+                // [优化] 检测 Socket 是否发生变化 (例如触发了重试逻辑，Socket对象会被替换)
+                if (activeSocket !== remoteSocketWrapper.value) {
+                    // 如果存在旧的 Writer，先释放锁
+                    if (activeWriter) {
+                        try { activeWriter.releaseLock(); } catch(e) {}
+                        activeWriter = null;
+                    }
+                    
+                    // 更新当前激活的 Socket
+                    activeSocket = remoteSocketWrapper.value;
+                    
+                    // 获取新 Socket 的 Writer
+                    if (activeSocket) {
+                        activeWriter = activeSocket.writable.getWriter();
+                    }
+                }
+
+                if (activeWriter) {
+                    // [优化] 直接使用持有的 Writer 写入，无需重复 getWriter/releaseLock
+                    await activeWriter.write(chunkArr);
                 } else if (remoteSocketWrapper.isConnecting) {
                     remoteSocketWrapper.buffer.push(chunkArr);
                 }
                 return;
             }
 
-            // 2. 数据缓冲
+            // 2. 数据缓冲 (以下逻辑保持不变)
             headerBuffer = concatUint8(headerBuffer, chunkArr);
 
-            // 3. Socks5 握手处理 (State 0 & 1)
+            // 3. Socks5 握手处理
             if (socks5State < 2) {
                 const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
-                
                 if (error) {
                     clearTimeout(timeoutTimer); 
                     throw new Error(error);
                 }
-
                 if (consumed > 0) {
-                    // [优化] 使用 subarray 替代 slice
-                    // 注意：这里必须重新赋值，因为 headerBuffer 需要指向新的剩余数据
-                    // 虽然 subarray 创建视图，但我们需要丢弃已处理部分，
-                    // 这里创建一个新副本可能是必要的，或者逻辑上把 headerBuffer 视为视图窗口。
-                    // 考虑到 headerBuffer 通常很小 (握手阶段)，这里用 slice 或 subarray 后重新 set 都可以。
-                    // 为了安全起见（避免内存泄漏），这里保持 slice 逻辑或者使用 subarray 但意识到这是新引用
-                    headerBuffer = headerBuffer.slice(consumed); 
+                    headerBuffer = headerBuffer.slice(consumed);
                     socks5State = newState;
-                    if (socks5State !== 2) return; // 等待后续数据
+                    if (socks5State !== 2) return; 
                 }
             }
 
-            // 4. 协议探测 (Vless / Trojan / Mandala / Socks5 CMD)
+            // 4. 协议探测
             if (headerBuffer.length === 0) return;
 
             try {
@@ -109,7 +117,6 @@ export async function handleWebSocketRequest(request, ctx) {
                     throw new Error('Protocol mismatch after Socks5 handshake');
                 }
 
-                // 检查协议是否被禁用
                 const pName = result.protocol; 
                 const isSocksDisabled = pName === 'socks5' && ctx.disabledProtocols.includes('socks');
                 
@@ -130,17 +137,14 @@ export async function handleWebSocketRequest(request, ctx) {
                     throw new Error(`Blocked: ${addressRemote}`);
                 }
 
-                // 准备 Client Data
                 let clientData = headerBuffer; 
                 let responseHeader = null;
 
                 if (protocol === 'vless') {
-                    // [优化] 使用 subarray 替代 slice
                     clientData = headerBuffer.subarray(rawDataIndex);
                     responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
                     if (isUDP && portRemote !== 53) throw new Error('UDP only for DNS(53)');
                 } else if (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') {
-                    // 这些协议的解析器已经优化为返回 subarray 视图
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
@@ -148,26 +152,33 @@ export async function handleWebSocketRequest(request, ctx) {
                     socks5State = 3;
                 }
 
-                // 释放内存
                 headerBuffer = null; 
 
                 handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
 
             } catch (e) {
-                // [缓冲策略]
                 if (headerBuffer && headerBuffer.length < 512 && headerBuffer.length < MAX_HEADER_BUFFER) {
                     return; 
                 }
-                
                 clearTimeout(timeoutTimer);
                 log(`Detection failed: ${e.message}`);
                 safeCloseWebSocket(webSocket);
             }
         },
-        close() { log("Client WebSocket closed"); },
-        abort(reason) { log("WebSocket aborted", reason); safeCloseWebSocket(webSocket); },
+        // [优化] 流关闭时释放 Writer 锁
+        close() { 
+            if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
+            log("Client WebSocket closed"); 
+        },
+        abort(reason) { 
+            if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
+            log("WebSocket aborted", reason); 
+            safeCloseWebSocket(webSocket); 
+        },
     })).catch((err) => {
         clearTimeout(timeoutTimer);
+        // 异常时也要确保释放锁
+        if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
         log("Stream processing failed", err.toString());
         safeCloseWebSocket(webSocket);
     });
@@ -177,7 +188,7 @@ export async function handleWebSocketRequest(request, ctx) {
     return new Response(null, { status: 101, webSocket: client });
 }
 
-// 辅助函数：Socks5 握手状态机 (保持不变，内部 slice 对小数据影响不大，为稳妥起见暂不改动关键状态机逻辑)
+// ... tryHandleSocks5Handshake 和 makeReadableWebSocketStream 保持原有逻辑不变 ...
 function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
     const res = { consumed: 0, newState: currentState, error: null };
     if (buffer.length === 0) return res;
@@ -215,7 +226,6 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
         let offset = 1;
         const uLen = buffer[offset++];
         if (buffer.length < offset + uLen + 1) return res;
-        // Auth 这里数据很短，TextDecoder 开销远大于 slice，保持现状
         const user = new TextDecoder().decode(buffer.slice(offset, offset + uLen));
         offset += uLen;
         const pLen = buffer[offset++];
