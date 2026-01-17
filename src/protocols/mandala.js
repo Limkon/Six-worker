@@ -11,14 +11,15 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         return { hasError: true, message: 'Mandala buffer too short' };
     }
 
+    // [优化] 避免不必要的包装
     const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
 
     // 2. 提取随机盐 (前4字节)
-    // [优化] 使用 subarray 避免不必要的内存复制 (虽然此处只有4字节，但保持一致的视图操作是个好习惯)
+    // [优化] 使用 subarray
     const salt = buffer.subarray(0, 4);
 
-    // 3. 异或解密 (XOR) - 仅解密头部潜在的最大范围，避免性能损耗
-    // 这里我们解密整个 chunk，因为 payload 也可能包含在内
+    // 3. 异或解密 (XOR)
+    // 这里必须创建新内存，因为要写入解密数据。
     const decrypted = new Uint8Array(buffer.length - 4);
     
     // [优化] 循环中使用位运算 & 3 代替模运算 % 4，提升微小但密集的计算性能
@@ -36,7 +37,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
 
     let receivedHash;
     try {
-        // [优化] 使用 subarray 创建视图而非 slice 复制内存，减少 GC 压力
+        // [优化] 使用 subarray 创建视图而非 slice 复制内存
         receivedHash = textDecoder.decode(decrypted.subarray(0, 56));
     } catch (e) {
         return { hasError: true, message: 'Mandala hash decode failed' };
@@ -58,9 +59,8 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     cursor++;
 
     // 7. 解析地址 (ATYP + Addr)
-    // parseAddressAndPort 需要传入 buffer, offset (指向ATYP的下一位), atyp
-    // 注意：我们要传 decrypted buffer
     const atyp = decrypted[cursor];
+    // 注意：decrypted 是全新创建的 Uint8Array，byteOffset 为 0，直接传入 buffer 安全
     const addrResult = parseAddressAndPort(decrypted.buffer, cursor + 1, atyp);
     
     if (addrResult.hasError) return addrResult;
@@ -78,7 +78,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         return { hasError: true, message: 'Missing CRLF' };
     }
 
-    // 10. 还原目标地址字符串 (用于日志和连接)
+    // 10. 还原目标地址字符串
     let addressRemote = "";
     switch (atyp) {
         case CONSTANTS.ADDRESS_TYPE_IPV4:
@@ -103,8 +103,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         portRemote: port,
         addressType: atyp,
         isUDP: false,
-        // [优化] 原始客户端数据 = 解密后去掉头部的剩余部分
-        // 使用 subarray 返回视图，避免对潜在的大包进行二次复制
+        // [优化] 返回解密后剩余数据的视图，不进行拷贝
         rawClientData: decrypted.subarray(headerEnd + 2),
         protocol: 'mandala'
     };
