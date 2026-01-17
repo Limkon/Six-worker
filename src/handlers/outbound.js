@@ -1,9 +1,9 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修改内容:
- * 1. [优化] Socks5 连接加入超时控制 (通过 Promise.race 竞态 doConnect)
- * 2. [优化] remoteSocketToWS 移除 Blob 操作，使用 Uint8Array 手动拼接，提升转发性能
- * 3. [保留] ProxyIP 回退逻辑修复 & 重试重发数据修复
+ * 1. [性能优化] Fail-Fast: 连接超时从 5000ms 降至 2500ms，加速故障切换。
+ * 2. [性能优化] remoteSocketToWS 保持移除 Blob 的高效实现。
+ * 3. [稳定性] 保留 Socks5 超时控制和 ProxyIP 列表修复。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -122,7 +122,9 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 }
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress) {
-    const CONNECT_TIMEOUT_MS = 5000;
+    // [优化] 缩短超时时间，加快故障转移速度
+    const CONNECT_TIMEOUT_MS = 2500;
+    
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
 
     const connectAndWrite = async (host, port, isSocks) => {
@@ -130,18 +132,17 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         
         const doConnect = async () => {
              if (isSocks) {
-                // socks5Connect 包含多次 IO 等待，本身可能耗时较长
+                // socks5Connect 包含多次 IO 等待
                 return await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
             } else {
-                // connect 返回的是 socket 对象，需要进一步 wait .opened
+                // connect 返回 socket 对象
                 return connect({ hostname: host, port: port });
             }
         };
 
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Connect timeout')), CONNECT_TIMEOUT_MS));
 
-        // [优化] 将 SOCKS 的握手过程也放入竞态，防止挂死
-        // 如果是 Direct，doConnect 立即返回 socket，随后进入下面的 opened 竞态
+        // [优化] 竞态超时控制
         const socket = await Promise.race([doConnect(), timeoutPromise]);
         
         if (!isSocks) {
@@ -171,7 +172,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         if (ctx.proxyIP) {
             proxyAttempts.push(ctx.proxyIP);
         } else {
-            // 如果 ctx.proxyIP 为空，必须加入默认 IP，否则列表为空将导致 Phase 2 被跳过
+            // 如果 ctx.proxyIP 为空，必须加入默认 IP
             proxyAttempts.push(CONSTANTS.DEFAULT_PROXY_IP);
         }
 
@@ -302,10 +303,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             }
         }
         
-        // 去重
         attempts = [...new Set(attempts)].filter(Boolean);
-        
-        // [关键] 如果列表为空（例如 ProxyIP 未配置），加入默认 IP 作为保底
         if (attempts.length === 0) attempts.push(CONSTANTS.DEFAULT_PROXY_IP);
 
         for (const ip of attempts) {
@@ -317,7 +315,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 remoteSocketWrapper.value = proxySocket;
                 remoteSocketWrapper.isConnecting = false;
                 
-                // [Fix] 重发数据
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) {
                     await writer.write(rawClientData);
