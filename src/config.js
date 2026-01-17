@@ -1,28 +1,34 @@
 /**
  * 文件名: src/config.js
  * 修改内容: 
- * 1. [修复] getConfig 中 KV.get 返回 null 导致默认值失效的问题 (解决 "null 配置设置" 显示错误)。
+ * 1. [性能优化] 引入 configCache 全局缓存对象，极大减少 KV/Env 读取次数，消除热启动延迟。
+ * 2. [代码简化] 重构 initializeContext，移除冗余的手动缓存逻辑，利用 getConfig 自动缓存。
+ * 3. [保留修复] 保留 KV.get 返回 null 的判断逻辑。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
 
+// [优化] 内存缓存对象
+let configCache = {};
 let remoteConfigCache = {};
-let globalConfigCache = null; // 全局内存缓存变量
 
-// [新增] 清除全局缓存函数
+// [新增] 清除全局缓存函数 (供管理面板或清理逻辑调用)
 export function cleanConfigCache() {
-    globalConfigCache = null;
+    configCache = {};
+    remoteConfigCache = {};
     // console.log('Global config cache cleaned.');
 }
 
 export async function loadRemoteConfig(env) {
+    // 优先从缓存读取 URL，避免重复 KV 操作 (如果 getConfig 未被调用过)
+    // 注意：这里我们直接用 KV.get 以免循环依赖，或者假设 getConfig 已处理
     const remoteConfigUrl = await env.KV.get('REMOTE_CONFIG_URL');
+    
     if (remoteConfigUrl) {
         try {
             const response = await fetch(remoteConfigUrl);
             if (response.ok) {
                 const text = await response.text();
-                // 尝试解析 JSON，失败则解析 KEY=VALUE
                 try {
                     remoteConfigCache = JSON.parse(text);
                 } catch (e) {
@@ -43,8 +49,14 @@ export async function loadRemoteConfig(env) {
 }
 
 export async function getConfig(env, key, defaultValue = undefined) {
+    // 1. [优化] 优先检查内存缓存
+    if (configCache[key] !== undefined) {
+        return configCache[key];
+    }
+
     let val = undefined;
-    // 优先读取 KV
+    
+    // 2. 读取 KV
     if (env.KV) {
         const kvVal = await env.KV.get(key);
         // [修复] 只有当 KV 返回非 null 值时才赋值，避免 null 覆盖 undefined 导致后续 fallback 逻辑和默认值失效
@@ -53,73 +65,30 @@ export async function getConfig(env, key, defaultValue = undefined) {
         }
     }
 
-    // 其次读取远程配置缓存
+    // 3. 读取远程配置缓存
     if (!val && remoteConfigCache && remoteConfigCache[key]) val = remoteConfigCache[key];
-    // 最后读取环境变量
+    
+    // 4. 读取环境变量
     if (!val && env[key]) val = env[key];
     
-    // 兼容旧的 UUID/KEY 命名
+    // 5. 兼容旧的 UUID/KEY 命名
     if (!val && key === 'UUID') val = env.UUID || env.uuid || env.PASSWORD || env.pswd || CONSTANTS.SUPER_PASSWORD;
     if (!val && key === 'KEY') val = env.KEY || env.TOKEN;
-    return val !== undefined ? val : defaultValue;
+    
+    const finalVal = val !== undefined ? val : defaultValue;
+
+    // 6. [优化] 写入缓存 (Worker 实例存活期间有效)
+    configCache[key] = finalVal;
+
+    return finalVal;
 }
 
 export async function initializeContext(request, env) {
     // [可选] 启用远程配置加载。如果需要启用，取消下行注释。
     // await loadRemoteConfig(env);
 
-    // 1. [优化] 优先检查全局内存缓存
-    let configData = globalConfigCache;
-
-    // 如果没有缓存 (冷启动或被清除)，则执行并行读取
-    if (!configData) {
-        const [
-            adminPass,
-            rawUUID,
-            rawKey,
-            timeDaysStr,
-            updateHourStr,
-            proxyIPStr,
-            dns64,
-            socks5Addr,
-            go2socksStr,
-            banStr,
-            disStrRaw
-        ] = await Promise.all([
-            getConfig(env, 'ADMIN_PASS'),
-            getConfig(env, 'UUID'),
-            getConfig(env, 'KEY'),
-            getConfig(env, 'TIME'),
-            getConfig(env, 'UPTIME'),
-            getConfig(env, 'PROXYIP'),
-            getConfig(env, 'DNS64'),
-            getConfig(env, 'SOCKS5'),
-            getConfig(env, 'GO2SOCKS5'),
-            getConfig(env, 'BAN'),
-            getConfig(env, 'DIS', '')
-        ]);
-
-        // 将读取结果存入对象
-        configData = {
-            adminPass,
-            rawUUID,
-            rawKey,
-            timeDaysStr,
-            updateHourStr,
-            proxyIPStr,
-            dns64,
-            socks5Addr,
-            go2socksStr,
-            banStr,
-            disStrRaw
-        };
-
-        // 写入全局缓存 (Worker 实例存活期间有效)
-        globalConfigCache = configData;
-    }
-
-    // 2. 从缓存数据中解构配置
-    const {
+    // 1. [优化] 并行读取配置 (getConfig 内部已集成缓存，热启动时瞬间返回)
+    const [
         adminPass,
         rawUUID,
         rawKey,
@@ -131,15 +100,27 @@ export async function initializeContext(request, env) {
         go2socksStr,
         banStr,
         disStrRaw
-    } = configData;
+    ] = await Promise.all([
+        getConfig(env, 'ADMIN_PASS'),
+        getConfig(env, 'UUID'),
+        getConfig(env, 'KEY'),
+        getConfig(env, 'TIME'),
+        getConfig(env, 'UPTIME'),
+        getConfig(env, 'PROXYIP'),
+        getConfig(env, 'DNS64'),
+        getConfig(env, 'SOCKS5'),
+        getConfig(env, 'GO2SOCKS5'),
+        getConfig(env, 'BAN'),
+        getConfig(env, 'DIS', '')
+    ]);
 
-    // 3. 构建上下文
+    // 2. 构建上下文
     const ctx = {
         userID: '', 
         dynamicUUID: '', 
         userIDLow: '', 
         proxyIP: '', 
-        proxyIPList: [], // [保留] 存储完整列表
+        proxyIPList: [], 
         dns64: dns64 || '', 
         socks5: socks5Addr || '', 
         go2socks5: [], 
@@ -164,10 +145,10 @@ export async function initializeContext(request, env) {
         ctx.dynamicUUID = seed;
     }
 
-    // 处理 ProxyIP (保留列表逻辑)
+    // 处理 ProxyIP
     if (proxyIPStr) { 
         const list = await cleanList(proxyIPStr); 
-        ctx.proxyIPList = list; // [保留]
+        ctx.proxyIPList = list; 
         ctx.proxyIP = list[Math.floor(Math.random() * list.length)] || ''; 
     }
 
