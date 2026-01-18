@@ -1,14 +1,15 @@
 /**
  * 文件名: src/templates/admin.js
- * 说明: 存放管理后台 (配置编辑、优选IP) 相关的 HTML 模板
+ * 说明: 前端模板文件，配合 admin.js 的文本格式验证进行更新
  */
 
 export function getAdminConfigHtml(FileName, formHtml) {
+    // [修改] 更新前端 JavaScript 验证逻辑：校验 Name URL 格式
     return `<!DOCTYPE html><html><head><title>配置管理</title><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><style>body{background-color:#f8f9fa}.container{max-width:800px;margin-top:20px;margin-bottom:20px;background-color:#fff;padding:2rem;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,.05)}.form-text{font-size:0.875em}.env-hint{font-size:0.8em;color:#6c757d;margin-top:4px}code{color:#d63384}.btn-group{gap:10px}.save-status{margin-left:15px;color:#666}textarea{font-family:monospace;font-size:0.9em}</style></head><body><div class="container">` +
     `<h2>${FileName} 配置设置</h2>` +
     '<p>在此页面修改的配置将保存在KV中, 优先级: <b>KV > 环境变量</b>。如果某项留空并保存, 则该项配置将回退到使用下级配置或默认值。</p>' +
     '<form id="config-form">' + formHtml + '<div class="btn-group"><button type="button" class="btn btn-secondary" onclick="goBack()">返回配置页</button><button type="button" class="btn btn-info" onclick="goBestIP()">在线优选IP</button><button type="submit" class="btn btn-primary" id="save-btn">保存所有配置</button><span class="save-status" id="saveStatus"></span></div></form>' +
-    '<script>function goBack(){const e=window.location.pathname.substring(0,window.location.pathname.lastIndexOf("/"));window.location.href=e+"/"}function goBestIP(){window.location.href=window.location.pathname.replace("/edit","/bestip")}document.getElementById("config-form").addEventListener("submit",function(e){e.preventDefault();const t=document.getElementById("save-btn"),n=document.getElementById("saveStatus"),o=new FormData(this),a=o.get("BESTIP_SOURCES");if(a)try{JSON.parse(a)}catch(e){return alert("保存失败: BestIP IP源 不是有效的 JSON 格式。\\n"+(e.message||e)),n.textContent="保存出错: JSON 格式错误",void 0}t.disabled=!0,t.textContent="保存中...",n.textContent="",fetch(window.location.href,{method:"POST",body:o}).then(e=>{if(e.ok){const o=(new Date).toLocaleString();n.textContent="保存成功 "+o,alert("保存成功！部分设置可能需要几秒钟生效。")}else return e.text().then(e=>Promise.reject(e))}).catch(e=>{n.textContent="保存出错: "+e}).finally(()=>{t.disabled=!1,t.textContent="保存所有配置"})});</script></body></html>';
+    '<script>function goBack(){const e=window.location.pathname.substring(0,window.location.pathname.lastIndexOf("/"));window.location.href=e+"/"}function goBestIP(){window.location.href=window.location.pathname.replace("/edit","/bestip")}document.getElementById("config-form").addEventListener("submit",function(e){e.preventDefault();const t=document.getElementById("save-btn"),n=document.getElementById("saveStatus"),o=new FormData(this),a=o.get("BESTIP_SOURCES");if(a){const lines=a.split("\\n");for(let i=0;i<lines.length;i++){const line=lines[i].trim();if(!line)continue;const parts=line.split(/\\s+/);if(parts.length<2){return alert("保存失败: BestIP IP源 格式错误 (第"+(i+1)+"行)。\\n应为: 名称 网址"),n.textContent="保存出错: 格式错误",void 0}}}t.disabled=!0,t.textContent="保存中...",n.textContent="",fetch(window.location.href,{method:"POST",body:o}).then(e=>{if(e.ok){const o=(new Date).toLocaleString();n.textContent="保存成功 "+o,alert("保存成功！部分设置可能需要几秒钟生效。")}else return e.text().then(e=>Promise.reject(e))}).catch(e=>{n.textContent="保存出错: "+e}).finally(()=>{t.disabled=!1,t.textContent="保存所有配置"})});</script></body></html>';
 }
 
 export function getBestIPHtml(ipSourceOptions) {

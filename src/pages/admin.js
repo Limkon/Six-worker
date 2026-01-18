@@ -1,9 +1,11 @@
 /**
  * 文件名: src/pages/admin.js
  * 说明: 
- * 1. [修复] 保存配置后调用 cleanConfigCache() 清除内存缓存，确保新配置即时生效。
+ * 1. [修改] BESTIP_SOURCES 默认值仅保留 CF官方。
+ * 2. [修改] 配置项说明和验证逻辑适配文本格式 (名称 网址)。
+ * 3. [修复] handleBestIP 中默认加载源同步修改为单源。
  */
-import { getConfig, cleanConfigCache } from '../config.js'; // [修改] 引入 cleanConfigCache
+import { getConfig, cleanConfigCache } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
 import { cleanList } from '../utils/helpers.js';
 import { getAdminConfigHtml, getBestIPHtml } from '../templates/admin.js';
@@ -38,12 +40,9 @@ export async function handleEditConfig(request, env, ctx) {
         ['BAN', '禁止访问的域名', '禁止通过Worker代理访问的域名, 逗号隔开。', 'example.com,example.org', 'text'],
         ['URL302', '根路径跳转URL (302)', '访问根路径 / 时跳转到的地址。', 'https://github.com/', 'text'],
         ['URL', '根路径反代URL', '访问根路径 / 时反代的地址 (302优先)。', 'https://github.com/', 'text'],
-        ['BESTIP_SOURCES', 'BestIP IP源 (JSON)', '自定义BestIP页面的IP源列表 (JSON格式)。', JSON.stringify([
-            {"name": "CF官方", "url": "https://www.cloudflare.com/ips-v4/"},
-            {"name": "CM整理", "url": "https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR.txt"},
-            {"name": "AS13335", "url": "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/13335/ipv4-aggregated.txt"},
-            {"name": "AS209242", "url": "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/209242/ipv4-aggregated.txt"}
-        ], null, 2), 'textarea'],
+        // [修改] 格式说明改为文本格式，默认值只保留官方源
+        ['BESTIP_SOURCES', 'BestIP IP源', '自定义BestIP页面的IP源列表 (格式: 名称 网址，每行一个)。', 
+`CF官方 https://www.cloudflare.com/ips-v4/`, 'textarea'],
     ];
 
     // 处理 POST 保存请求
@@ -58,10 +57,15 @@ export async function handleEditConfig(request, env, ctx) {
                         savePromises.push(env.KV.delete(key));
                     } else {
                         if (key === 'BESTIP_SOURCES') {
-                            try {
-                                JSON.parse(value);
-                            } catch (e) {
-                                return new Response('保存失败: BestIP IP源 不是有效的 JSON 格式。\n' + e.message, { status: 400 });
+                            // [修改] 校验文本格式: 名称 网址
+                            const lines = value.split('\n');
+                            for (let i = 0; i < lines.length; i++) {
+                                const line = lines[i].trim();
+                                if (!line) continue;
+                                const parts = line.split(/\s+/);
+                                if (parts.length < 2) {
+                                    return new Response(`保存失败: BestIP IP源 格式错误 (第${i + 1}行)。应为: 名称 网址`, { status: 400 });
+                                }
                             }
                         }
                         savePromises.push(env.KV.put(key, value));
@@ -70,7 +74,6 @@ export async function handleEditConfig(request, env, ctx) {
             }
             await Promise.all(savePromises);
             
-            // [新增] 保存成功后清除内存缓存
             cleanConfigCache();
 
             return new Response('保存成功', { status: 200 });
@@ -110,7 +113,6 @@ export async function handleEditConfig(request, env, ctx) {
         formHtml += `<div class="mb-3"><label for="${key}" class="form-label">${label}</label>${inputField}<div class="form-text">${desc} (留空则使用环境变量或默认值)</div>${envHint}</div><hr>`;
     });
 
-    // 调用模板函数
     return new Response(getAdminConfigHtml(FileName, formHtml), { headers: { "Content-Type": "text/html;charset=utf-8" } });
 }
 
@@ -178,22 +180,35 @@ export async function handleBestIP(request, env) {
         }
     }
 
-    // 3. 处理 IP 源加载 API (保持不变)
+    // 3. 处理 IP 源加载 API
+    // [修改] 默认 IP 源只保留 CF 官方
     const defaultIpSources = [
-        {"name": "CF官方", "url": "https://www.cloudflare.com/ips-v4/"},
-        {"name": "CM整理", "url": "https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR.txt"},
-        {"name": "AS13335", "url": "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/13335/ipv4-aggregated.txt"},
-        {"name": "AS209242", "url": "https://raw.githubusercontent.com/ipverse/asn-ip/master/as/209242/ipv4-aggregated.txt"}
+        {"name": "CF官方", "url": "https://www.cloudflare.com/ips-v4/"}
     ];
     let ipSources = defaultIpSources;
     if (env.KV) {
         const kvData = await env.KV.get('BESTIP_SOURCES');
         const remoteData = await getConfig(env, 'BESTIP_SOURCES'); 
-        if (kvData || remoteData) {
+        const sourceData = kvData || remoteData;
+
+        if (sourceData) {
             try {
-                const parsedSources = JSON.parse(kvData || remoteData);
-                if (Array.isArray(parsedSources) && parsedSources.every(s => s.name && s.url)) {
-                    ipSources = parsedSources;
+                // [修改] 解析新格式，同时兼容旧的 JSON 格式 (如果用户未更新)
+                if (sourceData.trim().startsWith('[')) {
+                     try {
+                        const parsed = JSON.parse(sourceData);
+                        if (Array.isArray(parsed)) ipSources = parsed;
+                     } catch(e) {}
+                } else {
+                    const lines = sourceData.split('\n');
+                    const parsedSources = [];
+                    for (const line of lines) {
+                        const parts = line.trim().split(/\s+/);
+                        if (parts.length >= 2) {
+                            parsedSources.push({ name: parts[0], url: parts[1] });
+                        }
+                    }
+                    if (parsedSources.length > 0) ipSources = parsedSources;
                 }
             } catch (e) { console.error("解析 BESTIP_SOURCES 失败"); }
         }
@@ -207,7 +222,6 @@ export async function handleBestIP(request, env) {
                 let response;
                 const source = allIpSources.find(s => s.name === sourceName);
                 if (sourceName === '反代IP列表') {
-                    // 使用硬编码的白嫖列表作为示例
                     response = await fetch('https://raw.githubusercontent.com/cmliu/ACL4SSR/main/baipiao.txt');
                     const text = response.ok ? await response.text() : '';
                     return text.split('\n').map(l => l.trim()).filter(Boolean);
@@ -247,9 +261,7 @@ export async function handleBestIP(request, env) {
         return new Response(JSON.stringify({ ips }), { headers: { 'Content-Type': 'application/json' } });
     }
 
-    // 4. 渲染页面 HTML
     const ipSourceOptions = allIpSources.map(s => `<option value="${s.name}">${s.name}</option>`).join('\n');
     
-    // 调用模板函数
     return new Response(getBestIPHtml(ipSourceOptions), { headers: { 'Content-Type': 'text/html; charset=UTF-8' } });
 }
