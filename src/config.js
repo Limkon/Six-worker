@@ -1,10 +1,9 @@
 /**
  * 文件名: src/config.js
- * 修改内容: 
- * 1. [性能优化] 引入 configCache 全局缓存对象，极大减少 KV/Env 读取次数，消除热启动延迟。
- * 2. [代码简化] 重构 initializeContext，移除冗余的手动缓存逻辑，利用 getConfig 自动缓存。
- * 3. [保留修复] 保留 KV.get 返回 null 的判断逻辑。
- * 4. [修改] 处理 ProxyIP 逻辑，支持从 DEFAULT_PROXY_IP 加载多个硬编码 IP。
+ * 修改说明:
+ * 1. [修复] 在处理 ProxyIP 时，增加了显式的正则分割 logic (`split(/[,;\n]/)`)。
+ * 这确保了即使 `cleanList` 只支持换行，系统也能正确识别用逗号或分号分隔的 ProxyIP 列表。
+ * 2. 保持了对 HTTP 远程订阅地址的支持。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -13,16 +12,13 @@ import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.
 let configCache = {};
 let remoteConfigCache = {};
 
-// [新增] 清除全局缓存函数 (供管理面板或清理逻辑调用)
+// [新增] 清除全局缓存函数
 export function cleanConfigCache() {
     configCache = {};
     remoteConfigCache = {};
-    // console.log('Global config cache cleaned.');
 }
 
 export async function loadRemoteConfig(env) {
-    // 优先从缓存读取 URL，避免重复 KV 操作 (如果 getConfig 未被调用过)
-    // 注意：这里我们直接用 KV.get 以免循环依赖，或者假设 getConfig 已处理
     const remoteConfigUrl = await env.KV.get('REMOTE_CONFIG_URL');
     
     if (remoteConfigUrl) {
@@ -60,7 +56,6 @@ export async function getConfig(env, key, defaultValue = undefined) {
     // 2. 读取 KV
     if (env.KV) {
         const kvVal = await env.KV.get(key);
-        // [修复] 只有当 KV 返回非 null 值时才赋值，避免 null 覆盖 undefined 导致后续 fallback 逻辑和默认值失效
         if (kvVal !== null) {
             val = kvVal;
         }
@@ -78,17 +73,15 @@ export async function getConfig(env, key, defaultValue = undefined) {
     
     const finalVal = val !== undefined ? val : defaultValue;
 
-    // 6. [优化] 写入缓存 (Worker 实例存活期间有效)
+    // 6. [优化] 写入缓存
     configCache[key] = finalVal;
 
     return finalVal;
 }
 
 export async function initializeContext(request, env) {
-    // [可选] 启用远程配置加载。如果需要启用，取消下行注释。
-    // await loadRemoteConfig(env);
+    // await loadRemoteConfig(env); // 如需启用远程配置请取消注释
 
-    // 1. [优化] 并行读取配置 (getConfig 内部已集成缓存，热启动时瞬间返回)
     const [
         adminPass,
         rawUUID,
@@ -115,7 +108,6 @@ export async function initializeContext(request, env) {
         getConfig(env, 'DIS', '')
     ]);
 
-    // 2. 构建上下文
     const ctx = {
         userID: '', 
         dynamicUUID: '', 
@@ -133,7 +125,7 @@ export async function initializeContext(request, env) {
         adminPass: adminPass,
     };
 
-    // 处理 UUID (依赖时间计算，需每次执行)
+    // 处理 UUID
     ctx.userID = rawUUID;
     ctx.dynamicUUID = rawUUID;
     if (rawKey || (rawUUID && !isStrictV4UUID(rawUUID))) {
@@ -146,15 +138,22 @@ export async function initializeContext(request, env) {
         ctx.dynamicUUID = seed;
     }
 
-    // [修改] 处理 ProxyIP (支持硬编码默认值的多 IP 负载均衡)
+    // [核心修复] 处理 ProxyIP
     // 优先使用环境变量，如果没有则使用 CONSTANTS.DEFAULT_PROXY_IP
     const rawProxyIP = proxyIPStr || CONSTANTS.DEFAULT_PROXY_IP;
     
     if (rawProxyIP) { 
-        const list = await cleanList(rawProxyIP); 
-        ctx.proxyIPList = list; 
+        // 简单判断是否为 HTTP 远程订阅地址
+        if (rawProxyIP.startsWith('http')) {
+             const list = await cleanList(rawProxyIP); 
+             ctx.proxyIPList = list;
+        } else {
+             // [修复] 显式处理逗号(,)、分号(;)和换行(\n)，确保硬编码的多个 IP 被正确分割
+             ctx.proxyIPList = rawProxyIP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+        }
+
         // 随机选择一个作为主 IP
-        ctx.proxyIP = list[Math.floor(Math.random() * list.length)] || ''; 
+        ctx.proxyIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)] || ''; 
     }
 
     // 处理其他配置
@@ -173,7 +172,7 @@ export async function initializeContext(request, env) {
 
     ctx.enableXhttp = !ctx.disabledProtocols.includes('xhttp');
 
-    // 处理 URL 参数覆盖 (最高优先级)
+    // 处理 URL 参数覆盖
     const url = new URL(request.url);
     if (url.searchParams.has('proxyip')) ctx.proxyIP = url.searchParams.get('proxyip');
     if (url.searchParams.has('socks5')) ctx.socks5 = url.searchParams.get('socks5');
