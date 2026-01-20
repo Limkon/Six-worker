@@ -1,8 +1,8 @@
 /**
  * 文件名: src/handlers/xhttp.js
- * 修改说明:
- * 1. [优化] createUnifiedConnection 调用移除显式传入的 ctx.proxyIP，以启用 outbound.js 中的多 IP 重试逻辑。
- * 2. [保留] 增加对 ctx.banHosts 的检查。
+ * 修复说明:
+ * 1. [性能] 移除了 create_xhttp_downloader 和 upload_to_remote_xhttp 中的 setTimeout(r, 0) 节流逻辑。
+ * 该逻辑会严重限制大带宽下的吞吐量。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -148,7 +148,7 @@ async function upload_to_remote_xhttp(writer, httpx) {
             await writer.write(httpx.data);
         }
         
-        let chunkCount = 0;
+        // [修复] 移除节流逻辑
         while (!httpx.done) {
             const r = await httpx.reader.read(get_xhttp_buffer());
             if (r.done) break;
@@ -156,8 +156,6 @@ async function upload_to_remote_xhttp(writer, httpx) {
                 await writer.write(r.value);
             }
             httpx.done = r.done;
-            chunkCount++;
-            if (chunkCount % 10 === 0) await new Promise(r => setTimeout(r, 0));
         }
     } catch (error) {
         throw error;
@@ -196,14 +194,12 @@ function create_xhttp_downloader(resp, remote_readable) {
         const writer = stream.writable.getWriter();
         ;(async () => {
             try {
-                let chunkCount = 0;
+                // [修复] 移除节流逻辑
                 while (true) {
                     const r = await reader.read();
                     if (r.done) break;
                     lastActivity = Date.now();
                     await writer.write(r.value);
-                    chunkCount++;
-                    if (chunkCount % 5 === 0) await new Promise(r => setTimeout(r, 0));
                 }
                 await writer.close();
                 resolve();
@@ -227,12 +223,9 @@ function create_xhttp_downloader(resp, remote_readable) {
 }
 
 export async function handleXhttpClient(request, ctx) {
-    // 简单的并发控制
-    // if (ctx.activeConnections >= CONSTANTS.MAX_CONCURRENT) ...
-
     try {
         const result = await read_xhttp_header(request.body, ctx);
-        if (typeof result === 'string') return null; // 原代码这里是返回 null 或 undefined，由 index.js 处理
+        if (typeof result === 'string') return null; 
         
         const { hostname, port, atype, data, resp, reader, done } = result;
         const httpx = { hostname, port, atype, data, resp, reader, done };
@@ -242,7 +235,6 @@ export async function handleXhttpClient(request, ctx) {
             return null;
         }
 
-        // [优化] 移除最后一个参数 ctx.proxyIP，让 createUnifiedConnection 使用内部的列表重试逻辑
         const remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, console.log);
         
         const uploader = {
