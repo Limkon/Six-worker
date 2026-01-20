@@ -1,11 +1,8 @@
 /**
  * 文件名: src/handlers/outbound.js
- * 修改内容:
- * 1. [智能策略] 引入阶梯式超时 (Stepped Timeout): 
- * - 第1次尝试: 500ms (极速/Direct)
- * - 第2次尝试: 1500ms (快速重试/ProxyIP 1)
- * - 第3次+尝试: 2500ms (稳定兜底)
- * 2. [日志] 连接日志增加当前超时时间显示。
+ * 修复说明:
+ * 1. [修复] 修正了“阶梯式超时”策略过于激进的问题。原 500ms 超时会导致正常连接被中断并回落到慢速 ProxyIP。
+ * 调整为 [4000, 5000, 6000]，优先保证直连成功率，提升速度和稳定性。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -126,8 +123,8 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
     
-    // [智能策略] 定义超时阶梯: [第1次, 第2次, 第3次及以后]
-    const STEPPED_TIMEOUTS = [500, 1500, 2500];
+    // [修复] 调整超时策略，给予正常连接充足的时间 (4s)，避免过早回落到慢速 ProxyIP
+    const STEPPED_TIMEOUTS = [4000, 5000, 6000];
     let attemptCounter = 0;
 
     const connectAndWrite = async (host, port, isSocks) => {
@@ -158,7 +155,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     };
 
     // -----------------------------------------------------------
-    // Phase 1: Direct / Socks5 (Attempt #1 -> 500ms)
+    // Phase 1: Direct / Socks5 (Attempt #1 -> 4000ms)
     // -----------------------------------------------------------
     try {
         return await connectAndWrite(addressRemote, portRemote, useSocks);
@@ -167,7 +164,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
 
     // -----------------------------------------------------------
-    // Phase 2: ProxyIP Fallback (Attempt #2 -> 1500ms, Attempt #3 -> 2500ms...)
+    // Phase 2: ProxyIP Fallback (Attempt #2 -> 5000ms...)
     // -----------------------------------------------------------
     let proxyAttempts = [];
     if (fallbackAddress) {
@@ -204,7 +201,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     if (proxySocket) return proxySocket;
 
     // -----------------------------------------------------------
-    // Phase 3: NAT64 Fallback (Final Attempt -> 2500ms)
+    // Phase 3: NAT64 Fallback (Final Attempt -> 6000ms)
     // -----------------------------------------------------------
     if (!useSocks && ctx.dns64) {
         try {
