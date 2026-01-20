@@ -4,6 +4,7 @@
  * 1. [性能优化] 引入 configCache 全局缓存对象，极大减少 KV/Env 读取次数，消除热启动延迟。
  * 2. [代码简化] 重构 initializeContext，移除冗余的手动缓存逻辑，利用 getConfig 自动缓存。
  * 3. [保留修复] 保留 KV.get 返回 null 的判断逻辑。
+ * 4. [修改] 处理 ProxyIP 逻辑，支持从 DEFAULT_PROXY_IP 加载多个硬编码 IP。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -145,10 +146,14 @@ export async function initializeContext(request, env) {
         ctx.dynamicUUID = seed;
     }
 
-    // 处理 ProxyIP
-    if (proxyIPStr) { 
-        const list = await cleanList(proxyIPStr); 
+    // [修改] 处理 ProxyIP (支持硬编码默认值的多 IP 负载均衡)
+    // 优先使用环境变量，如果没有则使用 CONSTANTS.DEFAULT_PROXY_IP
+    const rawProxyIP = proxyIPStr || CONSTANTS.DEFAULT_PROXY_IP;
+    
+    if (rawProxyIP) { 
+        const list = await cleanList(rawProxyIP); 
         ctx.proxyIPList = list; 
+        // 随机选择一个作为主 IP
         ctx.proxyIP = list[Math.floor(Math.random() * list.length)] || ''; 
     }
 
