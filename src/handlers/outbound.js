@@ -3,6 +3,7 @@
  * 修复说明:
  * 1. [修复] 修正了“阶梯式超时”策略过于激进的问题。原 500ms 超时会导致正常连接被中断并回落到慢速 ProxyIP。
  * 调整为 [4000, 5000, 6000]，优先保证直连成功率，提升速度和稳定性。
+ * 2. [修改] 兼容 DEFAULT_PROXY_IP 为多 IP 字符串的情况，在 Fallback 时正确分割。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -10,7 +11,7 @@ import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
 
 function parseProxyIP(proxyAddr, defaultPort) {
-    if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP, port: defaultPort };
+    if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP.split(',')[0].trim(), port: defaultPort };
     
     let host = proxyAddr;
     let port = defaultPort;
@@ -173,7 +174,10 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         if (ctx.proxyIP) {
             proxyAttempts.push(ctx.proxyIP);
         } else {
-            proxyAttempts.push(CONSTANTS.DEFAULT_PROXY_IP);
+            // [修改] 防止 DEFAULT_PROXY_IP 包含多个 IP 导致解析错误
+            // 如果走到这里说明 ctx.proxyIP 初始化失败，只取第一个作为兜底
+            const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+            if (defParams.length > 0) proxyAttempts.push(defParams[0]);
         }
 
         if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
@@ -298,7 +302,11 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         }
         
         attempts = [...new Set(attempts)].filter(Boolean);
-        if (attempts.length === 0) attempts.push(CONSTANTS.DEFAULT_PROXY_IP);
+        if (attempts.length === 0) {
+            // [修改] 防止 DEFAULT_PROXY_IP 包含多个 IP 导致解析错误
+            const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+            if (defParams.length > 0) attempts.push(defParams[0]);
+        }
 
         for (const ip of attempts) {
             try {
