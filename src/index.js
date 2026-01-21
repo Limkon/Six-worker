@@ -1,8 +1,8 @@
 /**
  * 文件名: src/index.js
- * 修改内容: 
- * 1. [功能] 增加域名自动捕获逻辑：在访问管理或订阅路径时，将 Host 存入 KV (SAVED_DOMAIN)。
- * 2. [配合] 为 WebDAV 定时任务提供域名来源，免去手动配置 WORKER_DOMAIN 的繁琐。
+ * 优化说明: 
+ * 1. [性能优化] 引入 lastSavedDomain 内存变量。仅在域名变更或 Worker 冷启动时写入 KV，
+ * 避免每次访问订阅都触发 KV 写操作，保护 KV 额度并提升性能。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -14,6 +14,10 @@ import { generateHomePage } from './pages/home.js';
 import { sha1 } from './utils/helpers.js';
 import { CONSTANTS } from './constants.js';
 import { getPasswordSetupHtml, getLoginHtml } from './templates/auth.js';
+
+// [新增] 全局变量，用于内存缓存上一次保存的域名
+// Worker 在热启动期间会保留此变量，避免重复写入 KV
+let lastSavedDomain = '';
 
 async function handlePasswordSetup(request, env) {
     if (request.method === 'POST') {
@@ -85,12 +89,15 @@ export default {
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
-            // [新增] 自动捕获并保存当前域名，供 WebDAV 等后台任务使用
-            // 逻辑：只有访问管理路径或订阅路径时才更新，避免被恶意扫描刷新 KV
-            if ((isManagementRoute || isSubRoute) && env.KV && hostName) {
-                // 使用 waitUntil 异步写入，不影响当前请求响应速度
-                // 键名 'SAVED_DOMAIN' 将被 webdav.js 读取
-                ctx.waitUntil(env.KV.put('SAVED_DOMAIN', hostName));
+            // [优化] 域名自动捕获逻辑
+            // 只有在 KV 可用、Host 有效、且与上次内存缓存的域名不一致时，才执行 KV 写入
+            if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
+                if (hostName !== lastSavedDomain) {
+                    lastSavedDomain = hostName; // 更新内存缓存
+                    // 异步写入 KV，不阻塞主线程
+                    ctx.waitUntil(env.KV.put('SAVED_DOMAIN', hostName));
+                    // console.log(`[Domain] Updated cached domain to: ${hostName}`);
+                }
             }
 
             // 5. XHTTP 协议拦截
@@ -185,11 +192,10 @@ export default {
         }
     },
     
-    // Scheduled 事件: 处理 WebDAV 推送等定时任务
+    // Scheduled 事件: 只有此处会触发 WebDAV 推送
     async scheduled(event, env, ctx) {
         try {
-            // 初始化部分 context 以供使用
-            const context = await initializeContext(null, env); // request 为 null
+            const context = await initializeContext(null, env);
             context.waitUntil = ctx.waitUntil.bind(ctx);
             await executeWebDavPush(env, context);
         } catch (e) { 
