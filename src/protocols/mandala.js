@@ -2,8 +2,9 @@ import { CONSTANTS } from '../constants.js';
 import { textDecoder, sha224Hash } from '../utils/helpers.js';
 import { parseAddressAndPort } from './utils.js';
 
-// [优化] 缓存 Password Hash，避免重复计算带来的性能开销
+// [优化] 缓存 Password Hash
 const passwordHashCache = new Map();
+const MAX_CACHE_SIZE = 100;
 
 export async function parseMandalaHeader(mandalaBuffer, password) {
     // 1. 基础长度检查 (Salt(4) + Hash(56) + PadLen(1) + Cmd(1) + Atyp(1) + Port(2) + CRLF(2) = 67字节)
@@ -28,12 +29,22 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     }
 
     // 4. 验证哈希 (Offset 0-56)
-    // [优化] 优先从缓存读取 Hash，显著减少 CPU 计算量
+    // [优化] 简单的 LRU 策略，避免 Map.clear() 导致的性能抖动
     let expectedHash = passwordHashCache.get(password);
-    if (!expectedHash) {
+    
+    if (expectedHash) {
+        // [LRU] 命中缓存：刷新热度（删除并重新插入到末尾）
+        passwordHashCache.delete(password);
+        passwordHashCache.set(password, expectedHash);
+    } else {
+        // 未命中：计算哈希
         expectedHash = sha224Hash(String(password));
-        // [修复] 防止缓存无限增长 (内存保护)
-        if (passwordHashCache.size > 100) passwordHashCache.clear();
+        
+        // [LRU] 写入：如果缓存已满，删除最久未使用的项（Map 的第一个键）
+        if (passwordHashCache.size >= MAX_CACHE_SIZE) {
+            const oldestKey = passwordHashCache.keys().next().value;
+            passwordHashCache.delete(oldestKey);
+        }
         passwordHashCache.set(password, expectedHash);
     }
 
