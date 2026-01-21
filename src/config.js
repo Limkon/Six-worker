@@ -1,8 +1,8 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [逻辑变更] 移除 TTL 时间判断，实现“永久缓存”。
- * 2. [新增功能] 增加 forceReload 参数，允许通过 URL 参数强制刷新配置。
+ * 1. [修复] 为 fetch 请求添加 AbortSignal 超时控制，防止远程配置无响应导致 Worker 挂起。
+ * 2. 保留原有缓存逻辑。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -45,7 +45,16 @@ export async function loadRemoteConfig(env, forceReload = false) {
     
     if (remoteConfigUrl) {
         try {
-            const response = await fetch(remoteConfigUrl);
+            // [修复] 添加超时控制 (5秒)
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            
+            const response = await fetch(remoteConfigUrl, {
+                signal: controller.signal
+            });
+            
+            clearTimeout(timeoutId); // 请求成功，清除定时器
+
             if (response.ok) {
                 const text = await response.text();
                 const now = Date.now();
