@@ -1,9 +1,8 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Critical Fix] 修复 Stream 锁竞争 Bug。推迟状态更新 (remoteSocketWrapper.value) 直到 writer 锁释放后，
- * 防止 websocket.js 在 buffer 冲刷期间尝试获取锁导致崩溃。
- * 2. [Optimization] 优化 flushBuffer 逻辑，更安全地处理并发写入的数据。
+ * 1. [Critical Fix] 修复 SOCKS5 握手阶段可能导致的数据丢失问题 (Early Data Handling)。
+ * 2. [Optimization] 保持原有的 Stream 锁竞争修复和缓冲逻辑。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -133,6 +132,18 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     
     if (!connRes || connRes[0] !== 0x05 || connRes[1] !== 0x00) throw new Error(`SOCKS5 connection failed: ${connRes ? connRes[1] : 'No response'}`);
     
+    // [修复] 处理 SOCKS5 握手后的早期数据 (Early Data)
+    // 握手响应格式: VER(1) REP(1) RSV(1) ATYP(1) BND.ADDR(Var) BND.PORT(2)
+    let headLen = 0;
+    if (connRes[3] === 1) headLen = 10; // IPv4
+    else if (connRes[3] === 4) headLen = 22; // IPv6
+    else if (connRes[3] === 3) headLen = 7 + connRes[4]; // Domain
+
+    if (connRes.length > headLen) {
+        // 将剩余数据挂载到 socket 对象上，供后续逻辑处理
+        socket.initialData = connRes.slice(headLen);
+    }
+
     writer.releaseLock();
     reader.releaseLock();
     return socket;
@@ -229,6 +240,25 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     let hasIncomingData = false;
     let responseHeader = vlessHeader;
     
+    // [修复] 如果 Socket 携带了握手后的残留数据，优先发送
+    if (remoteSocket.initialData && remoteSocket.initialData.byteLength > 0) {
+        hasIncomingData = true;
+        log(`[Socks5] Flushing ${remoteSocket.initialData.byteLength} bytes of early data`);
+        if (responseHeader) {
+            const header = responseHeader;
+            const data = remoteSocket.initialData;
+            const combined = new Uint8Array(header.length + data.length);
+            combined.set(header);
+            combined.set(data, header.length);
+            webSocket.send(combined);
+            responseHeader = null;
+        } else {
+            webSocket.send(remoteSocket.initialData);
+        }
+        // 清理以防重复使用（虽然此处一般不会）
+        remoteSocket.initialData = null;
+    }
+
     await remoteSocket.readable.pipeTo(
         new WritableStream({
             async write(chunk, controller) {
