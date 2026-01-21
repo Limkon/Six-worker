@@ -3,12 +3,8 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Critical Fix] 彻底修复 connectAndWrite 中超时导致的 Socket 句柄泄漏问题 (通过 isTimedOut 标记处理迟到的连接)。
- * 2. [Functional Fix] 包含 isHostBanned 黑名单检查逻辑。
- * 3. [Critical Fix] 包含 SOCKS5 握手长度检查和 Early Data 处理。
- * 4. [Optimization] 包含 Stream 锁竞争修复和缓冲区冲刷逻辑。
- * 5. [Refactor] 优化 SOCKS5 Early Data 处理为零拷贝 (subarray)。
- * 6. [Fix] 增强 IPv6 解析健壮性，修复 WebSocket 关闭后的资源浪费。
+ * 1. [Critical Fix] 移除 NAT64 连接 (Phase 3 和 nat64Retry) 中 IPv6 地址错误的方括号 []。connect API 需要原始 IPv6 字符串。
+ * 2. [Verified] 保留原有的 socket 超时泄漏防护、SOCKS5 优化和黑名单检查逻辑。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -277,7 +273,8 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             log(`[connect] Phase 3: Attempting NAT64...`);
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (v6Address) {
-                const nat64IP = '[' + v6Address + ']';
+                // [修复] 移除方括号，connect API 期望原始 IPv6 字符串
+                const nat64IP = v6Address;
                 return await connectAndWrite(nat64IP, portRemote, false);
             } else {
                 log(`[connect] Phase 3 (NAT64) skipped: DNS resolution failed`);
@@ -393,7 +390,8 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
 
-            const nat64IP = '[' + v6Address + ']';
+            // [修复] 移除方括号，connect API 期望原始 IPv6 字符串
+            const nat64IP = v6Address;
             const natSocket = await connect({ hostname: nat64IP, port: portRemote });
             
             const writer = natSocket.writable.getWriter();
