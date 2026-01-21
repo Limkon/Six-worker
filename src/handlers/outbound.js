@@ -1,31 +1,44 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [修复] 修正了 socks5Connect 中 IPv6 地址构造导致的字节截断问题。
- * 2. [优化] 增强 parseSocks5Config 协议头兼容性，支持移除多种协议前缀。
- * 3. [调整] 阶梯式超时策略调整为 [5000, 6000, 7000]，进一步提升高延迟环境下的直连成功率。
- * 4. [保留] 兼容 DEFAULT_PROXY_IP 为多 IP 字符串的情况，在 Fallback 时正确分割。
+ * 1. [修复] 增强 parseProxyIP 解析逻辑，支持 [IPv6] (无端口) 的括号剥离，同时保留对域名和 IPv4 的兼容。
+ * 2. [保留] 完整保留 SOCKS5 握手、NAT64 转换、WebSocket 流转换及所有重试补偿逻辑。
+ * 3. [保留] 维持原有的 [5000, 6000, 7000] 阶梯超时策略，确保高延迟环境下的稳定性。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
 import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
 
+/**
+ * 解析 ProxyIP 字符串，提取 host 和 port
+ * 优化：更严谨地处理 IPv6 的括号和端口
+ */
 function parseProxyIP(proxyAddr, defaultPort) {
     if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP.split(',')[0].trim(), port: defaultPort };
     
     let host = proxyAddr;
     let port = defaultPort;
     
-    const bracketIndex = host.lastIndexOf(']:');
-    if (host.startsWith('[') && bracketIndex > 0) {
-        const portStr = host.substring(bracketIndex + 2);
-        if (/^\d+$/.test(portStr)) port = parseInt(portStr, 10);
-        host = host.substring(1, bracketIndex);
-        return { host, port };
+    // 1. 处理带中括号的 IPv6: [2001:db8::1] 或 [2001:db8::1]:443
+    if (host.startsWith('[')) {
+        const bracketEnd = host.lastIndexOf(']');
+        if (bracketEnd > 0) {
+            const remainder = host.substring(bracketEnd + 1);
+            // 提取端口：检查 ] 之后是否紧跟 :port
+            if (remainder.startsWith(':')) {
+                const portStr = remainder.substring(1);
+                if (/^\d+$/.test(portStr)) port = parseInt(portStr, 10);
+            }
+            // 剥离括号获取原始 IPv6 地址
+            host = host.substring(1, bracketEnd);
+            return { host, port };
+        }
     }
     
+    // 2. 处理常规 host:port (IPv4 或 Domain)
     const lastColon = host.lastIndexOf(':');
+    // 确保只有一个冒号（排除原始 IPv6）且冒号后是数字
     if (lastColon > 0 && host.indexOf(':') === lastColon) {
         const portStr = host.substring(lastColon + 1);
         if (/^\d+$/.test(portStr)) {
@@ -48,7 +61,6 @@ function shouldUseSocks5(addressRemote, go2socks5) {
 
 function parseSocks5Config(address) {
     if (!address) return null;
-    // 移除任意协议头 (如 socks5://, http://)
     const cleanAddr = address.includes('://') ? address.split('://')[1] : address;
     const lastAtIndex = cleanAddr.lastIndexOf("@");
     let [latter, former] = lastAtIndex === -1 ? [cleanAddr, undefined] : [cleanAddr.substring(lastAtIndex + 1), cleanAddr.substring(0, lastAtIndex)];
@@ -79,7 +91,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     const encoder = new TextEncoder();
     
     // SOCKS5 Hello
-    await writer.write(new Uint8Array([5, 1, 2])); // Method 2: Username/Password
+    await writer.write(new Uint8Array([5, 1, 2])); 
     let { value: res } = await reader.read();
     
     if (!res || res[0] !== 0x05 || res[1] === 0xff) throw new Error('SOCKS5 greeting failed');
@@ -105,7 +117,6 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
             break;
         case CONSTANTS.ADDRESS_TYPE_IPV6:
         case CONSTANTS.ATYP_TROJAN_IPV6:
-             // 修正 IPv6 地址构造，将 8 个 16 位整数转换为 16 个 8 位字节
              const v6Parts = parseIPv6(addressRemote.replace(/[\[\]]/g, ''));
              if (!v6Parts) throw new Error('Invalid IPv6 address');
              const v6Bytes = new Uint8Array(16);
@@ -133,8 +144,6 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    
-    // 调整后的阶梯式超时策略
     const STEPPED_TIMEOUTS = [5000, 6000, 7000];
     let attemptCounter = 0;
 
@@ -153,7 +162,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         };
 
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error(`Connect timeout (${currentTimeout}ms)`)), currentTimeout));
-
         const socket = await Promise.race([doConnect(), timeoutPromise]);
         
         if (!isSocks) {
@@ -286,17 +294,14 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
 
     const proxyIPRetry = async () => {
         log('[Retry] Switching to ProxyIP...');
-        
         let attempts = [];
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
-        
         if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
             for (let i = 0; i < 2; i++) {
                 const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
                 if (randomIP && !attempts.includes(randomIP)) attempts.push(randomIP);
             }
         }
-        
         attempts = [...new Set(attempts)].filter(Boolean);
         if (attempts.length === 0) {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
@@ -341,11 +346,9 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         remoteSocketWrapper.isConnecting = false;
         
         const writer = socket.writable.getWriter();
-        
         if (rawClientData && rawClientData.byteLength > 0) {
             await writer.write(rawClientData);
         }
-        
         if (remoteSocketWrapper.buffer && remoteSocketWrapper.buffer.length > 0) {
             log(`Flushing ${remoteSocketWrapper.buffer.length} buffered chunks`);
             for (const chunk of remoteSocketWrapper.buffer) {
@@ -356,7 +359,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         writer.releaseLock();
         
         remoteSocketToWS(socket, webSocket, vlessResponseHeader, proxyIPRetry, log);
-        
     } catch (error) {
         log('[Outbound] Initial connection failed: ' + error.message);
         safeCloseWebSocket(webSocket);
