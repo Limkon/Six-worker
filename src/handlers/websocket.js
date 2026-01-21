@@ -1,12 +1,9 @@
-// src/handlers/websocket.js
-
 /**
  * 文件名: src/handlers/websocket.js
  * 修改内容: 
- * 1. [Fix] 修复资源泄漏问题：当客户端断开 WebSocket 时，主动关闭上游 TCP Socket。
- * 2. [稳健性] 保持原有的锁竞争处理和缓冲区逻辑。
- * 3. [Optimization] Socks5握手改为零拷贝(subarray)。
- * 4. [Fix] 明确禁止 UDP 流量并优雅关闭，移除"UDP over TCP"的错误实现。
+ * 1. [Global Fix] 将 UDP 拦截逻辑提升为全局检查，覆盖 Trojan, Shadowsocks, Socks5 等所有协议。
+ * 2. [Safety] 针对 Socks5 的 UDP ASSOCIATE 请求，拒绝连接而不是错误地返回成功握手。
+ * 3. [Robustness] 保持之前的资源泄漏修复和零拷贝优化。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -38,7 +35,6 @@ export async function handleWebSocketRequest(request, ctx) {
     webSocket.accept();
     
     // 状态变量
-    // buffer: 用于在重试连接期间暂存客户端发来的数据
     let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [] };
     let isConnected = false; 
     let socks5State = 0; 
@@ -69,23 +65,16 @@ export async function handleWebSocketRequest(request, ctx) {
 
             // 1. 已连接状态：高性能直通
             if (isConnected) {
-                // 检测 Socket 是否发生变化 (例如触发了重试逻辑，Socket对象会被替换或置空)
+                // 检测 Socket 是否发生变化
                 if (activeSocket !== remoteSocketWrapper.value) {
-                    // 如果持有旧锁，必须先释放
                     if (activeWriter) {
                         try {
-                            await activeWriter.ready; // 等待之前的写入完成
+                            await activeWriter.ready;
                             activeWriter.releaseLock(); 
-                        } catch(e) {
-                            // 忽略释放锁时的错误（Socket可能已关闭）
-                        }
+                        } catch(e) {}
                         activeWriter = null;
                     }
-                    
-                    // 更新当前激活的 Socket
                     activeSocket = remoteSocketWrapper.value;
-                    
-                    // 如果新 Socket 存在，获取新 Writer
                     if (activeSocket) {
                         try {
                             activeWriter = activeSocket.writable.getWriter();
@@ -98,22 +87,17 @@ export async function handleWebSocketRequest(request, ctx) {
                 }
 
                 if (activeWriter) {
-                    // 正常直通写入
-                    // 注意：这里不做 await catch，如果写入失败由 stream 错误处理捕获
                     await activeWriter.write(chunkArr);
                 } else if (remoteSocketWrapper.isConnecting) {
-                    // 如果 Socket 为空且处于连接中（重试中），将数据缓冲
-                    // 这些数据将在 outbound.js 重试成功后通过 flushBuffer 写入
                     remoteSocketWrapper.buffer.push(chunkArr);
                 }
-                // 如果既没有 Writer 也不在 Connecting 状态，说明连接可能已断开，数据将被丢弃
                 return;
             }
 
-            // 2. 数据缓冲 (协议探测阶段)
+            // 2. 数据缓冲
             headerBuffer = concatUint8(headerBuffer, chunkArr);
 
-            // 3. Socks5 握手处理
+            // 3. Socks5 握手处理 (Auth阶段)
             if (socks5State < 2) {
                 const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
                 if (error) {
@@ -145,17 +129,29 @@ export async function handleWebSocketRequest(request, ctx) {
                 }
 
                 // --- 成功识别 ---
-                isConnected = true;
-                clearTimeout(timeoutTimer); 
-                remoteSocketWrapper.isConnecting = true; // 标记开始建立连接
-
                 const { protocol, addressRemote, portRemote, addressType, rawDataIndex, isUDP } = result;
                 
-                log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote}`);
+                log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote} (UDP: ${isUDP})`);
                 
+                // [Global Fix] 全局 UDP 拦截
+                // Cloudflare Workers 不支持出站 UDP。任何协议的 UDP 请求都应被拦截，
+                // 否则会导致尝试建立错误的 TCP 连接或错误的 Socks5 响应。
+                if (isUDP) {
+                    // 对于 Socks5，可以尝试发送特定的 UDP 拒绝响应，但直接断开通常是最兼容的行为
+                    log(`[${protocol.toUpperCase()}] UDP blocked: Cloudflare Workers does not support UDP outbound.`);
+                    clearTimeout(timeoutTimer);
+                    safeCloseWebSocket(webSocket);
+                    return;
+                }
+
                 if (isHostBanned(addressRemote, ctx.banHosts)) {
                     throw new Error(`Blocked: ${addressRemote}`);
                 }
+                
+                // 连接确认，停止超时计时器
+                isConnected = true;
+                clearTimeout(timeoutTimer); 
+                remoteSocketWrapper.isConnecting = true;
 
                 let clientData = headerBuffer; 
                 let responseHeader = null;
@@ -163,27 +159,18 @@ export async function handleWebSocketRequest(request, ctx) {
                 if (protocol === 'vless') {
                     clientData = headerBuffer.subarray(rawDataIndex);
                     responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
-                    
-                    // [修复] 处理 UDP 命令
-                    // 原先逻辑直接抛出 Error，导致未捕获异常。
-                    // 现修改为记录日志并优雅关闭连接。
-                    if (isUDP) {
-                        log(`[VLESS] UDP command intercepted. UDP is not supported in this mode.`);
-                        safeCloseWebSocket(webSocket);
-                        return;
-                    }
                 } else if (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') {
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
-                    // SOCKS5 响应成功连接
+                    // 仅当确定不是 UDP (Cmd != 0x03) 后，才发送 Socks5 成功响应
                     webSocket.send(new Uint8Array([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]));
                     socks5State = 3;
                 }
 
                 headerBuffer = null; // 释放内存
 
-                // 建立出站连接
+                // 建立出站 TCP 连接
                 handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
 
             } catch (e) {
@@ -196,34 +183,20 @@ export async function handleWebSocketRequest(request, ctx) {
             }
         },
         close() { 
-            // 释放锁
             if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
-            
-            // [Fix] 客户端断开时，主动关闭远程 Socket，防止资源泄漏
-            if (remoteSocketWrapper.value) {
-                try { remoteSocketWrapper.value.close(); } catch(e) {}
-            }
-            
+            if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} }
             log("Client WebSocket closed"); 
         },
         abort(reason) { 
             if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
-            
-            // [Fix] 客户端异常断开时，主动关闭远程 Socket
-            if (remoteSocketWrapper.value) {
-                try { remoteSocketWrapper.value.close(); } catch(e) {}
-            }
-            
+            if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} }
             log("WebSocket aborted", reason); 
             safeCloseWebSocket(webSocket); 
         },
     })).catch((err) => {
         clearTimeout(timeoutTimer);
         if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
-        // 确保异常时也尝试清理
-        if (remoteSocketWrapper.value) {
-            try { remoteSocketWrapper.value.close(); } catch(e) {}
-        }
+        if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} }
         log("Stream processing failed", err.toString());
         safeCloseWebSocket(webSocket);
     });
@@ -243,7 +216,6 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
         const nMethods = buffer[1];
         if (buffer.length < 2 + nMethods) return res; 
 
-        // [优化] subarray
         const methods = buffer.subarray(2, 2 + nMethods);
         let hasAuth = false;
         for (let m of methods) {
@@ -271,12 +243,10 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
         let offset = 1;
         const uLen = buffer[offset++];
         if (buffer.length < offset + uLen + 1) return res;
-        // [优化] subarray
         const user = new TextDecoder().decode(buffer.subarray(offset, offset + uLen));
         offset += uLen;
         const pLen = buffer[offset++];
         if (buffer.length < offset + pLen) return res;
-        // [优化] subarray
         const pass = new TextDecoder().decode(buffer.subarray(offset, offset + pLen));
         offset += pLen;
 
