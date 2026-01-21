@@ -1,8 +1,8 @@
 /**
  * 文件名: src/handlers/xhttp.js
- * 修复说明:
- * 1. [Fix] 支持 SOCKS5 的 Early Data 处理。
- * 2. [保留] 移除了 setTimeout(r, 0) 节流逻辑。
+ * 优化说明:
+ * 1. [Performance] 将 slice 替换为 subarray，实现 Header 解析的零拷贝，降低内存压力。
+ * 2. [Stability] 保持原有的 BYOB 读取和连接管理逻辑。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -54,7 +54,8 @@ async function read_xhttp_header(readable, ctx) {
         rlen += r.value.length;
         
         const version = cache[0];
-        const id = cache.slice(1, 1 + 16);
+        // [优化] 使用 subarray 替代 slice
+        const id = cache.subarray(1, 1 + 16);
         
         if (!validate_uuid_xhttp(id, ctx.userID)) {
             if (!ctx.userIDLow || !validate_uuid_xhttp(id, ctx.userIDLow)) {
@@ -102,16 +103,19 @@ async function read_xhttp_header(readable, ctx) {
         idx = addr_plus1;
         switch (atype) {
             case CONSTANTS.ADDRESS_TYPE_IPV4:
-                hostname = cache.slice(idx, idx + 4).join('.');
+                // [优化] 使用 subarray
+                hostname = cache.subarray(idx, idx + 4).join('.');
                 break;
             case CONSTANTS.ADDRESS_TYPE_URL:
+                // [优化] 使用 subarray
                 hostname = new TextDecoder().decode(
-                    cache.slice(idx + 1, idx + 1 + cache[idx]),
+                    cache.subarray(idx + 1, idx + 1 + cache[idx]),
                 );
                 break;
             case CONSTANTS.ADDRESS_TYPE_IPV6:
+                // [优化] 使用 subarray + reduce
                 hostname = cache
-                    .slice(idx, idx + 16)
+                    .subarray(idx, idx + 16)
                     .reduce(
                         (s, b2, i2, a) =>
                            i2 % 2
@@ -125,7 +129,8 @@ async function read_xhttp_header(readable, ctx) {
         
         if (hostname.length < 1) return 'failed to parse hostname';
         
-        const data = cache.slice(header_len);
+        // [优化] 使用 subarray 获取剩余数据
+        const data = cache.subarray(header_len);
         
         return {
             hostname,
@@ -148,7 +153,6 @@ async function upload_to_remote_xhttp(writer, httpx) {
             await writer.write(httpx.data);
         }
         
-        // [修复] 移除节流逻辑
         while (!httpx.done) {
             const r = await httpx.reader.read(get_xhttp_buffer());
             if (r.done) break;
@@ -170,7 +174,6 @@ function create_xhttp_downloader(resp, remote_readable, initialData) {
             {
                 start(controller) {
                     controller.enqueue(resp);
-                    // [新增] 发送握手残留数据
                     if (initialData && initialData.byteLength > 0) {
                         controller.enqueue(initialData);
                     }
@@ -198,7 +201,6 @@ function create_xhttp_downloader(resp, remote_readable, initialData) {
         const writer = stream.writable.getWriter();
         ;(async () => {
             try {
-                // [修复] 移除节流逻辑
                 while (true) {
                     const r = await reader.read();
                     if (r.done) break;
@@ -253,7 +255,6 @@ export async function handleXhttpClient(request, ctx) {
             abort: () => { try { remoteSocket.writable.abort(); } catch (_) {} }
         };
 
-        // [修改] 传递 remoteSocket.initialData
         const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
         
         const connectionClosed = Promise.race([
