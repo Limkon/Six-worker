@@ -3,6 +3,7 @@
  * 修改说明:
  * 1. [修复] 增加 UUID 缺失时的兜底生成逻辑，防止程序崩溃。
  * 2. [优化] 明确配置优先级，增强 initializeContext 的健壮性。
+ * 3. [功能] 增加 REMOTE_CONFIG 开关，通过环境变量控制远程配置加载 (0=关, 1=开)。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -99,7 +100,13 @@ export async function getConfig(env, key, defaultValue = undefined) {
 }
 
 export async function initializeContext(request, env) {
-    // await loadRemoteConfig(env); // 如需启用远程配置请取消注释
+    // [新增] 远程配置开关检查
+    // 默认关闭 (0)，如需开启请在环境变量中设置 REMOTE_CONFIG 为 1
+    // 必须在读取其他配置之前执行，以便 remoteConfigCache 被填充
+    const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0');
+    if (enableRemote === '1') {
+        await loadRemoteConfig(env);
+    }
 
     const [
         adminPass,
