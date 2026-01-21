@@ -1,11 +1,9 @@
 /**
  * 文件名: src/handlers/webdav.js
  * 审计确认: 
- * 1. [功能升级] 实现了域名的自动发现。先读取环境变量，无则读取 KV 缓存(SAVED_DOMAIN)。
- * 2. 优化了 URL 拼接逻辑，自动处理末尾斜杠。
- * 3. 增加了功能开关，防止未配置时的无效执行。
- * 4. [Refactor] 修正文件名时间戳为 UTC+8，与业务逻辑保持一致。
- * 5. [新增] WebDAV 推送请求增加 5 秒超时控制。
+ * 1. [Hardcode] 账号信息已硬编码，无需环境变量。
+ * 2. [Default On] 功能默认开启，配合硬编码凭据。
+ * 3. [Auto Domain] 自动使用当前访问域名，解决 scheduled 事件无 Host 问题。
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
@@ -14,35 +12,29 @@ import { CONSTANTS } from '../constants.js';
 
 export async function executeWebDavPush(env, ctx, force = false) {
     try {
-        // [新增] WebDAV 功能开关检查
-        // 默认关闭 (0)，如需开启请在环境变量中设置 WEBDAV 为 1
-        // 注意：如果 force 为 true (例如手动触发)，则忽略开关状态
-        const enableWebdav = await getConfig(env, 'WEBDAV', '0');
+        // [修改] WebDAV 功能开关
+        // 默认值改为 '1' (开启)，因为既然已经硬编码了账号，通常意味着需要直接使用。
+        // 你依然可以在环境变量中设置 WEBDAV = 0 来强制关闭。
+        const enableWebdav = await getConfig(env, 'WEBDAV', '1');
         if (enableWebdav !== '1' && !force) {
             return;
         }
 
-        // 1. 获取 WebDAV 配置
-        const rawWebdavUrl = await getConfig(env, 'WEBDAV_URL');
-        const webdavUser = await getConfig(env, 'WEBDAV_USER');
-        const webdavPass = await getConfig(env, 'WEBDAV_PASS');
+        // 1. [硬编码] WebDAV 配置信息
+        // 直接使用指定的账号密码，不再读取环境变量
+        const rawWebdavUrl = 'https://wani.teracloud.jp/dav/';
+        const webdavUser = 'zoten';
+        const webdavPass = 'N6f7pgwoU5QB6noh';
 
-        if (!rawWebdavUrl || !webdavUser || !webdavPass) {
-            // 静默失败，因为如果用户没配 WebDAV，不需要在日志里一直报错
-            return;
-        }
-
-        // [修复] 标准化 URL，确保以 / 结尾
+        // 标准化 URL，确保以 / 结尾
         const webdavUrl = rawWebdavUrl.endsWith('/') ? rawWebdavUrl : `${rawWebdavUrl}/`;
 
         console.log(`[WebDAV] Starting push to ${webdavUrl}`);
 
-        // 2. 准备请求上下文
-        // [修复] 尝试获取 Worker 的真实域名。
-        // 逻辑顺序: 1. 环境变量 WORKER_DOMAIN (手动覆盖) -> 2. KV SAVED_DOMAIN (自动获取) -> 3. Fallback
+        // 2. 准备请求上下文 (自动域名发现逻辑)
+        // 优先读取环境变量 -> 其次读取 KV 自动保存的域名
         let hostName = await getConfig(env, 'WORKER_DOMAIN');
         
-        // 如果环境变量未设置，且 KV 存在，尝试读取自动保存的域名
         if (!hostName && env.KV) {
             hostName = await env.KV.get('SAVED_DOMAIN');
             if (hostName) {
@@ -51,8 +43,9 @@ export async function executeWebDavPush(env, ctx, force = false) {
         }
 
         if (!hostName) {
-            // [警告] 只有在从未访问过节点且未配置环境变量时才会触发
-            console.warn('[WebDAV] Warning: Domain not found! Please access your Worker url at least once to auto-detect domain, or set WORKER_DOMAIN variable.');
+            // 如果既没有环境变量，KV 里也没存过（说明从未访问过），则无法生成有效订阅链接
+            console.warn('[WebDAV] Warning: Domain not found! Please access your Worker url at least once to auto-detect domain.');
+            // 回退到本地占位符，避免程序崩溃，但生成的链接将不可用
             hostName = 'worker.local';
         }
 
@@ -60,11 +53,11 @@ export async function executeWebDavPush(env, ctx, force = false) {
         const subHashLength = CONSTANTS.SUB_HASH_LENGTH;
         const allPathHash = (await sha1('all')).toLowerCase().substring(0, subHashLength);
 
-        // 4. 调用 handleSubscription 生成内容
-        // 构造模拟请求
+        // 4. 调用 handleSubscription 生成订阅内容
+        // 构造模拟请求对象
         const mockRequest = new Request(`https://${hostName}/${ctx.dynamicUUID}/${allPathHash}`);
         
-        // 调用订阅处理函数
+        // 生成订阅内容
         const response = await handleSubscription(mockRequest, env, ctx, allPathHash, hostName);
 
         if (!response || !response.ok) {
@@ -75,41 +68,43 @@ export async function executeWebDavPush(env, ctx, force = false) {
         // 5. 获取内容并处理 (Base64 解码)
         let content = await response.text();
         try {
-            // 尝试将 Base64 订阅内容解码为明文，以便直接查看
+            // 尝试将 Base64 订阅内容解码为明文，方便在网盘直接查看
             const decoded = atob(content);
             content = decoded;
         } catch (e) {
-            console.warn('[WebDAV] Content is not Base64 or decode failed, using original content.');
+            // 如果不是 Base64，保持原样
         }
 
-        // 6. 去重 (按行去重)
+        // 6. 简单的去重处理
         const uniqueLines = [...new Set(content.split('\n'))].filter(line => line.trim() !== '');
         const finalContent = uniqueLines.join('\n');
 
-        // 7. 检查 Hash (防重复推送)
+        // 7. 检查内容 Hash (防重复推送)
+        // 只有在非强制模式(force=false)下才检查，手动触发或配置变更(force=true)时跳过检查
         if (env.KV && !force) {
             const currentHash = await sha1(finalContent);
             const lastHash = await env.KV.get('WEBDAV_HASH');
             if (currentHash === lastHash) {
-                console.log('[WebDAV] Content unchanged, skipping.');
+                console.log('[WebDAV] Content unchanged, skipping push.');
                 return;
             }
+            // 异步更新 Hash
             if (ctx.waitUntil) ctx.waitUntil(env.KV.put('WEBDAV_HASH', currentHash));
         }
 
         // 8. 生成文件名并推送
         const subName = await getConfig(env, 'SUBNAME', 'sub');
-        const now = new Date();
-        // [Refactor] 使用 UTC+8 时间生成文件名，避免 "昨天" 的情况
+        // 使用 UTC+8 时间戳作为文件名后缀
         const offset = 8 * 60 * 60 * 1000;
+        const now = new Date();
         const localDate = new Date(now.getTime() + offset);
-        const timestamp = localDate.toISOString().replace(/[-:T.]/g, '').slice(0, 14); // 格式: YYYYMMDDHHMMSS
+        const timestamp = localDate.toISOString().replace(/[-:T.]/g, '').slice(0, 14); // YYYYMMDDHHMMSS
         const fileName = `${subName}_${timestamp}.txt`;
         
         const targetUrl = `${webdavUrl}${fileName}`;
         const auth = btoa(`${webdavUser}:${webdavPass}`);
         
-        // [新增] 5秒超时控制
+        // 9. 执行推送 (带 5s 超时控制)
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -122,14 +117,17 @@ export async function executeWebDavPush(env, ctx, force = false) {
             },
             body: finalContent,
             signal: controller.signal
+        }).then(res => {
+            if (res.ok) console.log(`[WebDAV] Push success: ${fileName}`);
+            else console.error(`[WebDAV] Push failed: ${res.status} ${res.statusText}`);
+        }).catch(err => {
+            console.error(`[WebDAV] Push error: ${err.message}`);
         }).finally(() => {
-            clearTimeout(timeoutId); // 无论成功失败，清除定时器
+            clearTimeout(timeoutId);
         });
 
         if (ctx.waitUntil) ctx.waitUntil(pushRequest);
         else await pushRequest;
-        
-        console.log(`[WebDAV] Push triggered successfully: ${fileName}`);
 
     } catch (e) {
         console.error('[WebDAV] Logic Error:', e);
