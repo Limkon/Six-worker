@@ -1,8 +1,8 @@
 /**
  * 文件名: src/handlers/xhttp.js
  * 修复说明:
- * 1. [性能] 移除了 create_xhttp_downloader 和 upload_to_remote_xhttp 中的 setTimeout(r, 0) 节流逻辑。
- * 该逻辑会严重限制大带宽下的吞吐量。
+ * 1. [Fix] 支持 SOCKS5 的 Early Data 处理。
+ * 2. [保留] 移除了 setTimeout(r, 0) 节流逻辑。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -162,7 +162,7 @@ async function upload_to_remote_xhttp(writer, httpx) {
     }
 }
 
-function create_xhttp_downloader(resp, remote_readable) {
+function create_xhttp_downloader(resp, remote_readable, initialData) {
     const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45000;
     let stream;
     const done = new Promise((resolve, reject) => {
@@ -170,6 +170,10 @@ function create_xhttp_downloader(resp, remote_readable) {
             {
                 start(controller) {
                     controller.enqueue(resp);
+                    // [新增] 发送握手残留数据
+                    if (initialData && initialData.byteLength > 0) {
+                        controller.enqueue(initialData);
+                    }
                 },
                 transform(chunk, controller) {
                     controller.enqueue(chunk);
@@ -249,7 +253,8 @@ export async function handleXhttpClient(request, ctx) {
             abort: () => { try { remoteSocket.writable.abort(); } catch (_) {} }
         };
 
-        const downloader = create_xhttp_downloader(resp, remoteSocket.readable);
+        // [修改] 传递 remoteSocket.initialData
+        const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
         
         const connectionClosed = Promise.race([
             downloader.done,
