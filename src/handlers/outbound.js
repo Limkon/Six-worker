@@ -1,9 +1,9 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修改内容:
- * 1. [Optimization] 优化 shouldUseSocks5 匹配逻辑，减少正则对象创建开销。
- * 2. [Critical Fix] 保持对 NAT64 连接时 IPv6 地址方括号的去除处理。
- * 3. [Refactor] 保持 ProxyIP 解析和 SOCKS5 握手逻辑的稳定性。
+ * 1. [Fix] 修复 parseProxyIP 对无方括号 IPv6 地址的误判问题。
+ * 2. [Fix] 修复 connectAndWrite 在超时竞态条件下可能导致的 Socket 资源泄漏。
+ * 3. [Critical Fix] 保持对 NAT64 连接时 IPv6 地址方括号的去除处理。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -15,7 +15,7 @@ import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
  * 支持格式: 
  * - 1.2.3.4
  * - 1.2.3.4:8080
- * - 2001:db8::1
+ * - 2001:db8::1 (视为纯 IP)
  * - [2001:db8::1]
  * - [2001:db8::1]:8080
  */
@@ -34,8 +34,14 @@ function parseProxyIP(proxyAddr, defaultPort) {
     if (lastColon > lastBracket && lastColon > 0) {
         const portStr = str.substring(lastColon + 1);
         if (/^\d+$/.test(portStr)) {
-            port = parseInt(portStr, 10);
-            host = str.substring(0, lastColon);
+            // [Fix] 增强 IPv6 判断：如果无方括号且包含多个冒号，则视为 IPv6 字面量（无端口）
+            // 例如: 2001:db8::1 (会被误判为端口 1) -> 修正为 Host: 2001:db8::1, Port: default
+            const isIPv6Literal = lastBracket === -1 && str.split(':').length > 2;
+            
+            if (!isIPv6Literal) {
+                port = parseInt(portStr, 10);
+                host = str.substring(0, lastColon);
+            }
         }
     }
     
@@ -174,21 +180,48 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 
         log(`[connect] Target: ${host}:${port} (Socks: ${isSocks}) (Timeout: ${currentTimeout}ms)`);
         
-        const doConnect = async () => {
-             if (isSocks) {
-                return await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
-            } else {
-                return connect({ hostname: host, port: port });
-            }
-        };
+        let hasTimedOut = false;
 
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error(`Connect timeout (${currentTimeout}ms)`)), currentTimeout));
-        const socket = await Promise.race([doConnect(), timeoutPromise]);
-        
-        if (!isSocks) {
-            await Promise.race([socket.opened, timeoutPromise]);
-        }
-        return socket;
+        // [Fix] 封装连接过程，防止超时后的 Socket 泄漏
+        const connectPromise = (async () => {
+             try {
+                const sock = isSocks 
+                    ? await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log)
+                    : connect({ hostname: host, port: port });
+                
+                // 如果已超时，说明外层 Promise.race 已拒绝，必须关闭此“迟到”的 Socket
+                if (hasTimedOut) {
+                    log(`[connect] Closing late connection to ${host}:${port} (after timeout)`);
+                    try { sock.close(); } catch(e){}
+                    return null;
+                }
+                
+                // 非 Socks 模式下等待连接完全打开
+                if (!isSocks) {
+                    await sock.opened;
+                    // 二次检查，等待 opened 期间可能发生超时
+                    if (hasTimedOut) {
+                         log(`[connect] Closing late connection to ${host}:${port} (after opened)`);
+                         try { sock.close(); } catch(e){}
+                         return null;
+                    }
+                }
+                return sock;
+             } catch (e) {
+                 // 如果已超时，忽略错误；否则抛出供 Promise.race 捕获
+                 if (hasTimedOut) return null;
+                 throw e;
+             }
+        })();
+
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => {
+                hasTimedOut = true;
+                reject(new Error(`Connect timeout (${currentTimeout}ms)`));
+            }, currentTimeout);
+        });
+
+        return await Promise.race([connectPromise, timeoutPromise]);
     };
 
     try {
