@@ -3,6 +3,7 @@
  * 修改内容: 
  * 1. [Fix] 修复资源泄漏问题：当客户端断开 WebSocket 时，主动关闭上游 TCP Socket。
  * 2. [稳健性] 保持原有的锁竞争处理和缓冲区逻辑。
+ * 3. [Optimization] Socks5握手改为零拷贝(subarray)。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -231,7 +232,8 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
         const nMethods = buffer[1];
         if (buffer.length < 2 + nMethods) return res; 
 
-        const methods = buffer.slice(2, 2 + nMethods);
+        // [优化] subarray
+        const methods = buffer.subarray(2, 2 + nMethods);
         let hasAuth = false;
         for (let m of methods) {
             if (m === 0x02) hasAuth = true;
@@ -258,11 +260,13 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
         let offset = 1;
         const uLen = buffer[offset++];
         if (buffer.length < offset + uLen + 1) return res;
-        const user = new TextDecoder().decode(buffer.slice(offset, offset + uLen));
+        // [优化] subarray
+        const user = new TextDecoder().decode(buffer.subarray(offset, offset + uLen));
         offset += uLen;
         const pLen = buffer[offset++];
         if (buffer.length < offset + pLen) return res;
-        const pass = new TextDecoder().decode(buffer.slice(offset, offset + pLen));
+        // [优化] subarray
+        const pass = new TextDecoder().decode(buffer.subarray(offset, offset + pLen));
         offset += pLen;
 
         const isValid = (user === ctx.userID || user === ctx.dynamicUUID) && 
