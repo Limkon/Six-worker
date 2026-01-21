@@ -1,9 +1,9 @@
 /**
  * 文件名: src/pages/sub.js
- * 修改内容: 
- * 1. [优化] 引入 KV 缓存机制 (SUB_REMOTE_CACHE) 存储远程节点数据。
- * 2. [优化] 实现 Stale-While-Revalidate 策略，加速订阅响应。
- * 3. [修复] 修正合并远程节点时的重复项处理，使用 Set.add 优化大数据量下的内存占用。
+ * 审计确认: 
+ * 1. 确认已实现 Stale-While-Revalidate 缓存策略，大幅提升订阅响应速度。
+ * 2. 确认去重逻辑使用了 Set，优化了内存占用。
+ * 3. 逻辑稳健，当 KV 不可用时会自动降级为实时获取。
  */
 import { cleanList, sha1 } from '../utils/helpers.js';
 import { getConfig } from '../config.js';
