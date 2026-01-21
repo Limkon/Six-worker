@@ -3,6 +3,7 @@
  * 修改说明: 
  * 1. [安全性] 增强 JSON 解析的健壮性，防止非标准响应导致崩溃。
  * 2. [稳定性] 增加对 Answer 字段的类型检查。
+ * 3. [兼容性] 增加对 IPv4 映射地址 (::ffff:1.2.3.4) 的解析支持。
  */
 import { CONSTANTS } from '../constants.js';
 
@@ -13,8 +14,30 @@ export function parseIPv6(ip) {
     if (!ip) return null;
     ip = ip.replace(/[\[\]]/g, '');
     
-    // 如果包含点号，可能是 IPv4 映射地址，本项目暂不处理
-    if (ip.includes('.')) return null; 
+    // [修改] 处理 IPv4 映射地址 (例如 ::ffff:192.168.1.1)
+    if (ip.includes('.')) {
+        const lastColon = ip.lastIndexOf(':');
+        const v4Str = ip.substring(lastColon + 1);
+        const v6Prefix = ip.substring(0, lastColon);
+        
+        // 解析 IPv4 部分
+        const v4Parts = v4Str.split('.').map(Number);
+        if (v4Parts.length !== 4) return null;
+        
+        // 将 IPv4 转为 2个 16位整数
+        const p1 = (v4Parts[0] << 8) | v4Parts[1];
+        const p2 = (v4Parts[2] << 8) | v4Parts[3];
+        
+        // 递归解析前缀部分，补齐最后两段占位
+        // 注意：如果是 ::ffff:1.2.3.4 -> 前缀 ::ffff -> 构造 ::ffff:0:0 解析
+        const prefixParts = parseIPv6(v6Prefix + ':0:0'); 
+        if (!prefixParts) return null;
+        
+        // 替换最后两个为 IPv4 转换来的值
+        prefixParts[6] = p1;
+        prefixParts[7] = p2;
+        return prefixParts;
+    }
     
     const parts = ip.split(':');
     let res = [];
