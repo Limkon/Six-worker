@@ -4,6 +4,7 @@
  * 1. [Fix] 修复资源泄漏问题：当客户端断开 WebSocket 时，主动关闭上游 TCP Socket。
  * 2. [稳健性] 保持原有的锁竞争处理和缓冲区逻辑。
  * 3. [Optimization] Socks5握手改为零拷贝(subarray)。
+ * 4. [Fix] 明确禁止 UDP 流量，移除"UDP over TCP"的错误实现。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -160,9 +161,16 @@ export async function handleWebSocketRequest(request, ctx) {
                 if (protocol === 'vless') {
                     clientData = headerBuffer.subarray(rawDataIndex);
                     responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
-                    if (isUDP && portRemote !== 53) throw new Error('UDP only for DNS(53)');
+                    // [Fix] 移除 UDP 伪支持。Cloudflare connect() 是 TCP 连接。
+                    // 之前的逻辑试图将 UDP 流量通过 TCP 发送，这对大多数 UDP 服务（包括 DNS）是无效的，
+                    // 除非实现完整的 UDP-over-TCP 封装。为避免误导，直接报错。
+                    if (isUDP) throw new Error('UDP is not supported');
                 } else if (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') {
                     clientData = result.rawClientData;
+                    // Trojan/SS 协议本身若包含 UDP 请求，在此处也应由后续逻辑处理或报错，
+                    // 目前 outbound.js 统一使用 TCP connect，因此这些协议的 UDP 请求实际上也会变为 TCP。
+                    // 若协议层解析出 isUDP 属性，应在此处一并拦截，但目前 detect 返回主要针对 VLESS。
+                    // 暂时只针对明确的 VLESS UDP Command 进行拦截。
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
                     // SOCKS5 响应成功连接
