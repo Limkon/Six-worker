@@ -1,8 +1,8 @@
 /**
  * 文件名: src/index.js
- * 优化说明: 
- * 1. [性能优化] 引入 lastSavedDomain 内存变量。仅在域名变更或 Worker 冷启动时写入 KV，
- * 避免每次访问订阅都触发 KV 写操作，保护 KV 额度并提升性能。
+ * 说明: 
+ * 1. [新增] 在首次密码设置和域名自动发现时，主动触发 WebDAV 推送。
+ * 2. [保留] 内存缓存优化域名 KV 写入。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -15,11 +15,9 @@ import { sha1 } from './utils/helpers.js';
 import { CONSTANTS } from './constants.js';
 import { getPasswordSetupHtml, getLoginHtml } from './templates/auth.js';
 
-// [新增] 全局变量，用于内存缓存上一次保存的域名
-// Worker 在热启动期间会保留此变量，避免重复写入 KV
 let lastSavedDomain = '';
 
-async function handlePasswordSetup(request, env) {
+async function handlePasswordSetup(request, env, ctx) {
     if (request.method === 'POST') {
         const formData = await request.formData();
         const password = formData.get('password');
@@ -27,8 +25,18 @@ async function handlePasswordSetup(request, env) {
         if (!env.KV) return new Response('未绑定 KV', { status: 500 });
         await env.KV.put('UUID', password);
         
-        // 清除缓存，使 UUID 立即生效
         cleanConfigCache();
+
+        // [新增] 首次设置完成后，触发 WebDAV 推送 (First Deployment)
+        try {
+            const appCtx = await initializeContext(request, env);
+            appCtx.waitUntil = ctx.waitUntil.bind(ctx);
+            // 首次设置强制推送
+            ctx.waitUntil(executeWebDavPush(env, appCtx, true));
+            console.log('[Setup] First time setup completed, WebDAV push triggered.');
+        } catch (e) {
+            console.error('[Setup] Failed to trigger WebDAV push:', e);
+        }
 
         return new Response('设置成功，请刷新页面', { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8' } });
     }
@@ -48,7 +56,6 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
 export default {
     async fetch(request, env, ctx) {
         try {
-            // 1. 初始化上下文
             const context = await initializeContext(request, env);
             context.waitUntil = ctx.waitUntil.bind(ctx);
 
@@ -56,23 +63,23 @@ export default {
             const path = url.pathname.toLowerCase();
             const hostName = request.headers.get('Host');
 
-            // 2. WebSocket 核心拦截 (最高优先级)
+            // WebSocket
             const upgradeHeader = request.headers.get('Upgrade');
             if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
                 if (!context.userID) return new Response('UUID not set', { status: 401 });
                 return await handleWebSocketRequest(request, context);
             }
 
-            // 3. 初始密码设置 (KV 存在但无 UUID)
+            // Password Setup
             const rawUUID = await getConfig(env, 'UUID');
             const rawKey = await getConfig(env, 'KEY');
             const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
 
             if (isUninitialized && env.KV && path === '/') {
-                return await handlePasswordSetup(request, env);
+                return await handlePasswordSetup(request, env, ctx);
             }
 
-            // 4. 路由识别
+            // Route ID
             const superPassword = CONSTANTS.SUPER_PASSWORD;
             const dynamicID = context.dynamicUUID.toLowerCase();
             const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
@@ -89,18 +96,19 @@ export default {
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
-            // [优化] 域名自动捕获逻辑
-            // 只有在 KV 可用、Host 有效、且与上次内存缓存的域名不一致时，才执行 KV 写入
+            // [新增] 域名自动发现与推送触发
             if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
-                    lastSavedDomain = hostName; // 更新内存缓存
-                    // 异步写入 KV，不阻塞主线程
+                    lastSavedDomain = hostName; 
                     ctx.waitUntil(env.KV.put('SAVED_DOMAIN', hostName));
-                    // console.log(`[Domain] Updated cached domain to: ${hostName}`);
+                    
+                    // 当域名发生变更(或首次发现)时，尝试触发推送
+                    // 这里 force=false，意味着只有 WebDAV 开关打开时才会推
+                    ctx.waitUntil(executeWebDavPush(env, context, false));
                 }
             }
 
-            // 5. XHTTP 协议拦截
+            // XHTTP
             const xhttpPath = context.userID ? `/${context.userID.substring(0, 8)}` : null;
             const isXhttpHeader = request.headers.get('Content-Type') === 'application/grpc';
             const isXhttpPath = xhttpPath && path === xhttpPath;
@@ -121,21 +129,21 @@ export default {
                                 }
                             });
                         }
-                        return new Response('Internal Server Error (XHTTP Handler Failed)', { status: 500 });
+                        return new Response('Internal Server Error', { status: 500 });
                     }
                     
                     if (!isManagementRoute) {
                         const contentType = request.headers.get('content-type') || '';
                         if (contentType.includes('application/x-www-form-urlencoded') || contentType.includes('multipart/form-data')) {
-                            return new Response('Error: Detected Form submission on non-auth path. Missing "?auth=login" param?', { status: 400 });
+                            return new Response('Error: Detected Form submission on non-auth path.', { status: 400 });
                         }
                     }
                 } else if (isXhttpPath || isXhttpHeader) {
-                    return new Response('XHTTP protocol is disabled by admin.', { status: 403 });
+                    return new Response('XHTTP protocol is disabled.', { status: 403 });
                 }
             }
 
-            // 6. 管理页面鉴权
+            // Management Pages
             if (isManagementRoute) {
                 if (!path.startsWith('/' + superPassword)) {
                     if (context.adminPass) {
@@ -165,13 +173,13 @@ export default {
                 return new Response(html, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
             }
 
-            // 8. 订阅处理
+            // Subscriptions
             if (isSubRoute) {
                 const response = await handleSubscription(request, env, context, subPath, hostName);
                 if (response) return response;
             }
 
-            // 9. 根路径与回落
+            // Root Path
             if (path === '/') {
                 const url302 = await getConfig(env, 'URL302');
                 if (url302) return Response.redirect(url302, 302);
@@ -182,7 +190,7 @@ export default {
                     if (resp) return resp;
                 }
 
-                return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+                return new Response('<!DOCTYPE html><html><body><h1>Welcome to nginx!</h1></body></html>', { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
             }
 
             return new Response('404 Not Found', { status: 404 });
@@ -192,14 +200,8 @@ export default {
         }
     },
     
-    // Scheduled 事件: 只有此处会触发 WebDAV 推送
+    // Scheduled Handler (保留但不再依赖 Cron)
     async scheduled(event, env, ctx) {
-        try {
-            const context = await initializeContext(null, env);
-            context.waitUntil = ctx.waitUntil.bind(ctx);
-            await executeWebDavPush(env, context);
-        } catch (e) { 
-            console.error('Scheduled Event Error:', e); 
-        }
+        // Cron trigger disabled by logic updates.
     }
 };
