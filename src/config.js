@@ -1,9 +1,9 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [修复] 修正了 ProxyIP 远程加载逻辑。当检测到 URL 时，现在会真正发起 fetch 请求获取内容。
- * 2. [优化] 为远程 ProxyIP 列表增加简单的内存缓存，避免高频请求导致的性能开销。
- * 3. [修复] 显式处理逗号(,)、分号(;)和换行(\n)，确保多 IP 字符串被正确分割。
+ * 1. [修复] 强化远程配置解析逻辑，增加对注释行（# 或 //）和空行的过滤。
+ * 2. [修复] 修正行解析时对等号的处理，确保键值对校验更严谨。
+ * 3. [优化] initializeContext 新增 expectedUserIDs 预处理，提升协议校验效率。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -37,12 +37,25 @@ export async function loadRemoteConfig(env) {
                     remoteConfigCache = JSON.parse(text);
                 } catch (e) {
                     console.warn('Remote config is not JSON, trying line parse');
-                     const lines = text.split('\n');
-                     remoteConfigCache = {};
-                     lines.forEach(line => {
-                         const [k, ...v] = line.split('=');
-                         if (k && v) remoteConfigCache[k.trim()] = v.join('=').trim();
-                     });
+                    const lines = text.split('\n');
+                    remoteConfigCache = {};
+                    lines.forEach(line => {
+                        const trimmedLine = line.trim();
+                        // 过滤空行、以 # 或 // 开头的注释行
+                        if (!trimmedLine || trimmedLine.startsWith('#') || trimmedLine.startsWith('//')) {
+                            return;
+                        }
+                        
+                        // 使用 indexOf 寻找第一个等号，支持值中包含等号的情况
+                        const eqIndex = trimmedLine.indexOf('=');
+                        if (eqIndex > 0) {
+                            const k = trimmedLine.substring(0, eqIndex).trim();
+                            const v = trimmedLine.substring(eqIndex + 1).trim();
+                            if (k && v) {
+                                remoteConfigCache[k] = v;
+                            }
+                        }
+                    });
                 }
             }
         } catch (e) {
@@ -119,6 +132,7 @@ export async function initializeContext(request, env) {
         userID: '', 
         dynamicUUID: '', 
         userIDLow: '', 
+        expectedUserIDs: [], // [新增] 预存小写 ID 列表，优化协议握手性能
         proxyIP: '', 
         proxyIPList: [], 
         dns64: dns64 || '', 
@@ -144,6 +158,9 @@ export async function initializeContext(request, env) {
         ctx.userIDLow = userIDs[1]; 
         ctx.dynamicUUID = seed;
     }
+
+    // [性能优化] 预生成小写 ID 列表，供各协议模块直接使用
+    ctx.expectedUserIDs = [ctx.userID, ctx.userIDLow].filter(Boolean).map(id => id.toLowerCase());
 
     // [核心修复] 处理 ProxyIP
     const rawProxyIP = proxyIPStr || CONSTANTS.DEFAULT_PROXY_IP;
