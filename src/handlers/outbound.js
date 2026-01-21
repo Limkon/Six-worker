@@ -1,10 +1,9 @@
 /**
  * 文件名: src/handlers/outbound.js
- * 修复说明:
- * 1. [Critical Fix] 移除了 NAT64 连接时 IPv6 地址的多余方括号 `[]`，确保 connect() 调用成功。
- * 2. [Refactor] 重构 parseProxyIP 函数，增强对 [IPv6]:Port 格式的解析健壮性。
- * 3. [Stability] 包含 SOCKS5 握手检查、Early Data 零拷贝处理及 Stream 锁竞争修复。
- * 4. [Security] 包含黑名单 (isHostBanned) 检查逻辑。
+ * 修改内容:
+ * 1. [Optimization] 优化 shouldUseSocks5 匹配逻辑，减少正则对象创建开销。
+ * 2. [Critical Fix] 保持对 NAT64 连接时 IPv6 地址方括号的去除处理。
+ * 3. [Refactor] 保持 ProxyIP 解析和 SOCKS5 握手逻辑的稳定性。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -51,10 +50,21 @@ function parseProxyIP(proxyAddr, defaultPort) {
 function shouldUseSocks5(addressRemote, go2socks5) {
     if (!go2socks5 || go2socks5.length === 0) return false;
     if (go2socks5.includes('all in') || go2socks5.includes('*')) return true;
+    
     return go2socks5.some(pattern => {
-        let regexPattern = pattern.replace(/\*/g, '.*');
-        let regex = new RegExp(`^${regexPattern}$`, 'i');
-        return regex.test(addressRemote);
+        // [Optimization] 优先进行简单的字符串匹配，避免不必要的正则开销
+        if (!pattern.includes('*')) {
+            return pattern.toLowerCase() === addressRemote.toLowerCase();
+        }
+        
+        // 对于包含通配符的规则，再使用正则
+        try {
+            let regexPattern = pattern.replace(/\*/g, '.*');
+            let regex = new RegExp(`^${regexPattern}$`, 'i');
+            return regex.test(addressRemote);
+        } catch (e) {
+            return false;
+        }
     });
 }
 
