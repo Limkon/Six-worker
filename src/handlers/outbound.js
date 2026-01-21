@@ -1,8 +1,10 @@
+// src/handlers/outbound.js
+
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Critical Fix] 修复 connectAndWrite 中超时导致的 Socket 句柄泄漏问题。
- * 2. [Functional Fix] 恢复缺失的 isHostBanned 黑名单检查逻辑。
+ * 1. [Critical Fix] 彻底修复 connectAndWrite 中超时导致的 Socket 句柄泄漏问题 (通过 isTimedOut 标记处理迟到的连接)。
+ * 2. [Functional Fix] 包含 isHostBanned 黑名单检查逻辑。
  * 3. [Critical Fix] 包含 SOCKS5 握手长度检查和 Early Data 处理。
  * 4. [Optimization] 包含 Stream 锁竞争修复和缓冲区冲刷逻辑。
  * 5. [Refactor] 优化 SOCKS5 Early Data 处理为零拷贝 (subarray)。
@@ -26,8 +28,6 @@ function parseProxyIP(proxyAddr, defaultPort) {
     if (host.startsWith('[')) {
         const bracketEnd = host.lastIndexOf(']');
         if (bracketEnd === -1) {
-            // [Fix] 格式错误处理：如果以 [ 开头但没有 ]，视为无效或尝试直接作为 host
-            // 这种情况下继续解析极易出错，直接返回原始值或作为 host 返回
             return { host: host, port: defaultPort };
         }
         
@@ -151,7 +151,6 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     }
 
     if (headLen > 0 && connRes.length > headLen) {
-        // [Refactor] 使用 subarray 替代 slice，避免内存复制
         socket.initialData = connRes.subarray(headLen);
     }
 
@@ -162,7 +161,6 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    // [Config] 保持原有的超时策略
     const STEPPED_TIMEOUTS = [5000, 6000, 7000];
     let attemptCounter = 0;
 
@@ -172,29 +170,60 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 
         log(`[connect] Target: ${host}:${port} (Socks: ${isSocks}) (Timeout: ${currentTimeout}ms)`);
         
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error(`Connect timeout (${currentTimeout}ms)`)), currentTimeout));
+        // [修复] 标记该次尝试是否已超时
+        let isTimedOut = false;
+
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => {
+            isTimedOut = true;
+            reject(new Error(`Connect timeout (${currentTimeout}ms)`));
+        }, currentTimeout));
         
         let socket;
         try {
             const doConnect = async () => {
-                 if (isSocks) {
-                    return await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
-                } else {
-                    return connect({ hostname: host, port: port });
-                }
+                 let s;
+                 try {
+                     if (isSocks) {
+                        s = await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
+                    } else {
+                        s = connect({ hostname: host, port: port });
+                    }
+                 } catch(e) {
+                     throw e;
+                 }
+
+                 // [修复关键点]：如果连接成功时已经超时，立即关闭 Socket 并返回 null/抛错
+                 // 这样可以确保 Promise.race 已经 reject 的情况下，后台建立的连接不会被泄漏
+                 if (isTimedOut) {
+                     if (s) {
+                         try { s.close(); } catch(e) {}
+                         log(`[connect] Late connection to ${host}:${port} closed due to timeout.`);
+                     }
+                     return null; 
+                 }
+                 return s;
             };
 
             // 获取 Socket 对象
             socket = await Promise.race([doConnect(), timeoutPromise]);
             
+            // 双重检查：理论上 doConnect 如果处理了 isTimedOut 不会返回 socket，但为了稳健性再次检查
+            if (isTimedOut && socket) {
+                 try { socket.close(); } catch(e) {}
+                 throw new Error(`Connect timeout (${currentTimeout}ms) - closed late socket`);
+            }
+
+            if (!socket) { 
+                throw new Error('Connection failed or timed out');
+            }
+
             if (!isSocks) {
                 // 等待连接建立 (Socket.opened)，同时继续监听超时
                 await Promise.race([socket.opened, timeoutPromise]);
             }
             return socket;
         } catch (err) {
-            // [修复] 发生超时或其他错误时，如果 socket 已创建，必须显式关闭以释放资源
-            // 否则在极端网络下，后台连接数会堆积导致 Worker 挂掉
+            // 常规错误处理，确保如果 socket 已经被赋值则关闭
             if (socket) {
                 try { socket.close(); } catch(e) {}
             }
@@ -287,8 +316,6 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             async write(chunk, controller) {
                 hasIncomingData = true;
                 if (webSocket.readyState !== 1) { 
-                    // [Fix] 当 WebSocket 关闭时，主动报错以中断 PipeTo，
-                    // 防止继续从 remoteSocket 读取数据造成资源浪费
                     controller.error(new Error('Client WebSocket closed, stopping remote read'));
                     return;
                 }
@@ -341,7 +368,6 @@ async function flushBuffer(writer, buffer, log) {
 }
 
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-    // [修复] 恢复黑名单检查逻辑
     if (isHostBanned(addressRemote, ctx.banHosts)) {
         log(`[Outbound] Host banned: ${addressRemote}`);
         safeCloseWebSocket(webSocket);
