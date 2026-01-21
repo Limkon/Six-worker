@@ -1,8 +1,10 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Critical Fix] 修复 SOCKS5 握手阶段可能导致的数据丢失问题 (Early Data Handling)。
- * 2. [Optimization] 保持原有的 Stream 锁竞争修复和缓冲逻辑。
+ * 1. [Functional Fix] 恢复缺失的 isHostBanned 黑名单检查逻辑。
+ * 2. [Critical Fix] 包含 SOCKS5 握手长度检查和 Early Data 处理。
+ * 3. [Optimization] 包含 Stream 锁竞争修复和缓冲区冲刷逻辑。
+ * 4. [Config] 保持超时设置为 [5000, 6000, 7000]。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -89,7 +91,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     await writer.write(new Uint8Array([5, 1, 2])); 
     let { value: res } = await reader.read();
     
-    if (!res || res[0] !== 0x05 || res[1] === 0xff) throw new Error('SOCKS5 greeting failed');
+    if (!res || res.length < 2 || res[0] !== 0x05 || res[1] === 0xff) throw new Error('SOCKS5 greeting failed');
     
     // SOCKS5 Auth
     if (res[1] === 0x02) {
@@ -102,7 +104,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
         await writer.write(authReq);
         
         const { value: authRes } = await reader.read();
-        if (!authRes || authRes[0] !== 0x01 || authRes[1] !== 0x00) throw new Error('SOCKS5 auth failed');
+        if (!authRes || authRes.length < 2 || authRes[0] !== 0x01 || authRes[1] !== 0x00) throw new Error('SOCKS5 auth failed');
     }
     
     let DSTADDR;
@@ -130,17 +132,17 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     await writer.write(socksRequest);
     const { value: connRes } = await reader.read();
     
-    if (!connRes || connRes[0] !== 0x05 || connRes[1] !== 0x00) throw new Error(`SOCKS5 connection failed: ${connRes ? connRes[1] : 'No response'}`);
+    if (!connRes || connRes.length < 2 || connRes[0] !== 0x05 || connRes[1] !== 0x00) throw new Error(`SOCKS5 connection failed: ${connRes ? connRes[1] : 'No response'}`);
     
-    // [修复] 处理 SOCKS5 握手后的早期数据 (Early Data)
-    // 握手响应格式: VER(1) REP(1) RSV(1) ATYP(1) BND.ADDR(Var) BND.PORT(2)
+    // 处理 SOCKS5 握手后的早期数据 (Early Data)
     let headLen = 0;
-    if (connRes[3] === 1) headLen = 10; // IPv4
-    else if (connRes[3] === 4) headLen = 22; // IPv6
-    else if (connRes[3] === 3) headLen = 7 + connRes[4]; // Domain
+    if (connRes.length >= 4) {
+        if (connRes[3] === 1) headLen = 10; // IPv4
+        else if (connRes[3] === 4) headLen = 22; // IPv6
+        else if (connRes[3] === 3) headLen = 7 + connRes[4]; // Domain
+    }
 
-    if (connRes.length > headLen) {
-        // 将剩余数据挂载到 socket 对象上，供后续逻辑处理
+    if (headLen > 0 && connRes.length > headLen) {
         socket.initialData = connRes.slice(headLen);
     }
 
@@ -151,6 +153,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
+    // [Config] 保持原有的超时策略
     const STEPPED_TIMEOUTS = [5000, 6000, 7000];
     let attemptCounter = 0;
 
@@ -240,7 +243,6 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     let hasIncomingData = false;
     let responseHeader = vlessHeader;
     
-    // [修复] 如果 Socket 携带了握手后的残留数据，优先发送
     if (remoteSocket.initialData && remoteSocket.initialData.byteLength > 0) {
         hasIncomingData = true;
         log(`[Socks5] Flushing ${remoteSocket.initialData.byteLength} bytes of early data`);
@@ -255,7 +257,6 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
         } else {
             webSocket.send(remoteSocket.initialData);
         }
-        // 清理以防重复使用（虽然此处一般不会）
         remoteSocket.initialData = null;
     }
 
@@ -299,17 +300,14 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     }
 }
 
-// [优化] 辅助函数：更健壮的缓冲区冲刷逻辑
 async function flushBuffer(writer, buffer, log) {
     if (!buffer || buffer.length === 0) return;
     
     log(`Flushing ${buffer.length} buffered chunks`);
     
-    // 使用 while 循环，应对 flush 过程中又有新数据被 push 进来的情况
-    // 复制当前 buffer 并清空，避免死循环（虽然 JS 单线程通常不会，但为了逻辑严谨）
     while (buffer.length > 0) {
         const batch = [...buffer];
-        buffer.length = 0; // 立即清空，后续进入的数据会在下一次循环或由 websocket.js 处理
+        buffer.length = 0; 
         
         for (const chunk of batch) {
             await writer.write(chunk);
@@ -318,18 +316,21 @@ async function flushBuffer(writer, buffer, log) {
 }
 
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-    // 准备重试环境：设置状态为连接中
-    // 注意：这里将 value 设为 null，通知 websocket.js 开始缓冲数据
+    // [修复] 恢复黑名单检查逻辑
+    if (isHostBanned(addressRemote, ctx.banHosts)) {
+        log(`[Outbound] Host banned: ${addressRemote}`);
+        safeCloseWebSocket(webSocket);
+        return;
+    }
+
     const prepareRetry = () => {
         remoteSocketWrapper.value = null;
         remoteSocketWrapper.isConnecting = true;
     };
     
-    // 状态更新辅助函数：确保释放锁之后再更新状态
     const finalizeConnection = (socket) => {
         remoteSocketWrapper.value = socket;
         remoteSocketWrapper.isConnecting = false;
-        // 此时 websocket.js 才会检测到新 socket 并尝试获取 writer
     };
 
     const nat64Retry = async () => {
@@ -344,7 +345,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             const nat64IP = '[' + v6Address + ']';
             const natSocket = await connect({ hostname: nat64IP, port: portRemote });
             
-            // [关键修改] 先获取 writer 并冲刷数据
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) {
                 await writer.write(rawClientData);
@@ -352,7 +352,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
             writer.releaseLock();
             
-            // [关键修改] 锁释放后再更新状态
             finalizeConnection(natSocket);
             
             remoteSocketToWS(natSocket, webSocket, vlessResponseHeader, null, log);
@@ -387,7 +386,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 
                 const proxySocket = await connect({ hostname: proxyHost.toLowerCase(), port: proxyPort });
                 
-                // [关键修改] 先获取 writer 并冲刷数据
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) {
                     await writer.write(rawClientData);
@@ -395,7 +393,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 await flushBuffer(writer, remoteSocketWrapper.buffer, log);
                 writer.releaseLock();
                 
-                // [关键修改] 锁释放后再更新状态
                 finalizeConnection(proxySocket);
                 
                 const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
@@ -408,7 +405,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             }
         }
 
-        // 如果 ProxyIP 全部失败，尝试 NAT64
         if (ctx.dns64 && !(ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5))) {
             await nat64Retry();
         } else {
@@ -419,7 +415,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     try {
         const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log);
         
-        // [关键修改] 先获取 writer 并冲刷数据
         const writer = socket.writable.getWriter();
         if (rawClientData && rawClientData.byteLength > 0) {
             await writer.write(rawClientData);
@@ -427,7 +422,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         await flushBuffer(writer, remoteSocketWrapper.buffer, log);
         writer.releaseLock();
         
-        // [关键修改] 锁释放后再更新状态，防止 websocket.js 抢占 Locked Stream
         finalizeConnection(socket);
         
         remoteSocketToWS(socket, webSocket, vlessResponseHeader, proxyIPRetry, log);
