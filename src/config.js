@@ -1,41 +1,45 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [性能/逻辑优化] loadRemoteConfig 增加时间戳缓存 (TTL 60秒)，防止频繁请求。
- * 2. [逻辑优化] 当远程配置更新时，清空 configCache 以确保新配置生效。
+ * 1. [逻辑变更] 移除 TTL 时间判断，实现“永久缓存”。
+ * 2. [新增功能] 增加 forceReload 参数，允许通过 URL 参数强制刷新配置。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
 
-// [优化] 内存缓存对象
+// 内存缓存对象
 let configCache = {};
 
-// [修改] 远程配置缓存，包含数据和上次获取时间
+// 远程配置缓存
 let remoteConfigCache = {
     data: {},
+    // lastFetch 字段不再需要用于过期判断，但保留用于调试或记录
     lastFetch: 0
 };
 
-// 专门用于存储远程 ProxyIP 列表的缓存
+// 远程 ProxyIP 缓存
 let proxyIPRemoteCache = {
     data: [],
     expires: 0
 };
 
-// [新增] 清除全局缓存函数
 export function cleanConfigCache() {
     configCache = {};
     remoteConfigCache = { data: {}, lastFetch: 0 };
     proxyIPRemoteCache = { data: [], expires: 0 };
 }
 
-export async function loadRemoteConfig(env) {
+/**
+ * 加载远程配置
+ * @param {Object} env 环境对象
+ * @param {boolean} forceReload 是否强制刷新（忽略缓存）
+ */
+export async function loadRemoteConfig(env, forceReload = false) {
     const remoteConfigUrl = await env.KV.get('REMOTE_CONFIG_URL');
-    const now = Date.now();
-    const CACHE_TTL = 60000; // 60秒缓存
-
-    // [新增] 检查 TTL，避免频繁请求
-    if (remoteConfigUrl && now - remoteConfigCache.lastFetch < CACHE_TTL) {
+    
+    // [修改] 永久缓存逻辑：
+    // 如果不是强制刷新(forceReload为false)，且缓存中有数据，直接返回缓存。
+    if (!forceReload && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
         return remoteConfigCache.data;
     }
     
@@ -44,12 +48,13 @@ export async function loadRemoteConfig(env) {
             const response = await fetch(remoteConfigUrl);
             if (response.ok) {
                 const text = await response.text();
+                const now = Date.now();
                 try {
                     const newData = JSON.parse(text);
                     remoteConfigCache.data = newData;
                     remoteConfigCache.lastFetch = now;
                     
-                    // [关键] 远程配置更新后，清空本地 configCache，防止旧值覆盖新值
+                    // 远程配置更新后，清空本地 key-value 缓存，确保生效
                     configCache = {}; 
                 } catch (e) {
                     console.warn('Remote config is not JSON, trying line parse');
@@ -71,7 +76,7 @@ export async function loadRemoteConfig(env) {
                     });
                     remoteConfigCache.data = newData;
                     remoteConfigCache.lastFetch = now;
-                    configCache = {}; // 清空缓存
+                    configCache = {}; 
                 }
             }
         } catch (e) {
@@ -82,14 +87,12 @@ export async function loadRemoteConfig(env) {
 }
 
 export async function getConfig(env, key, defaultValue = undefined) {
-    // 1. [优化] 优先检查内存缓存
     if (configCache[key] !== undefined) {
         return configCache[key];
     }
 
     let val = undefined;
     
-    // 2. 读取 KV (优先级：KV > 环境变量，允许动态覆盖)
     if (env.KV) {
         const kvVal = await env.KV.get(key);
         if (kvVal !== null) {
@@ -97,32 +100,31 @@ export async function getConfig(env, key, defaultValue = undefined) {
         }
     }
 
-    // 3. 读取远程配置缓存
-    // [修改] 访问 remoteConfigCache.data
     if (!val && remoteConfigCache.data && remoteConfigCache.data[key]) {
         val = remoteConfigCache.data[key];
     }
     
-    // 4. 读取环境变量
     if (!val && env[key]) val = env[key];
     
-    // 5. 兼容旧的 UUID/KEY 命名
     if (!val && key === 'UUID') val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
     if (!val && key === 'KEY') val = env.KEY || env.TOKEN;
     
     const finalVal = val !== undefined ? val : defaultValue;
 
-    // 6. [优化] 写入缓存
     configCache[key] = finalVal;
 
     return finalVal;
 }
 
 export async function initializeContext(request, env) {
-    // [新增] 远程配置开关检查
+    // [新增] 解析 URL 以检查 flush 参数
+    const url = new URL(request ? request.url : 'http://localhost');
+    const forceReload = url.searchParams.has('flush'); // 只要 URL 包含 ?flush 即可触发
+
     const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0');
     if (enableRemote === '1') {
-        await loadRemoteConfig(env);
+        // [修改] 传入 forceReload 参数
+        await loadRemoteConfig(env, forceReload);
     }
 
     const [
@@ -169,7 +171,6 @@ export async function initializeContext(request, env) {
         adminPass: adminPass,
     };
 
-    // 处理 UUID
     if (rawUUID) {
         ctx.userID = rawUUID;
         ctx.dynamicUUID = rawUUID;
@@ -251,7 +252,6 @@ export async function initializeContext(request, env) {
 
     ctx.enableXhttp = !ctx.disabledProtocols.includes('xhttp');
 
-    const url = new URL(request ? request.url : 'http://localhost');
     if (url.searchParams.has('proxyip')) ctx.proxyIP = url.searchParams.get('proxyip');
     if (url.searchParams.has('socks5')) ctx.socks5 = url.searchParams.get('socks5');
     
