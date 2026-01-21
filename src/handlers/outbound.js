@@ -1,9 +1,9 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [修复] 重试逻辑开始时立即置空 socket wrapper，防止 websocket.js 写入死连接。
- * 2. [修复] 重试连接成功后，显式刷新 remoteSocketWrapper.buffer，防止数据丢失。
- * 3. [优化] 提取 flushBuffer 逻辑复用。
+ * 1. [关键修复] 重试逻辑开始时立即重置 socket wrapper 状态，防止向死连接写入。
+ * 2. [关键修复] 连接成功后显式刷新 (flush) 缓冲区数据，防止重试期间的数据丢失。
+ * 3. [优化] 统一 Buffer 处理逻辑，增强连接稳定性。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -271,7 +271,7 @@ async function flushBuffer(writer, buffer, log) {
         for (const chunk of buffer) {
             await writer.write(chunk);
         }
-        // 清空数组，但保持引用不变（虽然 handleTCPOutBound 里是重新赋值 []，这里清空更安全）
+        // 清空数组，但保持引用不变
         buffer.length = 0;
     }
 }
@@ -355,7 +355,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 return; 
             } catch (e) {
                 log(`[Retry] ProxyIP (${ip}) failed: ${e.message}`);
-                // 注意：这里失败循环继续，remoteSocketWrapper 依然保持 null/isConnecting 状态，这是正确的
+                // 注意：这里失败循环继续，remoteSocketWrapper 依然保持 null/isConnecting 状态，以便尝试下一个 IP
             }
         }
 
