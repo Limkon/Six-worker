@@ -1,12 +1,12 @@
 /**
  * 文件名: src/utils/dns.js
- * 优化内容: 
- * 1. [性能] 增加 DNS 内存缓存 (TTL 60秒)，消除重复 DoH 请求延迟。
- * 2. [稳定性] 增强 parseIPv6 的容错性。
+ * 修改说明: 
+ * 1. [安全性] 增强 JSON 解析的健壮性，防止非标准响应导致崩溃。
+ * 2. [稳定性] 增加对 Answer 字段的类型检查。
  */
 import { CONSTANTS } from '../constants.js';
 
-// [优化] DNS 缓存 Map: { domain: { ip: string, expires: number } }
+// DNS 缓存 Map: { domain: { ip: string, expires: number } }
 const dnsCache = new Map();
 
 export function parseIPv6(ip) {
@@ -22,11 +22,8 @@ export function parseIPv6(ip) {
     
     if (emptyIndex !== -1) {
         // 处理 :: 缩写情况
-        // head: :: 之前的段
         const head = parts.slice(0, emptyIndex).filter(p => p !== '').map(p => parseInt(p, 16) || 0);
-        // tail: :: 之后的段
         const tail = parts.slice(emptyIndex + 1).filter(p => p !== '').map(p => parseInt(p, 16) || 0);
-        // middle: 需要补齐的 0
         const middle = new Array(8 - head.length - tail.length).fill(0);
         res = [...head, ...middle, ...tail];
     } else {
@@ -40,7 +37,7 @@ export function parseIPv6(ip) {
 export async function resolveToIPv6(domain, dnsServer) {
     if (!dnsServer) return null;
 
-    // [优化] 1. 检查缓存
+    // 1. 检查缓存
     const cacheKey = `${domain}|${dnsServer}`;
     const cached = dnsCache.get(cacheKey);
     if (cached && Date.now() < cached.expires) {
@@ -60,14 +57,21 @@ export async function resolveToIPv6(domain, dnsServer) {
 
         if (!response.ok) return null;
 
-        const data = await response.json();
+        // [修复] 增加 JSON 解析的容错处理
+        let data;
+        try {
+            data = await response.json();
+        } catch (jsonError) {
+            console.warn(`[DNS] Failed to parse JSON from ${dnsServer}:`, jsonError);
+            return null;
+        }
         
-        // 提取 Answer
-        if (data.Status === 0 && data.Answer) {
+        // [修复] 严格检查数据结构，确保 Answer 存在且为数组
+        if (data && data.Status === 0 && Array.isArray(data.Answer)) {
             for (const rec of data.Answer) {
                 if (rec.type === 28 && rec.data) { // Type 28 is AAAA
                     const ip = rec.data;
-                    // [优化] 3. 写入缓存 (TTL 60秒)
+                    // 3. 写入缓存 (TTL 60秒)
                     dnsCache.set(cacheKey, { ip, expires: Date.now() + 60000 });
                     
                     // 简单的缓存清理 (防止内存无限增长)
@@ -78,7 +82,7 @@ export async function resolveToIPv6(domain, dnsServer) {
             }
         }
     } catch (e) {
-        console.error(`DNS Query failed for ${domain}:`, e);
+        console.error(`[DNS] Query failed for ${domain}:`, e);
     }
     
     return null;
