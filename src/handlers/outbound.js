@@ -1,11 +1,12 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Functional Fix] 恢复缺失的 isHostBanned 黑名单检查逻辑。
- * 2. [Critical Fix] 包含 SOCKS5 握手长度检查和 Early Data 处理。
- * 3. [Optimization] 包含 Stream 锁竞争修复和缓冲区冲刷逻辑。
- * 4. [Refactor] 优化 SOCKS5 Early Data 处理为零拷贝 (subarray)。
- * 5. [Fix] 增强 IPv6 解析健壮性，修复 WebSocket 关闭后的资源浪费。
+ * 1. [Critical Fix] 修复 connectAndWrite 中超时导致的 Socket 句柄泄漏问题。
+ * 2. [Functional Fix] 恢复缺失的 isHostBanned 黑名单检查逻辑。
+ * 3. [Critical Fix] 包含 SOCKS5 握手长度检查和 Early Data 处理。
+ * 4. [Optimization] 包含 Stream 锁竞争修复和缓冲区冲刷逻辑。
+ * 5. [Refactor] 优化 SOCKS5 Early Data 处理为零拷贝 (subarray)。
+ * 6. [Fix] 增强 IPv6 解析健壮性，修复 WebSocket 关闭后的资源浪费。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -171,21 +172,34 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 
         log(`[connect] Target: ${host}:${port} (Socks: ${isSocks}) (Timeout: ${currentTimeout}ms)`);
         
-        const doConnect = async () => {
-             if (isSocks) {
-                return await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
-            } else {
-                return connect({ hostname: host, port: port });
-            }
-        };
-
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error(`Connect timeout (${currentTimeout}ms)`)), currentTimeout));
-        const socket = await Promise.race([doConnect(), timeoutPromise]);
         
-        if (!isSocks) {
-            await Promise.race([socket.opened, timeoutPromise]);
+        let socket;
+        try {
+            const doConnect = async () => {
+                 if (isSocks) {
+                    return await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
+                } else {
+                    return connect({ hostname: host, port: port });
+                }
+            };
+
+            // 获取 Socket 对象
+            socket = await Promise.race([doConnect(), timeoutPromise]);
+            
+            if (!isSocks) {
+                // 等待连接建立 (Socket.opened)，同时继续监听超时
+                await Promise.race([socket.opened, timeoutPromise]);
+            }
+            return socket;
+        } catch (err) {
+            // [修复] 发生超时或其他错误时，如果 socket 已创建，必须显式关闭以释放资源
+            // 否则在极端网络下，后台连接数会堆积导致 Worker 挂掉
+            if (socket) {
+                try { socket.close(); } catch(e) {}
+            }
+            throw err;
         }
-        return socket;
     };
 
     try {
