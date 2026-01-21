@@ -1,15 +1,15 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [关键修复] 重试逻辑开始时立即重置 socket wrapper 状态，防止向死连接写入。
- * 2. [关键修复] 连接成功后显式刷新 (flush) 缓冲区数据，防止重试期间的数据丢失。
- * 3. [优化] 统一 Buffer 处理逻辑，增强连接稳定性。
+ * 1. [Critical] 修复 NAT64 连接逻辑中 resolveToIPv6 返回 null 导致的 "[null]" 地址错误。
+ * 2. 保持原有重试和缓冲刷新逻辑。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
 import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
 
+// ... (parseProxyIP, shouldUseSocks5, parseSocks5Config, socks5Connect 保持不变) ...
 /**
  * 解析 ProxyIP 字符串，提取 host 和 port
  */
@@ -210,8 +210,14 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     if (!useSocks && ctx.dns64) {
         try {
             log(`[connect] Phase 3: Attempting NAT64...`);
-            const nat64IP = '[' + (await resolveToIPv6(addressRemote, ctx.dns64)) + ']';
-            return await connectAndWrite(nat64IP, portRemote, false);
+            // [修复] 增加判空逻辑
+            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+            if (v6Address) {
+                const nat64IP = '[' + v6Address + ']';
+                return await connectAndWrite(nat64IP, portRemote, false);
+            } else {
+                log(`[connect] Phase 3 (NAT64) skipped: DNS resolution failed`);
+            }
         } catch (err3) {
             log(`[connect] Phase 3 (NAT64) failed: ${err3.message}`);
         }
@@ -286,10 +292,14 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     const nat64Retry = async () => {
         if (!ctx.dns64) { safeCloseWebSocket(webSocket); return; }
         log('[Retry] Switching to NAT64...');
-        prepareRetry(); // <--- 关键修复：立即通知 websocket.js 暂停写入
+        prepareRetry(); 
         
         try {
-            const nat64IP = '[' + (await resolveToIPv6(addressRemote, ctx.dns64)) + ']';
+            // [修复] 增加判空逻辑
+            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+            if (!v6Address) throw new Error('DNS64 resolution failed');
+
+            const nat64IP = '[' + v6Address + ']';
             const natSocket = await connect({ hostname: nat64IP, port: portRemote });
             
             remoteSocketWrapper.value = natSocket;
@@ -299,7 +309,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             if (rawClientData && rawClientData.byteLength > 0) {
                 await writer.write(rawClientData);
             }
-            // <--- 关键修复：刷新重试期间积压的 buffer
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
             
             writer.releaseLock();
@@ -313,7 +322,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
 
     const proxyIPRetry = async () => {
         log('[Retry] Switching to ProxyIP...');
-        prepareRetry(); // <--- 关键修复：立即通知 websocket.js 暂停写入
+        prepareRetry(); 
 
         let attempts = [];
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
@@ -343,7 +352,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 if (rawClientData && rawClientData.byteLength > 0) {
                     await writer.write(rawClientData);
                 }
-                // <--- 关键修复：刷新重试期间积压的 buffer
                 await flushBuffer(writer, remoteSocketWrapper.buffer, log);
                 
                 writer.releaseLock();
@@ -355,7 +363,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 return; 
             } catch (e) {
                 log(`[Retry] ProxyIP (${ip}) failed: ${e.message}`);
-                // 注意：这里失败循环继续，remoteSocketWrapper 依然保持 null/isConnecting 状态，以便尝试下一个 IP
             }
         }
 
@@ -376,7 +383,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         if (rawClientData && rawClientData.byteLength > 0) {
             await writer.write(rawClientData);
         }
-        // 初始连接成功也刷新一次 buffer (虽然通常是空的)
         if (remoteSocketWrapper.buffer && remoteSocketWrapper.buffer.length > 0) {
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
         }
