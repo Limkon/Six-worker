@@ -1,8 +1,8 @@
 /**
  * 文件名: src/handlers/webdav.js
  * 修改说明: 
- * 1. [修复] 尝试读取 WORKER_DOMAIN 配置，解决定时任务生成订阅时节点地址为 'worker.local' 导致无法连接的问题。
- * 2. [稳健性] 增加对 WEBDAV_URL 的存在性检查。
+ * 1. [修复] 修复 URL 拼接逻辑，自动处理末尾斜杠。
+ * 2. [稳健性] 增加 WORKER_DOMAIN 检查和内容解码容错。
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
@@ -12,14 +12,17 @@ import { CONSTANTS } from '../constants.js';
 export async function executeWebDavPush(env, ctx, force = false) {
     try {
         // 1. 获取 WebDAV 配置
-        const webdavUrl = await getConfig(env, 'WEBDAV_URL');
+        const rawWebdavUrl = await getConfig(env, 'WEBDAV_URL');
         const webdavUser = await getConfig(env, 'WEBDAV_USER');
         const webdavPass = await getConfig(env, 'WEBDAV_PASS');
 
-        if (!webdavUrl || !webdavUser || !webdavPass) {
+        if (!rawWebdavUrl || !webdavUser || !webdavPass) {
             // 静默失败，因为如果用户没配 WebDAV，不需要在日志里一直报错
             return;
         }
+
+        // [修复] 标准化 URL，确保以 / 结尾
+        const webdavUrl = rawWebdavUrl.endsWith('/') ? rawWebdavUrl : `${rawWebdavUrl}/`;
 
         console.log(`[WebDAV] Starting push to ${webdavUrl}`);
 
@@ -37,6 +40,7 @@ export async function executeWebDavPush(env, ctx, force = false) {
         const allPathHash = (await sha1('all')).toLowerCase().substring(0, subHashLength);
 
         // 4. 调用 handleSubscription 生成内容
+        // 构造模拟请求
         const mockRequest = new Request(`https://${hostName}/${ctx.dynamicUUID}/${allPathHash}`);
         
         // 调用订阅处理函数
@@ -50,12 +54,14 @@ export async function executeWebDavPush(env, ctx, force = false) {
         // 5. 获取内容并处理 (Base64 解码)
         let content = await response.text();
         try {
-            content = atob(content);
+            // 尝试将 Base64 订阅内容解码为明文，以便直接查看
+            const decoded = atob(content);
+            content = decoded;
         } catch (e) {
-            console.warn('[WebDAV] Content decode failed, using original.', e);
+            console.warn('[WebDAV] Content is not Base64 or decode failed, using original content.');
         }
 
-        // 6. 去重
+        // 6. 去重 (按行去重)
         const uniqueLines = [...new Set(content.split('\n'))].filter(line => line.trim() !== '');
         const finalContent = uniqueLines.join('\n');
 
@@ -73,10 +79,12 @@ export async function executeWebDavPush(env, ctx, force = false) {
         // 8. 生成文件名并推送
         const subName = await getConfig(env, 'SUBNAME', 'sub');
         const now = new Date();
+        // 生成时间戳文件名: sub_20231027083000.txt
         const timestamp = now.toISOString().replace(/[-:T.]/g, '').slice(0, 14);
         const fileName = `${subName}_${timestamp}.txt`;
         
-        const targetUrl = webdavUrl.endsWith('/') ? webdavUrl + fileName : webdavUrl + '/' + fileName;
+        // 使用修正后的 webdavUrl 进行拼接
+        const targetUrl = `${webdavUrl}${fileName}`;
         const auth = btoa(`${webdavUser}:${webdavPass}`);
         
         const pushRequest = fetch(targetUrl, {
@@ -92,9 +100,9 @@ export async function executeWebDavPush(env, ctx, force = false) {
         if (ctx.waitUntil) ctx.waitUntil(pushRequest);
         else await pushRequest;
         
-        console.log('[WebDAV] Push triggered successfully.');
+        console.log(`[WebDAV] Push triggered successfully: ${fileName}`);
 
     } catch (e) {
-        console.error('WebDAV Logic Error:', e);
+        console.error('[WebDAV] Logic Error:', e);
     }
 }
