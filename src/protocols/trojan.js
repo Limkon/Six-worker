@@ -15,6 +15,8 @@ export async function parseTrojanHeader(trojanBuffer, password) {
     let expectedHash = trojanHashCache.get(password);
     if (!expectedHash) {
         expectedHash = sha224Hash(String(password));
+        // [修复] 防止缓存无限增长 (内存保护)
+        if (trojanHashCache.size > 100) trojanHashCache.clear();
         trojanHashCache.set(password, expectedHash);
     }
 
