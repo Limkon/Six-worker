@@ -5,6 +5,7 @@
  * 2. [稳健性] 保持原有的锁竞争处理和缓冲区逻辑。
  * 3. [Optimization] Socks5握手改为零拷贝(subarray)。
  * 4. [Fix] 明确禁止 UDP 流量，移除"UDP over TCP"的错误实现。
+ * 5. [Security] 新增缓冲区大小限制，防止连接建立期间的内存溢出(OOM)。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -21,6 +22,9 @@ const protocolManager = new ProtocolManager()
     .register('mandala', parseMandalaHeader)
     .register('socks5', parseSocks5Header)
     .register('ss', parseShadowsocksHeader);
+
+// 缓冲区最大限制 10MB，防止恶意的大流量导致 Worker OOM
+const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
 
 function concatUint8(a, b) {
     const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
@@ -101,6 +105,14 @@ export async function handleWebSocketRequest(request, ctx) {
                     await activeWriter.write(chunkArr);
                 } else if (remoteSocketWrapper.isConnecting) {
                     // 如果 Socket 为空且处于连接中（重试中），将数据缓冲
+                    // [Fix] 防止内存溢出 (OOM)
+                    // 计算当前 buffer 总大小
+                    const currentBufferSize = remoteSocketWrapper.buffer.reduce((acc, cur) => acc + cur.byteLength, 0);
+                    
+                    if (currentBufferSize + chunkArr.byteLength > MAX_BUFFER_SIZE) {
+                        throw new Error('Connection buffer overflow: limit exceeded during connection establishment');
+                    }
+
                     // 这些数据将在 outbound.js 重试成功后通过 flushBuffer 写入
                     remoteSocketWrapper.buffer.push(chunkArr);
                 }
@@ -162,15 +174,9 @@ export async function handleWebSocketRequest(request, ctx) {
                     clientData = headerBuffer.subarray(rawDataIndex);
                     responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
                     // [Fix] 移除 UDP 伪支持。Cloudflare connect() 是 TCP 连接。
-                    // 之前的逻辑试图将 UDP 流量通过 TCP 发送，这对大多数 UDP 服务（包括 DNS）是无效的，
-                    // 除非实现完整的 UDP-over-TCP 封装。为避免误导，直接报错。
                     if (isUDP) throw new Error('UDP is not supported');
                 } else if (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') {
                     clientData = result.rawClientData;
-                    // Trojan/SS 协议本身若包含 UDP 请求，在此处也应由后续逻辑处理或报错，
-                    // 目前 outbound.js 统一使用 TCP connect，因此这些协议的 UDP 请求实际上也会变为 TCP。
-                    // 若协议层解析出 isUDP 属性，应在此处一并拦截，但目前 detect 返回主要针对 VLESS。
-                    // 暂时只针对明确的 VLESS UDP Command 进行拦截。
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
                     // SOCKS5 响应成功连接
