@@ -4,7 +4,7 @@
  * 1. [Functional Fix] 恢复缺失的 isHostBanned 黑名单检查逻辑。
  * 2. [Critical Fix] 包含 SOCKS5 握手长度检查和 Early Data 处理。
  * 3. [Optimization] 包含 Stream 锁竞争修复和缓冲区冲刷逻辑。
- * 4. [Config] 保持超时设置为 [5000, 6000, 7000]。
+ * 4. [Refactor] 优化 SOCKS5 Early Data 处理为零拷贝 (subarray)。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -143,7 +143,8 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     }
 
     if (headLen > 0 && connRes.length > headLen) {
-        socket.initialData = connRes.slice(headLen);
+        // [Refactor] 使用 subarray 替代 slice，避免内存复制
+        socket.initialData = connRes.subarray(headLen);
     }
 
     writer.releaseLock();
