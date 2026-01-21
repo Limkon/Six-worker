@@ -1,3 +1,4 @@
+// src/config.js
 /**
  * 文件名: src/config.js
  * 修改说明:
