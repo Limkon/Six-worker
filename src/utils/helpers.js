@@ -131,7 +131,7 @@ export function base64ToArrayBuffer(base64Str) {
 
 export async function cleanList(content) {
     if (!content) return [];
-    var replaced = content.replace(/[	"'\r\n]+/g, ',').replace(/,+/g, ',');
+    let replaced = content.replace(/[	"'\r\n]+/g, ',').replace(/,+/g, ',');
     if (replaced.startsWith(',')) replaced = replaced.slice(1);
     if (replaced.endsWith(',')) replaced = replaced.slice(0, -1);
     return replaced.split(',').filter(Boolean);
