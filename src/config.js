@@ -1,15 +1,20 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [新增] 在 getConfig 的 UUID 查找链中加入 env.SUPER_PASSWORD，支持直接从环境变量读取超级密码。
- * 2. [逻辑] 优化 initializeContext 中的兜底逻辑，当 UUID/KEY 缺失时，优先尝试使用 SUPER_PASSWORD 生成确定性 UUID，最后才回退到随机 UUID。
+ * 1. [性能/逻辑优化] loadRemoteConfig 增加时间戳缓存 (TTL 60秒)，防止频繁请求。
+ * 2. [逻辑优化] 当远程配置更新时，清空 configCache 以确保新配置生效。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
 
 // [优化] 内存缓存对象
 let configCache = {};
-let remoteConfigCache = {};
+
+// [修改] 远程配置缓存，包含数据和上次获取时间
+let remoteConfigCache = {
+    data: {},
+    lastFetch: 0
+};
 
 // 专门用于存储远程 ProxyIP 列表的缓存
 let proxyIPRemoteCache = {
@@ -20,12 +25,19 @@ let proxyIPRemoteCache = {
 // [新增] 清除全局缓存函数
 export function cleanConfigCache() {
     configCache = {};
-    remoteConfigCache = {};
+    remoteConfigCache = { data: {}, lastFetch: 0 };
     proxyIPRemoteCache = { data: [], expires: 0 };
 }
 
 export async function loadRemoteConfig(env) {
     const remoteConfigUrl = await env.KV.get('REMOTE_CONFIG_URL');
+    const now = Date.now();
+    const CACHE_TTL = 60000; // 60秒缓存
+
+    // [新增] 检查 TTL，避免频繁请求
+    if (remoteConfigUrl && now - remoteConfigCache.lastFetch < CACHE_TTL) {
+        return remoteConfigCache.data;
+    }
     
     if (remoteConfigUrl) {
         try {
@@ -33,35 +45,40 @@ export async function loadRemoteConfig(env) {
             if (response.ok) {
                 const text = await response.text();
                 try {
-                    remoteConfigCache = JSON.parse(text);
+                    const newData = JSON.parse(text);
+                    remoteConfigCache.data = newData;
+                    remoteConfigCache.lastFetch = now;
+                    
+                    // [关键] 远程配置更新后，清空本地 configCache，防止旧值覆盖新值
+                    configCache = {}; 
                 } catch (e) {
                     console.warn('Remote config is not JSON, trying line parse');
                     const lines = text.split('\n');
-                    remoteConfigCache = {};
+                    const newData = {};
                     lines.forEach(line => {
                         const trimmedLine = line.trim();
-                        // 过滤空行、以 # 或 // 开头的注释行
                         if (!trimmedLine || trimmedLine.startsWith('#') || trimmedLine.startsWith('//')) {
                             return;
                         }
-                        
-                        // 使用 indexOf 寻找第一个等号，支持值中包含等号的情况
                         const eqIndex = trimmedLine.indexOf('=');
                         if (eqIndex > 0) {
                             const k = trimmedLine.substring(0, eqIndex).trim();
                             const v = trimmedLine.substring(eqIndex + 1).trim();
                             if (k && v) {
-                                remoteConfigCache[k] = v;
+                                newData[k] = v;
                             }
                         }
                     });
+                    remoteConfigCache.data = newData;
+                    remoteConfigCache.lastFetch = now;
+                    configCache = {}; // 清空缓存
                 }
             }
         } catch (e) {
             console.error('Failed to load remote config', e);
         }
     }
-    return remoteConfigCache;
+    return remoteConfigCache.data;
 }
 
 export async function getConfig(env, key, defaultValue = undefined) {
@@ -81,13 +98,15 @@ export async function getConfig(env, key, defaultValue = undefined) {
     }
 
     // 3. 读取远程配置缓存
-    if (!val && remoteConfigCache && remoteConfigCache[key]) val = remoteConfigCache[key];
+    // [修改] 访问 remoteConfigCache.data
+    if (!val && remoteConfigCache.data && remoteConfigCache.data[key]) {
+        val = remoteConfigCache.data[key];
+    }
     
     // 4. 读取环境变量
     if (!val && env[key]) val = env[key];
     
     // 5. 兼容旧的 UUID/KEY 命名
-    // [修改] 增加 env.SUPER_PASSWORD 检查，确保环境变量中的 SUPER_PASSWORD 能被作为 UUID 候补读取
     if (!val && key === 'UUID') val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
     if (!val && key === 'KEY') val = env.KEY || env.TOKEN;
     
@@ -101,7 +120,6 @@ export async function getConfig(env, key, defaultValue = undefined) {
 
 export async function initializeContext(request, env) {
     // [新增] 远程配置开关检查
-    // 默认关闭 (0)，如需开启请在环境变量中设置 REMOTE_CONFIG 为 1
     const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0');
     if (enableRemote === '1') {
         await loadRemoteConfig(env);
@@ -152,13 +170,11 @@ export async function initializeContext(request, env) {
     };
 
     // 处理 UUID
-    // 优先使用 rawUUID (如果 getConfig('UUID') 读取到了 SUPER_PASSWORD，这里 rawUUID 就是那个密码)
     if (rawUUID) {
         ctx.userID = rawUUID;
         ctx.dynamicUUID = rawUUID;
     }
 
-    // 如果配置了 KEY，或者 UUID 不是标准 V4 格式 (例如是 SUPER_PASSWORD)，启用动态 UUID 逻辑
     if (rawKey || (rawUUID && !isStrictV4UUID(rawUUID))) {
         const seed = rawKey || rawUUID;
         
@@ -172,10 +188,7 @@ export async function initializeContext(request, env) {
         }
     }
 
-    // [关键修复] 如果此时 userID 仍为空，说明用户未配置 UUID/KEY
     if (!ctx.userID) {
-        // [新增] 再次尝试直接获取 SUPER_PASSWORD，作为最后的挽救措施
-        // 这一步是为了防止 getConfig('UUID') 没能正确回退到 SUPER_PASSWORD 的情况
         const superPass = await getConfig(env, 'SUPER_PASSWORD') || CONSTANTS.SUPER_PASSWORD;
         
         if (superPass) {
@@ -187,7 +200,6 @@ export async function initializeContext(request, env) {
              ctx.dynamicUUID = superPass;
              console.log('[CONFIG] Missing UUID/KEY, generated UUID using SUPER_PASSWORD.');
         } else {
-            // 只有当 SUPER_PASSWORD 也没有时，才生成随机临时 UUID
             console.warn('[CONFIG] CRITICAL: No UUID/KEY/SUPER_PASSWORD configured! Generating temporary UUID. Service may be unstable.');
             const tempUUID = crypto.randomUUID();
             ctx.userID = tempUUID;
@@ -195,10 +207,8 @@ export async function initializeContext(request, env) {
         }
     }
 
-    // [性能优化] 预生成小写 ID 列表，供各协议模块直接使用
     ctx.expectedUserIDs = [ctx.userID, ctx.userIDLow].filter(Boolean).map(id => id.toLowerCase());
 
-    // [核心修复] 处理 ProxyIP
     const rawProxyIP = proxyIPStr || CONSTANTS.DEFAULT_PROXY_IP;
     
     if (rawProxyIP) { 
@@ -227,11 +237,9 @@ export async function initializeContext(request, env) {
         ctx.proxyIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)] || ''; 
     }
 
-    // 处理其他配置
     ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
     if (banStr) ctx.banHosts = await cleanList(banStr);
     
-    // 处理禁用协议
     let disStr = disStrRaw;
     if (disStr) disStr = disStr.replace(/，/g, ',');
 
@@ -243,8 +251,7 @@ export async function initializeContext(request, env) {
 
     ctx.enableXhttp = !ctx.disabledProtocols.includes('xhttp');
 
-    // 处理 URL 参数覆盖
-    const url = new URL(request.url);
+    const url = new URL(request ? request.url : 'http://localhost');
     if (url.searchParams.has('proxyip')) ctx.proxyIP = url.searchParams.get('proxyip');
     if (url.searchParams.has('socks5')) ctx.socks5 = url.searchParams.get('socks5');
     
