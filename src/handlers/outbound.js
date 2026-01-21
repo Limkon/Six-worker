@@ -1,11 +1,10 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Functional Fix] 恢复缺失的 isHostBanned 黑名单检查逻辑。
- * 2. [Critical Fix] 包含 SOCKS5 握手长度检查和 Early Data 处理。
- * 3. [Optimization] 包含 Stream 锁竞争修复和缓冲区冲刷逻辑。
- * 4. [Refactor] 优化 SOCKS5 Early Data 处理为零拷贝 (subarray)。
- * 5. [Fix] 增强 IPv6 解析健壮性，修复 WebSocket 关闭后的资源浪费。
+ * 1. [Critical Fix] 移除了 NAT64 连接时 IPv6 地址的多余方括号 `[]`，确保 connect() 调用成功。
+ * 2. [Refactor] 重构 parseProxyIP 函数，增强对 [IPv6]:Port 格式的解析健壮性。
+ * 3. [Stability] 包含 SOCKS5 握手检查、Early Data 零拷贝处理及 Stream 锁竞争修复。
+ * 4. [Security] 包含黑名单 (isHostBanned) 检查逻辑。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -13,43 +12,39 @@ import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
 
 /**
- * 解析 ProxyIP 字符串，提取 host 和 port
+ * [重构] 解析 ProxyIP 字符串，提取 host 和 port
+ * 支持格式: 
+ * - 1.2.3.4
+ * - 1.2.3.4:8080
+ * - 2001:db8::1
+ * - [2001:db8::1]
+ * - [2001:db8::1]:8080
  */
 function parseProxyIP(proxyAddr, defaultPort) {
     if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP.split(',')[0].trim(), port: defaultPort };
     
-    let host = proxyAddr;
+    let str = proxyAddr.trim();
     let port = defaultPort;
+    let host = str;
+
+    // 尝试寻找最后一个冒号，但要忽略方括号内的冒号
+    const lastColon = str.lastIndexOf(':');
+    const lastBracket = str.lastIndexOf(']');
     
-    // 1. 处理带中括号的 IPv6
-    if (host.startsWith('[')) {
-        const bracketEnd = host.lastIndexOf(']');
-        if (bracketEnd === -1) {
-            // [Fix] 格式错误处理：如果以 [ 开头但没有 ]，视为无效或尝试直接作为 host
-            // 这种情况下继续解析极易出错，直接返回原始值或作为 host 返回
-            return { host: host, port: defaultPort };
-        }
-        
-        if (bracketEnd > 0) {
-            const remainder = host.substring(bracketEnd + 1);
-            if (remainder.startsWith(':')) {
-                const portStr = remainder.substring(1);
-                if (/^\d+$/.test(portStr)) port = parseInt(portStr, 10);
-            }
-            host = host.substring(1, bracketEnd);
-            return { host, port };
-        }
-    }
-    
-    // 2. 处理常规 host:port
-    const lastColon = host.lastIndexOf(':');
-    if (lastColon > 0 && host.indexOf(':') === lastColon) {
-        const portStr = host.substring(lastColon + 1);
+    // 如果冒号在右方括号之后（或者没有方括号），则认为是端口分隔符
+    if (lastColon > lastBracket && lastColon > 0) {
+        const portStr = str.substring(lastColon + 1);
         if (/^\d+$/.test(portStr)) {
             port = parseInt(portStr, 10);
-            host = host.substring(0, lastColon);
+            host = str.substring(0, lastColon);
         }
     }
+    
+    // 清理 Host 两端的方括号
+    if (host.startsWith('[') && host.endsWith(']')) {
+        host = host.slice(1, -1);
+    }
+    
     return { host, port };
 }
 
@@ -150,7 +145,6 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     }
 
     if (headLen > 0 && connRes.length > headLen) {
-        // [Refactor] 使用 subarray 替代 slice，避免内存复制
         socket.initialData = connRes.subarray(headLen);
     }
 
@@ -161,7 +155,6 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    // [Config] 保持原有的超时策略
     const STEPPED_TIMEOUTS = [5000, 6000, 7000];
     let attemptCounter = 0;
 
@@ -234,7 +227,8 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             log(`[connect] Phase 3: Attempting NAT64...`);
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (v6Address) {
-                const nat64IP = '[' + v6Address + ']';
+                // [Critical Fix] 直接使用 pure IPv6，不允许带方括号
+                const nat64IP = v6Address;
                 return await connectAndWrite(nat64IP, portRemote, false);
             } else {
                 log(`[connect] Phase 3 (NAT64) skipped: DNS resolution failed`);
@@ -273,8 +267,6 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             async write(chunk, controller) {
                 hasIncomingData = true;
                 if (webSocket.readyState !== 1) { 
-                    // [Fix] 当 WebSocket 关闭时，主动报错以中断 PipeTo，
-                    // 防止继续从 remoteSocket 读取数据造成资源浪费
                     controller.error(new Error('Client WebSocket closed, stopping remote read'));
                     return;
                 }
@@ -327,7 +319,6 @@ async function flushBuffer(writer, buffer, log) {
 }
 
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-    // [修复] 恢复黑名单检查逻辑
     if (isHostBanned(addressRemote, ctx.banHosts)) {
         log(`[Outbound] Host banned: ${addressRemote}`);
         safeCloseWebSocket(webSocket);
@@ -353,7 +344,8 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
 
-            const nat64IP = '[' + v6Address + ']';
+            // [Critical Fix] 移除多余的方括号，确保使用纯 IPv6 字符串
+            const nat64IP = v6Address; 
             const natSocket = await connect({ hostname: nat64IP, port: portRemote });
             
             const writer = natSocket.writable.getWriter();
