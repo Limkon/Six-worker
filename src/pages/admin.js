@@ -1,9 +1,8 @@
 /**
  * 文件名: src/pages/admin.js
  * 说明: 
- * 1. [修改] BESTIP_SOURCES 默认值仅保留 CF官方。
- * 2. [修改] 配置项说明和验证逻辑适配文本格式 (名称 网址)。
- * 3. [修复] handleBestIP 中默认加载源同步修改为单源。
+ * 1. [修复] BESTIP_SOURCES 解析逻辑，支持带空格的名称 (例如 "My Source https://...")。
+ * 2. [保留] 其他逻辑保持不变。
  */
 import { getConfig, cleanConfigCache } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
@@ -18,7 +17,7 @@ export async function handleEditConfig(request, env, ctx) {
         return new Response('<p>错误：未绑定KV空间，无法使用在线配置功能。</p>', { status: 404, headers: { "Content-Type": "text/html;charset=utf-8" } });
     }
 
-    // 定义配置项列表 (Key, Label, Description, Placeholder, Type)
+    // 定义配置项列表
     const configItems = [
         ['ADMIN_PASS', '后台管理访问密码', '设置后，通过 /KEY 路径访问管理页需输入此密码。留空则不开启验证。', '例如: 123456', 'text'],
         ['UUID', 'UUID (用户ID/密码)', 'VLESS的用户ID, 也是Trojan/SS的密码。', '例如: 1234567', 'text'],
@@ -40,7 +39,6 @@ export async function handleEditConfig(request, env, ctx) {
         ['BAN', '禁止访问的域名', '禁止通过Worker代理访问的域名, 逗号隔开。', 'example.com,example.org', 'text'],
         ['URL302', '根路径跳转URL (302)', '访问根路径 / 时跳转到的地址。', 'https://github.com/', 'text'],
         ['URL', '根路径反代URL', '访问根路径 / 时反代的地址 (302优先)。', 'https://github.com/', 'text'],
-        // [修改] 格式说明改为文本格式，默认值只保留官方源
         ['BESTIP_SOURCES', 'BestIP IP源', '自定义BestIP页面的IP源列表 (格式: 名称 网址，每行一个)。', 
 `CF官方 https://www.cloudflare.com/ips-v4/`, 'textarea'],
     ];
@@ -57,11 +55,11 @@ export async function handleEditConfig(request, env, ctx) {
                         savePromises.push(env.KV.delete(key));
                     } else {
                         if (key === 'BESTIP_SOURCES') {
-                            // [修改] 校验文本格式: 名称 网址
                             const lines = value.split('\n');
                             for (let i = 0; i < lines.length; i++) {
                                 const line = lines[i].trim();
                                 if (!line) continue;
+                                // [修复] 兼容带空格的名称
                                 const parts = line.split(/\s+/);
                                 if (parts.length < 2) {
                                     return new Response(`保存失败: BestIP IP源 格式错误 (第${i + 1}行)。应为: 名称 网址`, { status: 400 });
@@ -181,7 +179,6 @@ export async function handleBestIP(request, env) {
     }
 
     // 3. 处理 IP 源加载 API
-    // [修改] 默认 IP 源只保留 CF 官方
     const defaultIpSources = [
         {"name": "CF官方", "url": "https://www.cloudflare.com/ips-v4/"}
     ];
@@ -193,7 +190,6 @@ export async function handleBestIP(request, env) {
 
         if (sourceData) {
             try {
-                // [修改] 解析新格式，同时兼容旧的 JSON 格式 (如果用户未更新)
                 if (sourceData.trim().startsWith('[')) {
                      try {
                         const parsed = JSON.parse(sourceData);
@@ -205,7 +201,10 @@ export async function handleBestIP(request, env) {
                     for (const line of lines) {
                         const parts = line.trim().split(/\s+/);
                         if (parts.length >= 2) {
-                            parsedSources.push({ name: parts[0], url: parts[1] });
+                            // [修复] 正确解析 "Name URL" 格式，Url 为最后一部分
+                            const url = parts.pop();
+                            const name = parts.join(' ');
+                            if (url && name) parsedSources.push({ name, url });
                         }
                     }
                     if (parsedSources.length > 0) ipSources = parsedSources;
