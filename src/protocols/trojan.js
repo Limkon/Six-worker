@@ -1,8 +1,9 @@
 import { CONSTANTS } from '../constants.js';
 import { textDecoder, sha224Hash } from '../utils/helpers.js';
 
-// [优化] 缓存 Trojan 密码哈希，避免每次握手都重复计算 SHA224 (高耗能操作)
+// [优化] 缓存 Trojan 密码哈希
 const trojanHashCache = new Map();
+const MAX_CACHE_SIZE = 100;
 
 export async function parseTrojanHeader(trojanBuffer, password) {
     if (trojanBuffer.byteLength < 58) return { hasError: true, message: 'Trojan buffer too short.' };
@@ -11,12 +12,22 @@ export async function parseTrojanHeader(trojanBuffer, password) {
     const buffer = trojanBuffer instanceof Uint8Array ? trojanBuffer : new Uint8Array(trojanBuffer);
     const trojanView = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     
-    // [优化] 优先读取缓存
+    // [优化] LRU 缓存策略，消除定期清空带来的抖动
     let expectedHash = trojanHashCache.get(password);
-    if (!expectedHash) {
+    
+    if (expectedHash) {
+        // [LRU] 命中：移动到末尾（最新）
+        trojanHashCache.delete(password);
+        trojanHashCache.set(password, expectedHash);
+    } else {
+        // 未命中：计算并插入
         expectedHash = sha224Hash(String(password));
-        // [修复] 防止缓存无限增长 (内存保护)
-        if (trojanHashCache.size > 100) trojanHashCache.clear();
+        
+        // [LRU] 溢出：移除头部（最旧）
+        if (trojanHashCache.size >= MAX_CACHE_SIZE) {
+            const oldestKey = trojanHashCache.keys().next().value;
+            trojanHashCache.delete(oldestKey);
+        }
         trojanHashCache.set(password, expectedHash);
     }
 
