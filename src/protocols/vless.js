@@ -1,3 +1,10 @@
+/**
+ * 文件名: src/protocols/vless.js
+ * 修改说明:
+ * 1. [性能优化] 移除了 expectedUserIDs.map(...) 逻辑。
+ * 原因：在 src/config.js 的 initializeContext 中已预处理好小写 ID 列表，此处直接使用 includes 即可。
+ * 2. [保留] 维持原有的零拷贝 subarray 视图逻辑和地址解析功能。
+ */
 import { CONSTANTS } from '../constants.js';
 import { textDecoder, stringifyUUID } from '../utils/helpers.js';
 
@@ -12,7 +19,9 @@ export async function processVlessHeader(vlessBuffer, expectedUserIDs) {
     
     // [优化] 使用 subarray 替代 slice，避免内存复制
     const uuid = stringifyUUID(buffer.subarray(1, 17));
-    if (!expectedUserIDs.map(id => id.toLowerCase()).includes(uuid)) {
+
+    // [性能优化] 直接使用预处理好的 expectedUserIDs，避免高频调用 map 和 toLowerCase
+    if (!expectedUserIDs.includes(uuid)) {
         return { hasError: true, message: "Invalid VLESS user" };
     }
     
