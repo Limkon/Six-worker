@@ -1,9 +1,9 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [修复] 在处理 ProxyIP 时，增加了显式的正则分割 logic (`split(/[,;\n]/)`)。
- * 这确保了即使 `cleanList` 只支持换行，系统也能正确识别用逗号或分号分隔的 ProxyIP 列表。
- * 2. 保持了对 HTTP 远程订阅地址的支持。
+ * 1. [修复] 修正了 ProxyIP 远程加载逻辑。当检测到 URL 时，现在会真正发起 fetch 请求获取内容。
+ * 2. [优化] 为远程 ProxyIP 列表增加简单的内存缓存，避免高频请求导致的性能开销。
+ * 3. [修复] 显式处理逗号(,)、分号(;)和换行(\n)，确保多 IP 字符串被正确分割。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -12,10 +12,17 @@ import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.
 let configCache = {};
 let remoteConfigCache = {};
 
+// 专门用于存储远程 ProxyIP 列表的缓存
+let proxyIPRemoteCache = {
+    data: [],
+    expires: 0
+};
+
 // [新增] 清除全局缓存函数
 export function cleanConfigCache() {
     configCache = {};
     remoteConfigCache = {};
+    proxyIPRemoteCache = { data: [], expires: 0 };
 }
 
 export async function loadRemoteConfig(env) {
@@ -139,16 +146,33 @@ export async function initializeContext(request, env) {
     }
 
     // [核心修复] 处理 ProxyIP
-    // 优先使用环境变量，如果没有则使用 CONSTANTS.DEFAULT_PROXY_IP
     const rawProxyIP = proxyIPStr || CONSTANTS.DEFAULT_PROXY_IP;
     
     if (rawProxyIP) { 
-        // 简单判断是否为 HTTP 远程订阅地址
         if (rawProxyIP.startsWith('http')) {
-             const list = await cleanList(rawProxyIP); 
-             ctx.proxyIPList = list;
+             // 检查远程 ProxyIP 缓存 (10分钟有效期)
+             if (Date.now() < proxyIPRemoteCache.expires) {
+                 ctx.proxyIPList = proxyIPRemoteCache.data;
+             } else {
+                 try {
+                     const response = await fetch(rawProxyIP);
+                     if (response.ok) {
+                         const text = await response.text();
+                         const list = await cleanList(text); 
+                         ctx.proxyIPList = list;
+                         // 更新缓存
+                         proxyIPRemoteCache.data = list;
+                         proxyIPRemoteCache.expires = Date.now() + 600000;
+                     }
+                 } catch (e) {
+                     console.error('Failed to fetch remote ProxyIP:', e);
+                     // 失败时回退到默认
+                     const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+                     ctx.proxyIPList = defParams;
+                 }
+             }
         } else {
-             // [修复] 显式处理逗号(,)、分号(;)和换行(\n)，确保硬编码的多个 IP 被正确分割
+             // [修复] 显式处理逗号(,)、分号(;)和换行(\n)
              ctx.proxyIPList = rawProxyIP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
         }
 
