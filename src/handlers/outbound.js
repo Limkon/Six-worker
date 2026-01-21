@@ -1,9 +1,10 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [修复] 修正了“阶梯式超时”策略过于激进的问题。原 500ms 超时会导致正常连接被中断并回落到慢速 ProxyIP。
- * 调整为 [4000, 5000, 6000]，优先保证直连成功率，提升速度和稳定性。
- * 2. [修改] 兼容 DEFAULT_PROXY_IP 为多 IP 字符串的情况，在 Fallback 时正确分割。
+ * 1. [修复] 修正了 socks5Connect 中 IPv6 地址构造导致的字节截断问题。
+ * 2. [优化] 增强 parseSocks5Config 协议头兼容性，支持移除多种协议前缀。
+ * 3. [调整] 阶梯式超时策略调整为 [5000, 6000, 7000]，进一步提升高延迟环境下的直连成功率。
+ * 4. [保留] 兼容 DEFAULT_PROXY_IP 为多 IP 字符串的情况，在 Fallback 时正确分割。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -47,7 +48,8 @@ function shouldUseSocks5(addressRemote, go2socks5) {
 
 function parseSocks5Config(address) {
     if (!address) return null;
-    const cleanAddr = address.replace(/^https?:\/\//i, '');
+    // 移除任意协议头 (如 socks5://, http://)
+    const cleanAddr = address.includes('://') ? address.split('://')[1] : address;
     const lastAtIndex = cleanAddr.lastIndexOf("@");
     let [latter, former] = lastAtIndex === -1 ? [cleanAddr, undefined] : [cleanAddr.substring(lastAtIndex + 1), cleanAddr.substring(0, lastAtIndex)];
     let username, password, hostname, port;
@@ -103,7 +105,15 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
             break;
         case CONSTANTS.ADDRESS_TYPE_IPV6:
         case CONSTANTS.ATYP_TROJAN_IPV6:
-             DSTADDR = new Uint8Array([4, ...parseIPv6(addressRemote.replace(/[\[\]]/g, ''))]);
+             // 修正 IPv6 地址构造，将 8 个 16 位整数转换为 16 个 8 位字节
+             const v6Parts = parseIPv6(addressRemote.replace(/[\[\]]/g, ''));
+             if (!v6Parts) throw new Error('Invalid IPv6 address');
+             const v6Bytes = new Uint8Array(16);
+             for (let i = 0; i < 8; i++) {
+                 v6Bytes[i * 2] = (v6Parts[i] >> 8) & 0xff;
+                 v6Bytes[i * 2 + 1] = v6Parts[i] & 0xff;
+             }
+             DSTADDR = new Uint8Array([4, ...v6Bytes]);
              break;
         default:
              const domainBytes = encoder.encode(addressRemote);
@@ -124,12 +134,11 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
     
-    // [修复] 调整超时策略，给予正常连接充足的时间 (4s)，避免过早回落到慢速 ProxyIP
-    const STEPPED_TIMEOUTS = [4000, 5000, 6000];
+    // 调整后的阶梯式超时策略
+    const STEPPED_TIMEOUTS = [5000, 6000, 7000];
     let attemptCounter = 0;
 
     const connectAndWrite = async (host, port, isSocks) => {
-        // 计算当前尝试的超时时间
         const currentTimeout = STEPPED_TIMEOUTS[Math.min(attemptCounter, STEPPED_TIMEOUTS.length - 1)];
         attemptCounter++;
 
@@ -145,28 +154,20 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error(`Connect timeout (${currentTimeout}ms)`)), currentTimeout));
 
-        // 竞态超时控制
         const socket = await Promise.race([doConnect(), timeoutPromise]);
         
         if (!isSocks) {
-            // Direct connection: 等待 TCP 握手完成
             await Promise.race([socket.opened, timeoutPromise]);
         }
         return socket;
     };
 
-    // -----------------------------------------------------------
-    // Phase 1: Direct / Socks5 (Attempt #1 -> 4000ms)
-    // -----------------------------------------------------------
     try {
         return await connectAndWrite(addressRemote, portRemote, useSocks);
     } catch (err1) {
         log(`[connect] Phase 1 failed: ${err1.message}`);
     }
 
-    // -----------------------------------------------------------
-    // Phase 2: ProxyIP Fallback (Attempt #2 -> 5000ms...)
-    // -----------------------------------------------------------
     let proxyAttempts = [];
     if (fallbackAddress) {
         proxyAttempts.push(fallbackAddress);
@@ -174,8 +175,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         if (ctx.proxyIP) {
             proxyAttempts.push(ctx.proxyIP);
         } else {
-            // [修改] 防止 DEFAULT_PROXY_IP 包含多个 IP 导致解析错误
-            // 如果走到这里说明 ctx.proxyIP 初始化失败，只取第一个作为兜底
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
             if (defParams.length > 0) proxyAttempts.push(defParams[0]);
         }
@@ -204,9 +203,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
     if (proxySocket) return proxySocket;
 
-    // -----------------------------------------------------------
-    // Phase 3: NAT64 Fallback (Final Attempt -> 6000ms)
-    // -----------------------------------------------------------
     if (!useSocks && ctx.dns64) {
         try {
             log(`[connect] Phase 3: Attempting NAT64...`);
@@ -303,7 +299,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         
         attempts = [...new Set(attempts)].filter(Boolean);
         if (attempts.length === 0) {
-            // [修改] 防止 DEFAULT_PROXY_IP 包含多个 IP 导致解析错误
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
             if (defParams.length > 0) attempts.push(defParams[0]);
         }
@@ -366,5 +361,4 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         log('[Outbound] Initial connection failed: ' + error.message);
         safeCloseWebSocket(webSocket);
     }
-
 }
