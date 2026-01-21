@@ -1,9 +1,9 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [修复] 增强 parseProxyIP 解析逻辑，支持 [IPv6] (无端口) 的括号剥离，同时保留对域名和 IPv4 的兼容。
- * 2. [保留] 完整保留 SOCKS5 握手、NAT64 转换、WebSocket 流转换及所有重试补偿逻辑。
- * 3. [保留] 维持原有的 [5000, 6000, 7000] 阶梯超时策略，确保高延迟环境下的稳定性。
+ * 1. [修复] 重试逻辑开始时立即置空 socket wrapper，防止 websocket.js 写入死连接。
+ * 2. [修复] 重试连接成功后，显式刷新 remoteSocketWrapper.buffer，防止数据丢失。
+ * 3. [优化] 提取 flushBuffer 逻辑复用。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -12,7 +12,6 @@ import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
 
 /**
  * 解析 ProxyIP 字符串，提取 host 和 port
- * 优化：更严谨地处理 IPv6 的括号和端口
  */
 function parseProxyIP(proxyAddr, defaultPort) {
     if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP.split(',')[0].trim(), port: defaultPort };
@@ -20,25 +19,22 @@ function parseProxyIP(proxyAddr, defaultPort) {
     let host = proxyAddr;
     let port = defaultPort;
     
-    // 1. 处理带中括号的 IPv6: [2001:db8::1] 或 [2001:db8::1]:443
+    // 1. 处理带中括号的 IPv6
     if (host.startsWith('[')) {
         const bracketEnd = host.lastIndexOf(']');
         if (bracketEnd > 0) {
             const remainder = host.substring(bracketEnd + 1);
-            // 提取端口：检查 ] 之后是否紧跟 :port
             if (remainder.startsWith(':')) {
                 const portStr = remainder.substring(1);
                 if (/^\d+$/.test(portStr)) port = parseInt(portStr, 10);
             }
-            // 剥离括号获取原始 IPv6 地址
             host = host.substring(1, bracketEnd);
             return { host, port };
         }
     }
     
-    // 2. 处理常规 host:port (IPv4 或 Domain)
+    // 2. 处理常规 host:port
     const lastColon = host.lastIndexOf(':');
-    // 确保只有一个冒号（排除原始 IPv6）且冒号后是数字
     if (lastColon > 0 && host.indexOf(':') === lastColon) {
         const portStr = host.substring(lastColon + 1);
         if (/^\d+$/.test(portStr)) {
@@ -268,10 +264,30 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     }
 }
 
+// [新增] 辅助函数：将缓冲区数据写入 Socket
+async function flushBuffer(writer, buffer, log) {
+    if (buffer && buffer.length > 0) {
+        log(`Flushing ${buffer.length} buffered chunks`);
+        for (const chunk of buffer) {
+            await writer.write(chunk);
+        }
+        // 清空数组，但保持引用不变（虽然 handleTCPOutBound 里是重新赋值 []，这里清空更安全）
+        buffer.length = 0;
+    }
+}
+
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
+    // 准备重试环境：设置状态为连接中，断开 websocket.js 的 writer 绑定
+    const prepareRetry = () => {
+        remoteSocketWrapper.value = null;
+        remoteSocketWrapper.isConnecting = true;
+    };
+
     const nat64Retry = async () => {
         if (!ctx.dns64) { safeCloseWebSocket(webSocket); return; }
         log('[Retry] Switching to NAT64...');
+        prepareRetry(); // <--- 关键修复：立即通知 websocket.js 暂停写入
+        
         try {
             const nat64IP = '[' + (await resolveToIPv6(addressRemote, ctx.dns64)) + ']';
             const natSocket = await connect({ hostname: nat64IP, port: portRemote });
@@ -283,6 +299,9 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             if (rawClientData && rawClientData.byteLength > 0) {
                 await writer.write(rawClientData);
             }
+            // <--- 关键修复：刷新重试期间积压的 buffer
+            await flushBuffer(writer, remoteSocketWrapper.buffer, log);
+            
             writer.releaseLock();
             
             remoteSocketToWS(natSocket, webSocket, vlessResponseHeader, null, log);
@@ -294,6 +313,8 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
 
     const proxyIPRetry = async () => {
         log('[Retry] Switching to ProxyIP...');
+        prepareRetry(); // <--- 关键修复：立即通知 websocket.js 暂停写入
+
         let attempts = [];
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
         if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
@@ -312,6 +333,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
                 log(`[Retry] Attempting ProxyIP: ${proxyHost}`);
+                
                 const proxySocket = await connect({ hostname: proxyHost.toLowerCase(), port: proxyPort });
                 
                 remoteSocketWrapper.value = proxySocket;
@@ -321,6 +343,9 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 if (rawClientData && rawClientData.byteLength > 0) {
                     await writer.write(rawClientData);
                 }
+                // <--- 关键修复：刷新重试期间积压的 buffer
+                await flushBuffer(writer, remoteSocketWrapper.buffer, log);
+                
                 writer.releaseLock();
                 
                 const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
@@ -330,9 +355,11 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 return; 
             } catch (e) {
                 log(`[Retry] ProxyIP (${ip}) failed: ${e.message}`);
+                // 注意：这里失败循环继续，remoteSocketWrapper 依然保持 null/isConnecting 状态，这是正确的
             }
         }
 
+        // 如果 ProxyIP 全部失败，尝试 NAT64
         if (ctx.dns64 && !(ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5))) {
             await nat64Retry();
         } else {
@@ -349,12 +376,9 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         if (rawClientData && rawClientData.byteLength > 0) {
             await writer.write(rawClientData);
         }
+        // 初始连接成功也刷新一次 buffer (虽然通常是空的)
         if (remoteSocketWrapper.buffer && remoteSocketWrapper.buffer.length > 0) {
-            log(`Flushing ${remoteSocketWrapper.buffer.length} buffered chunks`);
-            for (const chunk of remoteSocketWrapper.buffer) {
-                await writer.write(chunk);
-            }
-            remoteSocketWrapper.buffer = [];
+            await flushBuffer(writer, remoteSocketWrapper.buffer, log);
         }
         writer.releaseLock();
         
