@@ -1,9 +1,8 @@
 /**
  * 文件名: src/index.js
  * 修改内容: 
- * 1. [修复] 优化 XHTTP 拦截逻辑，通过特征路径 (ID前8位) 和 Header 精准识别，避免拦截普通 POST 请求。
- * 2. [修复] 初始密码设置成功后调用 cleanConfigCache()，确保配置立即生效。
- * 3. [优化] 提升了 POST 请求处理的鲁棒性，非 XHTTP 路径的 POST 请求将正常进入后续路由。
+ * 1. [功能] 启用 scheduled 事件，支持 WebDAV 定时推送（需配置）。
+ * 2. [稳健性] 保持路由处理逻辑的完整性。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -86,14 +85,13 @@ export default {
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
-            // 5. XHTTP 协议拦截 (优化后的精准识别逻辑)
+            // 5. XHTTP 协议拦截
             const xhttpPath = context.userID ? `/${context.userID.substring(0, 8)}` : null;
             const isXhttpHeader = request.headers.get('Content-Type') === 'application/grpc';
             const isXhttpPath = xhttpPath && path === xhttpPath;
 
             if (request.method === 'POST' && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
                 if (context.enableXhttp) {
-                    // 仅当符合 XHTTP 特征（路径匹配或 gRPC Header）时才进入处理
                     if (isXhttpPath || isXhttpHeader) {
                         const r = await handleXhttpClient(request, context);
                         if (r) {
@@ -108,11 +106,9 @@ export default {
                                 }
                             });
                         }
-                        // 如果路径匹配但处理失败，返回 500
                         return new Response('Internal Server Error (XHTTP Handler Failed)', { status: 500 });
                     }
                     
-                    // 对于非协议路径的 POST 且非管理路径，检查是否为遗漏 auth 参数的表单提交
                     if (!isManagementRoute) {
                         const contentType = request.headers.get('content-type') || '';
                         if (contentType.includes('application/x-www-form-urlencoded') || contentType.includes('multipart/form-data')) {
@@ -120,7 +116,6 @@ export default {
                         }
                     }
                 } else if (isXhttpPath || isXhttpHeader) {
-                    // 协议已明确禁用
                     return new Response('XHTTP protocol is disabled by admin.', { status: 403 });
                 }
             }
@@ -185,7 +180,10 @@ export default {
     // Scheduled 事件: 处理 WebDAV 推送等定时任务
     async scheduled(event, env, ctx) {
         try {
-            // await executeWebDavPush(env, ctx);
+            // 初始化部分 context 以供使用
+            const context = await initializeContext(null, env); // request 为 null
+            context.waitUntil = ctx.waitUntil.bind(ctx);
+            await executeWebDavPush(env, context);
         } catch (e) { 
             console.error('Scheduled Event Error:', e); 
         }
