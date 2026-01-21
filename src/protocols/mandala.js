@@ -2,7 +2,7 @@ import { CONSTANTS } from '../constants.js';
 import { textDecoder, sha224Hash } from '../utils/helpers.js';
 import { parseAddressAndPort } from './utils.js';
 
-// [新增] 缓存 Password Hash，避免重复计算带来的性能开销
+// [优化] 缓存 Password Hash，避免重复计算带来的性能开销
 const passwordHashCache = new Map();
 
 export async function parseMandalaHeader(mandalaBuffer, password) {
@@ -32,6 +32,8 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     let expectedHash = passwordHashCache.get(password);
     if (!expectedHash) {
         expectedHash = sha224Hash(String(password));
+        // [修复] 防止缓存无限增长 (内存保护)
+        if (passwordHashCache.size > 100) passwordHashCache.clear();
         passwordHashCache.set(password, expectedHash);
     }
 
