@@ -1,8 +1,8 @@
 /**
  * 文件名: src/index.js
  * 修改内容: 
- * 1. [功能] 启用 scheduled 事件，支持 WebDAV 定时推送（需配置）。
- * 2. [稳健性] 保持路由处理逻辑的完整性。
+ * 1. [功能] 增加域名自动捕获逻辑：在访问管理或订阅路径时，将 Host 存入 KV (SAVED_DOMAIN)。
+ * 2. [配合] 为 WebDAV 定时任务提供域名来源，免去手动配置 WORKER_DOMAIN 的繁琐。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -84,6 +84,14 @@ export default {
 
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
+
+            // [新增] 自动捕获并保存当前域名，供 WebDAV 等后台任务使用
+            // 逻辑：只有访问管理路径或订阅路径时才更新，避免被恶意扫描刷新 KV
+            if ((isManagementRoute || isSubRoute) && env.KV && hostName) {
+                // 使用 waitUntil 异步写入，不影响当前请求响应速度
+                // 键名 'SAVED_DOMAIN' 将被 webdav.js 读取
+                ctx.waitUntil(env.KV.put('SAVED_DOMAIN', hostName));
+            }
 
             // 5. XHTTP 协议拦截
             const xhttpPath = context.userID ? `/${context.userID.substring(0, 8)}` : null;
