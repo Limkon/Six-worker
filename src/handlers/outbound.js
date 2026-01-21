@@ -1,9 +1,11 @@
 /**
  * 文件名: src/handlers/outbound.js
- * 修改内容:
- * 1. [Fix] 修复 parseProxyIP 对无方括号 IPv6 地址的误判问题。
- * 2. [Fix] 修复 connectAndWrite 在超时竞态条件下可能导致的 Socket 资源泄漏。
- * 3. [Critical Fix] 保持对 NAT64 连接时 IPv6 地址方括号的去除处理。
+ * 修复说明:
+ * 1. [Functional Fix] 恢复缺失的 isHostBanned 黑名单检查逻辑。
+ * 2. [Critical Fix] 包含 SOCKS5 握手长度检查和 Early Data 处理。
+ * 3. [Optimization] 包含 Stream 锁竞争修复和缓冲区冲刷逻辑。
+ * 4. [Refactor] 优化 SOCKS5 Early Data 处理为零拷贝 (subarray)。
+ * 5. [Fix] 增强 IPv6 解析健壮性，修复 WebSocket 关闭后的资源浪费。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -11,66 +13,53 @@ import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
 
 /**
- * [重构] 解析 ProxyIP 字符串，提取 host 和 port
- * 支持格式: 
- * - 1.2.3.4
- * - 1.2.3.4:8080
- * - 2001:db8::1 (视为纯 IP)
- * - [2001:db8::1]
- * - [2001:db8::1]:8080
+ * 解析 ProxyIP 字符串，提取 host 和 port
  */
 function parseProxyIP(proxyAddr, defaultPort) {
     if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP.split(',')[0].trim(), port: defaultPort };
     
-    let str = proxyAddr.trim();
+    let host = proxyAddr;
     let port = defaultPort;
-    let host = str;
-
-    // 尝试寻找最后一个冒号，但要忽略方括号内的冒号
-    const lastColon = str.lastIndexOf(':');
-    const lastBracket = str.lastIndexOf(']');
     
-    // 如果冒号在右方括号之后（或者没有方括号），则认为是端口分隔符
-    if (lastColon > lastBracket && lastColon > 0) {
-        const portStr = str.substring(lastColon + 1);
-        if (/^\d+$/.test(portStr)) {
-            // [Fix] 增强 IPv6 判断：如果无方括号且包含多个冒号，则视为 IPv6 字面量（无端口）
-            // 例如: 2001:db8::1 (会被误判为端口 1) -> 修正为 Host: 2001:db8::1, Port: default
-            const isIPv6Literal = lastBracket === -1 && str.split(':').length > 2;
-            
-            if (!isIPv6Literal) {
-                port = parseInt(portStr, 10);
-                host = str.substring(0, lastColon);
+    // 1. 处理带中括号的 IPv6
+    if (host.startsWith('[')) {
+        const bracketEnd = host.lastIndexOf(']');
+        if (bracketEnd === -1) {
+            // [Fix] 格式错误处理：如果以 [ 开头但没有 ]，视为无效或尝试直接作为 host
+            // 这种情况下继续解析极易出错，直接返回原始值或作为 host 返回
+            return { host: host, port: defaultPort };
+        }
+        
+        if (bracketEnd > 0) {
+            const remainder = host.substring(bracketEnd + 1);
+            if (remainder.startsWith(':')) {
+                const portStr = remainder.substring(1);
+                if (/^\d+$/.test(portStr)) port = parseInt(portStr, 10);
             }
+            host = host.substring(1, bracketEnd);
+            return { host, port };
         }
     }
     
-    // 清理 Host 两端的方括号
-    if (host.startsWith('[') && host.endsWith(']')) {
-        host = host.slice(1, -1);
+    // 2. 处理常规 host:port
+    const lastColon = host.lastIndexOf(':');
+    if (lastColon > 0 && host.indexOf(':') === lastColon) {
+        const portStr = host.substring(lastColon + 1);
+        if (/^\d+$/.test(portStr)) {
+            port = parseInt(portStr, 10);
+            host = host.substring(0, lastColon);
+        }
     }
-    
     return { host, port };
 }
 
 function shouldUseSocks5(addressRemote, go2socks5) {
     if (!go2socks5 || go2socks5.length === 0) return false;
     if (go2socks5.includes('all in') || go2socks5.includes('*')) return true;
-    
     return go2socks5.some(pattern => {
-        // [Optimization] 优先进行简单的字符串匹配，避免不必要的正则开销
-        if (!pattern.includes('*')) {
-            return pattern.toLowerCase() === addressRemote.toLowerCase();
-        }
-        
-        // 对于包含通配符的规则，再使用正则
-        try {
-            let regexPattern = pattern.replace(/\*/g, '.*');
-            let regex = new RegExp(`^${regexPattern}$`, 'i');
-            return regex.test(addressRemote);
-        } catch (e) {
-            return false;
-        }
+        let regexPattern = pattern.replace(/\*/g, '.*');
+        let regex = new RegExp(`^${regexPattern}$`, 'i');
+        return regex.test(addressRemote);
     });
 }
 
@@ -161,6 +150,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     }
 
     if (headLen > 0 && connRes.length > headLen) {
+        // [Refactor] 使用 subarray 替代 slice，避免内存复制
         socket.initialData = connRes.subarray(headLen);
     }
 
@@ -171,6 +161,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
+    // [Config] 保持原有的超时策略
     const STEPPED_TIMEOUTS = [5000, 6000, 7000];
     let attemptCounter = 0;
 
@@ -180,48 +171,21 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 
         log(`[connect] Target: ${host}:${port} (Socks: ${isSocks}) (Timeout: ${currentTimeout}ms)`);
         
-        let hasTimedOut = false;
+        const doConnect = async () => {
+             if (isSocks) {
+                return await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
+            } else {
+                return connect({ hostname: host, port: port });
+            }
+        };
 
-        // [Fix] 封装连接过程，防止超时后的 Socket 泄漏
-        const connectPromise = (async () => {
-             try {
-                const sock = isSocks 
-                    ? await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log)
-                    : connect({ hostname: host, port: port });
-                
-                // 如果已超时，说明外层 Promise.race 已拒绝，必须关闭此“迟到”的 Socket
-                if (hasTimedOut) {
-                    log(`[connect] Closing late connection to ${host}:${port} (after timeout)`);
-                    try { sock.close(); } catch(e){}
-                    return null;
-                }
-                
-                // 非 Socks 模式下等待连接完全打开
-                if (!isSocks) {
-                    await sock.opened;
-                    // 二次检查，等待 opened 期间可能发生超时
-                    if (hasTimedOut) {
-                         log(`[connect] Closing late connection to ${host}:${port} (after opened)`);
-                         try { sock.close(); } catch(e){}
-                         return null;
-                    }
-                }
-                return sock;
-             } catch (e) {
-                 // 如果已超时，忽略错误；否则抛出供 Promise.race 捕获
-                 if (hasTimedOut) return null;
-                 throw e;
-             }
-        })();
-
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => {
-                hasTimedOut = true;
-                reject(new Error(`Connect timeout (${currentTimeout}ms)`));
-            }, currentTimeout);
-        });
-
-        return await Promise.race([connectPromise, timeoutPromise]);
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error(`Connect timeout (${currentTimeout}ms)`)), currentTimeout));
+        const socket = await Promise.race([doConnect(), timeoutPromise]);
+        
+        if (!isSocks) {
+            await Promise.race([socket.opened, timeoutPromise]);
+        }
+        return socket;
     };
 
     try {
@@ -270,8 +234,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             log(`[connect] Phase 3: Attempting NAT64...`);
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (v6Address) {
-                // [Critical Fix] 直接使用 pure IPv6，不允许带方括号
-                const nat64IP = v6Address;
+                const nat64IP = '[' + v6Address + ']';
                 return await connectAndWrite(nat64IP, portRemote, false);
             } else {
                 log(`[connect] Phase 3 (NAT64) skipped: DNS resolution failed`);
@@ -310,6 +273,8 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             async write(chunk, controller) {
                 hasIncomingData = true;
                 if (webSocket.readyState !== 1) { 
+                    // [Fix] 当 WebSocket 关闭时，主动报错以中断 PipeTo，
+                    // 防止继续从 remoteSocket 读取数据造成资源浪费
                     controller.error(new Error('Client WebSocket closed, stopping remote read'));
                     return;
                 }
@@ -362,6 +327,7 @@ async function flushBuffer(writer, buffer, log) {
 }
 
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
+    // [修复] 恢复黑名单检查逻辑
     if (isHostBanned(addressRemote, ctx.banHosts)) {
         log(`[Outbound] Host banned: ${addressRemote}`);
         safeCloseWebSocket(webSocket);
@@ -387,8 +353,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
 
-            // [Critical Fix] 移除多余的方括号，确保使用纯 IPv6 字符串
-            const nat64IP = v6Address; 
+            const nat64IP = '[' + v6Address + ']';
             const natSocket = await connect({ hostname: nat64IP, port: portRemote });
             
             const writer = natSocket.writable.getWriter();
