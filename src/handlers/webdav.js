@@ -1,8 +1,8 @@
 /**
  * 文件名: src/handlers/webdav.js
  * 修改说明: 
- * 1. [恢复] 去除注释，恢复 WebDAV 推送逻辑。
- * 2. [重构] 作为一个可调用的独立模块，不再包含硬编码的配置（配置应从 env 或 KV 读取，或者作为参数传入）。
+ * 1. [修复] 尝试读取 WORKER_DOMAIN 配置，解决定时任务生成订阅时节点地址为 'worker.local' 导致无法连接的问题。
+ * 2. [稳健性] 增加对 WEBDAV_URL 的存在性检查。
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
@@ -11,32 +11,35 @@ import { CONSTANTS } from '../constants.js';
 
 export async function executeWebDavPush(env, ctx, force = false) {
     try {
-        // 1. 获取 WebDAV 配置 (建议存储在 KV 或环境变量中)
+        // 1. 获取 WebDAV 配置
         const webdavUrl = await getConfig(env, 'WEBDAV_URL');
         const webdavUser = await getConfig(env, 'WEBDAV_USER');
         const webdavPass = await getConfig(env, 'WEBDAV_PASS');
 
         if (!webdavUrl || !webdavUser || !webdavPass) {
-            console.log('[WebDAV] Configuration missing (WEBDAV_URL/USER/PASS), skipping push.');
+            // 静默失败，因为如果用户没配 WebDAV，不需要在日志里一直报错
             return;
         }
 
         console.log(`[WebDAV] Starting push to ${webdavUrl}`);
 
         // 2. 准备请求上下文
-        // 模拟一个 hostName，通常使用当前 worker 的域名，或者默认值
-        const hostName = 'worker.local'; // 这里可能需要从外部传入真实的 hostName
+        // [修复] 尝试获取 Worker 的真实域名。
+        // 在 Scheduled 事件中无法通过 Request 获取 Host，必须依赖环境变量 WORKER_DOMAIN
+        let hostName = await getConfig(env, 'WORKER_DOMAIN');
+        if (!hostName) {
+            hostName = 'worker.local';
+            console.warn('[WebDAV] Warning: WORKER_DOMAIN not set. Generated links will use "worker.local" and may not work.');
+        }
 
         // 3. 计算 /all 路径的 hash
         const subHashLength = CONSTANTS.SUB_HASH_LENGTH;
         const allPathHash = (await sha1('all')).toLowerCase().substring(0, subHashLength);
 
         // 4. 调用 handleSubscription 生成内容
-        // 注意：handleSubscription 需要 request 对象，这里我们伪造一个
         const mockRequest = new Request(`https://${hostName}/${ctx.dynamicUUID}/${allPathHash}`);
         
         // 调用订阅处理函数
-        // 注意：我们需要确保 handleSubscription 能处理这种内部调用
         const response = await handleSubscription(mockRequest, env, ctx, allPathHash, hostName);
 
         if (!response || !response.ok) {
