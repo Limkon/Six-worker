@@ -15,16 +15,16 @@ export async function executeWebDavPush(env, ctx, force = false) {
         // [修改] WebDAV 功能开关
         // 默认值改为 '1' (开启)，因为既然已经硬编码了账号，通常意味着需要直接使用。
         // 你依然可以在环境变量中设置 WEBDAV = 0 来强制关闭。
-        const enableWebdav = await getConfig(env, 'WEBDAV', '1');
+        const enableWebdav = await getConfig(env, 'WEBDAV', '0');
         if (enableWebdav !== '1' && !force) {
             return;
         }
 
         // 1. [硬编码] WebDAV 配置信息
         // 直接使用指定的账号密码，不再读取环境变量
-        const rawWebdavUrl = 'https://wani.teracloud.jp/dav/';
-        const webdavUser = 'zoten';
-        const webdavPass = 'N6f7pgwoU5QB6noh';
+        const rawWebdavUrl = '';
+        const webdavUser = '';
+        const webdavPass = '';
 
         // 标准化 URL，确保以 / 结尾
         const webdavUrl = rawWebdavUrl.endsWith('/') ? rawWebdavUrl : `${rawWebdavUrl}/`;
