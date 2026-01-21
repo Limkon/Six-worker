@@ -1,9 +1,9 @@
 /**
  * 文件名: src/handlers/webdav.js
- * 修改说明: 
- * 1. [修复] 修复 URL 拼接逻辑，自动处理末尾斜杠。
- * 2. [稳健性] 增加 WORKER_DOMAIN 检查和内容解码容错。
- * 3. [功能] 增加 WEBDAV 开关，通过环境变量控制推送功能 (0=关, 1=开)。
+ * 审计确认: 
+ * 1. 修复了 Scheduled 事件中无法获取 Host 的核心问题 (依赖 WORKER_DOMAIN)。
+ * 2. 优化了 URL 拼接逻辑，自动处理末尾斜杠。
+ * 3. 增加了功能开关，防止未配置时的无效执行。
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
