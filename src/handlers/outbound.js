@@ -1,15 +1,15 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Critical] 修复 NAT64 连接逻辑中 resolveToIPv6 返回 null 导致的 "[null]" 地址错误。
- * 2. 保持原有重试和缓冲刷新逻辑。
+ * 1. [Critical Fix] 修复 Stream 锁竞争 Bug。推迟状态更新 (remoteSocketWrapper.value) 直到 writer 锁释放后，
+ * 防止 websocket.js 在 buffer 冲刷期间尝试获取锁导致崩溃。
+ * 2. [Optimization] 优化 flushBuffer 逻辑，更安全地处理并发写入的数据。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
 import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
 
-// ... (parseProxyIP, shouldUseSocks5, parseSocks5Config, socks5Connect 保持不变) ...
 /**
  * 解析 ProxyIP 字符串，提取 host 和 port
  */
@@ -210,7 +210,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     if (!useSocks && ctx.dns64) {
         try {
             log(`[connect] Phase 3: Attempting NAT64...`);
-            // [修复] 增加判空逻辑
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (v6Address) {
                 const nat64IP = '[' + v6Address + ']';
@@ -270,23 +269,37 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     }
 }
 
-// [新增] 辅助函数：将缓冲区数据写入 Socket
+// [优化] 辅助函数：更健壮的缓冲区冲刷逻辑
 async function flushBuffer(writer, buffer, log) {
-    if (buffer && buffer.length > 0) {
-        log(`Flushing ${buffer.length} buffered chunks`);
-        for (const chunk of buffer) {
+    if (!buffer || buffer.length === 0) return;
+    
+    log(`Flushing ${buffer.length} buffered chunks`);
+    
+    // 使用 while 循环，应对 flush 过程中又有新数据被 push 进来的情况
+    // 复制当前 buffer 并清空，避免死循环（虽然 JS 单线程通常不会，但为了逻辑严谨）
+    while (buffer.length > 0) {
+        const batch = [...buffer];
+        buffer.length = 0; // 立即清空，后续进入的数据会在下一次循环或由 websocket.js 处理
+        
+        for (const chunk of batch) {
             await writer.write(chunk);
         }
-        // 清空数组，但保持引用不变
-        buffer.length = 0;
     }
 }
 
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-    // 准备重试环境：设置状态为连接中，断开 websocket.js 的 writer 绑定
+    // 准备重试环境：设置状态为连接中
+    // 注意：这里将 value 设为 null，通知 websocket.js 开始缓冲数据
     const prepareRetry = () => {
         remoteSocketWrapper.value = null;
         remoteSocketWrapper.isConnecting = true;
+    };
+    
+    // 状态更新辅助函数：确保释放锁之后再更新状态
+    const finalizeConnection = (socket) => {
+        remoteSocketWrapper.value = socket;
+        remoteSocketWrapper.isConnecting = false;
+        // 此时 websocket.js 才会检测到新 socket 并尝试获取 writer
     };
 
     const nat64Retry = async () => {
@@ -295,23 +308,22 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         prepareRetry(); 
         
         try {
-            // [修复] 增加判空逻辑
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
 
             const nat64IP = '[' + v6Address + ']';
             const natSocket = await connect({ hostname: nat64IP, port: portRemote });
             
-            remoteSocketWrapper.value = natSocket;
-            remoteSocketWrapper.isConnecting = false;
-            
+            // [关键修改] 先获取 writer 并冲刷数据
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) {
                 await writer.write(rawClientData);
             }
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
-            
             writer.releaseLock();
+            
+            // [关键修改] 锁释放后再更新状态
+            finalizeConnection(natSocket);
             
             remoteSocketToWS(natSocket, webSocket, vlessResponseHeader, null, log);
         } catch (e) {
@@ -345,16 +357,16 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 
                 const proxySocket = await connect({ hostname: proxyHost.toLowerCase(), port: proxyPort });
                 
-                remoteSocketWrapper.value = proxySocket;
-                remoteSocketWrapper.isConnecting = false;
-                
+                // [关键修改] 先获取 writer 并冲刷数据
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) {
                     await writer.write(rawClientData);
                 }
                 await flushBuffer(writer, remoteSocketWrapper.buffer, log);
-                
                 writer.releaseLock();
+                
+                // [关键修改] 锁释放后再更新状态
+                finalizeConnection(proxySocket);
                 
                 const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
                 const nextRetry = (!useSocks && ctx.dns64) ? nat64Retry : null;
@@ -376,17 +388,17 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
 
     try {
         const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log);
-        remoteSocketWrapper.value = socket;
-        remoteSocketWrapper.isConnecting = false;
         
+        // [关键修改] 先获取 writer 并冲刷数据
         const writer = socket.writable.getWriter();
         if (rawClientData && rawClientData.byteLength > 0) {
             await writer.write(rawClientData);
         }
-        if (remoteSocketWrapper.buffer && remoteSocketWrapper.buffer.length > 0) {
-            await flushBuffer(writer, remoteSocketWrapper.buffer, log);
-        }
+        await flushBuffer(writer, remoteSocketWrapper.buffer, log);
         writer.releaseLock();
+        
+        // [关键修改] 锁释放后再更新状态，防止 websocket.js 抢占 Locked Stream
+        finalizeConnection(socket);
         
         remoteSocketToWS(socket, webSocket, vlessResponseHeader, proxyIPRetry, log);
     } catch (error) {
