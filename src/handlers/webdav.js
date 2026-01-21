@@ -4,6 +4,7 @@
  * 1. 修复了 Scheduled 事件中无法获取 Host 的核心问题 (依赖 WORKER_DOMAIN)。
  * 2. 优化了 URL 拼接逻辑，自动处理末尾斜杠。
  * 3. 增加了功能开关，防止未配置时的无效执行。
+ * 4. [Refactor] 修正文件名时间戳为 UTC+8，与业务逻辑保持一致。
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
@@ -89,8 +90,10 @@ export async function executeWebDavPush(env, ctx, force = false) {
         // 8. 生成文件名并推送
         const subName = await getConfig(env, 'SUBNAME', 'sub');
         const now = new Date();
-        // 生成时间戳文件名: sub_20231027083000.txt
-        const timestamp = now.toISOString().replace(/[-:T.]/g, '').slice(0, 14);
+        // [Refactor] 使用 UTC+8 时间生成文件名，避免 "昨天" 的情况
+        const offset = 8 * 60 * 60 * 1000;
+        const localDate = new Date(now.getTime() + offset);
+        const timestamp = localDate.toISOString().replace(/[-:T.]/g, '').slice(0, 14); // 格式: YYYYMMDDHHMMSS
         const fileName = `${subName}_${timestamp}.txt`;
         
         // 使用修正后的 webdavUrl 进行拼接
