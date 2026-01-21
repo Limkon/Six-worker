@@ -40,8 +40,9 @@ export async function executeWebDavPush(env, ctx, force = false) {
         // 在 Scheduled 事件中无法通过 Request 获取 Host，必须依赖环境变量 WORKER_DOMAIN
         let hostName = await getConfig(env, 'WORKER_DOMAIN');
         if (!hostName) {
+            // [警告] 明确提示用户
+            console.warn('[WebDAV] CRITICAL Warning: WORKER_DOMAIN is not set! Generated subscription links will use "worker.local" and will NOT work on clients. Please set WORKER_DOMAIN variable.');
             hostName = 'worker.local';
-            console.warn('[WebDAV] Warning: WORKER_DOMAIN not set. Generated links will use "worker.local" and may not work.');
         }
 
         // 3. 计算 /all 路径的 hash
