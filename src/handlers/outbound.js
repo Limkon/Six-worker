@@ -5,6 +5,7 @@
  * 2. [Critical Fix] 包含 SOCKS5 握手长度检查和 Early Data 处理。
  * 3. [Optimization] 包含 Stream 锁竞争修复和缓冲区冲刷逻辑。
  * 4. [Refactor] 优化 SOCKS5 Early Data 处理为零拷贝 (subarray)。
+ * 5. [Fix] 增强 IPv6 解析健壮性，修复 WebSocket 关闭后的资源浪费。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -23,6 +24,12 @@ function parseProxyIP(proxyAddr, defaultPort) {
     // 1. 处理带中括号的 IPv6
     if (host.startsWith('[')) {
         const bracketEnd = host.lastIndexOf(']');
+        if (bracketEnd === -1) {
+            // [Fix] 格式错误处理：如果以 [ 开头但没有 ]，视为无效或尝试直接作为 host
+            // 这种情况下继续解析极易出错，直接返回原始值或作为 host 返回
+            return { host: host, port: defaultPort };
+        }
+        
         if (bracketEnd > 0) {
             const remainder = host.substring(bracketEnd + 1);
             if (remainder.startsWith(':')) {
@@ -266,6 +273,9 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             async write(chunk, controller) {
                 hasIncomingData = true;
                 if (webSocket.readyState !== 1) { 
+                    // [Fix] 当 WebSocket 关闭时，主动报错以中断 PipeTo，
+                    // 防止继续从 remoteSocket 读取数据造成资源浪费
+                    controller.error(new Error('Client WebSocket closed, stopping remote read'));
                     return;
                 }
                 if (responseHeader) {
@@ -284,7 +294,7 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             abort(reason) { console.error('Remote socket aborted', reason); },
         })
     ).catch((error) => {
-        if (error.message !== 'webSocket is not open') {
+        if (error.message !== 'webSocket is not open' && error.message !== 'Client WebSocket closed, stopping remote read') {
             console.error('remoteSocketToWS error:', error);
         }
         safeCloseWebSocket(webSocket);
