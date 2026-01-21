@@ -1,13 +1,14 @@
 /**
  * 文件名: src/pages/admin.js
  * 说明: 
- * 1. [修复] BESTIP_SOURCES 解析逻辑，支持带空格的名称 (例如 "My Source https://...")。
- * 2. [保留] 其他逻辑保持不变。
+ * 1. [新增] 引入 executeWebDavPush，实现配置变更后自动触发 WebDAV 推送。
+ * 2. [保留] 保持原有的 BESTIP_SOURCES 解析修复。
  */
-import { getConfig, cleanConfigCache } from '../config.js'; 
+import { getConfig, cleanConfigCache, initializeContext } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
 import { cleanList } from '../utils/helpers.js';
 import { getAdminConfigHtml, getBestIPHtml } from '../templates/admin.js';
+import { executeWebDavPush } from '../handlers/webdav.js';
 
 // 处理 /edit 页面 (配置编辑器)
 export async function handleEditConfig(request, env, ctx) {
@@ -37,6 +38,10 @@ export async function handleEditConfig(request, env, ctx) {
         ['SOCKS5', 'SOCKS5/HTTP代理', 'Worker出站时使用的前置代理 (如无可留空)。', 'user:pass@host:port 或 http://user:pass@host:port', 'text'],
         ['GO2SOCKS5', 'SOCKS5分流规则', '哪些域名走SOCKS5代理, 逗号隔开。', '*example.net,*example.com,all in', 'text'],
         ['BAN', '禁止访问的域名', '禁止通过Worker代理访问的域名, 逗号隔开。', 'example.com,example.org', 'text'],
+        ['WEBDAV', 'WebDAV 开关', '设置为 1 开启 WebDAV 推送功能。', '1', 'text'],
+        ['WEBDAV_URL', 'WebDAV 地址', 'WebDAV 服务器地址 (包含目录)。', 'https://dav.example.com/remote.php/dav/files/user/', 'text'],
+        ['WEBDAV_USER', 'WebDAV 用户名', 'WebDAV 登录用户名。', 'username', 'text'],
+        ['WEBDAV_PASS', 'WebDAV 密码', 'WebDAV 登录密码。', 'password', 'text'],
         ['URL302', '根路径跳转URL (302)', '访问根路径 / 时跳转到的地址。', 'https://github.com/', 'text'],
         ['URL', '根路径反代URL', '访问根路径 / 时反代的地址 (302优先)。', 'https://github.com/', 'text'],
         ['BESTIP_SOURCES', 'BestIP IP源', '自定义BestIP页面的IP源列表 (格式: 名称 网址，每行一个)。', 
@@ -59,7 +64,6 @@ export async function handleEditConfig(request, env, ctx) {
                             for (let i = 0; i < lines.length; i++) {
                                 const line = lines[i].trim();
                                 if (!line) continue;
-                                // [修复] 兼容带空格的名称
                                 const parts = line.split(/\s+/);
                                 if (parts.length < 2) {
                                     return new Response(`保存失败: BestIP IP源 格式错误 (第${i + 1}行)。应为: 名称 网址`, { status: 400 });
@@ -73,6 +77,17 @@ export async function handleEditConfig(request, env, ctx) {
             await Promise.all(savePromises);
             
             cleanConfigCache();
+
+            // [新增] 配置变更后，触发 WebDAV 推送
+            // 因为配置变了，订阅内容也会变，所以这里使用 force=true 强制推送
+            try {
+                const appCtx = await initializeContext(request, env);
+                appCtx.waitUntil = ctx.waitUntil.bind(ctx);
+                ctx.waitUntil(executeWebDavPush(env, appCtx, true));
+                console.log('[Admin] Config updated, triggered WebDAV push.');
+            } catch (err) {
+                console.error('[Admin] Failed to trigger WebDAV push:', err);
+            }
 
             return new Response('保存成功', { status: 200 });
         } catch (e) {
@@ -118,7 +133,7 @@ export async function handleBestIP(request, env) {
     const url = new URL(request.url);
     const txt = 'ADD.txt';
 
-    // 1. 处理测试请求 API (保持不变)
+    // 1. 处理测试请求 API
     if (url.searchParams.get('action') === 'test') {
         const ip = url.searchParams.get('ip');
         const port = url.searchParams.get('port');
@@ -158,7 +173,7 @@ export async function handleBestIP(request, env) {
         }
     }
     
-    // 2. 处理保存请求 API (保持不变)
+    // 2. 处理保存请求 API
     if (request.method === "POST") {
         if (!env.KV) return new Response(JSON.stringify({ error: '未绑定KV空间' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
         try {
@@ -201,7 +216,6 @@ export async function handleBestIP(request, env) {
                     for (const line of lines) {
                         const parts = line.trim().split(/\s+/);
                         if (parts.length >= 2) {
-                            // [修复] 正确解析 "Name URL" 格式，Url 为最后一部分
                             const url = parts.pop();
                             const name = parts.join(' ');
                             if (url && name) parsedSources.push({ name, url });
