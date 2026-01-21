@@ -6,6 +6,7 @@
  * 2. 修复 Unexpected token, 保护 https://, 智能处理 console
  * 3. 自动清理注释前的缩进空格
  * 4. 优化：修复 \r\n 换行符在注释清理过程中可能丢失的问题，保持编码一致性
+ * 5. [Fix] 增强正则判断逻辑，支持更多操作符
  */
 
 const fs = require('fs');
@@ -37,7 +38,8 @@ function isRegexStart(text, idx) {
     while (i >= 0 && isSpace(text[i])) i--;
     if (i < 0) return true;
     const last = text[i];
-    if ("(=,:!&|?{};,".includes(last)) return true;
+    // [修复] 增加 [, *, +, -, %, ^, &, |, <, > 等操作符，防止误判
+    if ("(=,:!&|?{};,[]*+-%<>^~".includes(last)) return true;
     
     if (isAlnum(last) || last === ')') {
         let end = i;
