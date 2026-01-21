@@ -5,6 +5,7 @@
  * 1. 自动识别并彻底删除“整行注释”，不留空行
  * 2. 修复 Unexpected token, 保护 https://, 智能处理 console
  * 3. 自动清理注释前的缩进空格
+ * 4. 优化：修复 \r\n 换行符在注释清理过程中可能丢失的问题，保持编码一致性
  */
 
 const fs = require('fs');
@@ -30,7 +31,7 @@ function isAlnum(char) {
     return /[a-zA-Z0-9_$]/.test(char);
 }
 
-// 判断 / 是否为正则开头 (移植自 is_regex_start)
+// 判断 / 是否为正则开头
 function isRegexStart(text, idx) {
     let i = idx - 1;
     while (i >= 0 && isSpace(text[i])) i--;
@@ -51,8 +52,7 @@ function isRegexStart(text, idx) {
     return false;
 }
 
-// 检查 console 类型 (移植自 check_console_type)
-// 返回: 0=无, 1=调用 console.log(...), 2=引用 console.log
+// 检查 console 类型
 function checkConsoleType(text, i, size) {
     if (text.substring(i, i + 8) !== "console.") return { type: 0, len: 0 };
     
@@ -63,7 +63,7 @@ function checkConsoleType(text, i, size) {
     for (const method of methods) {
         if (text.substring(i + 8, i + 8 + method.length) === method) {
             const nextChar = text[i + 8 + method.length];
-            if (!isAlnum(nextChar)) { // 确保匹配完整单词
+            if (!isAlnum(nextChar)) { 
                 matched = true;
                 mLen = 8 + method.length;
                 break;
@@ -82,7 +82,7 @@ function checkConsoleType(text, i, size) {
 
 function processCode(input) {
     const size = input.length;
-    const output = []; // 使用数组作为缓冲区
+    const output = []; 
     let state = STATE.CODE;
     let i = 0;
     
@@ -98,7 +98,7 @@ function processCode(input) {
         // --- Console 参数吞噬模式 ---
         if (skipMode) {
             if (inArgStr !== 0) {
-                if (c === '\\') { i++; } // 跳过转义
+                if (c === '\\') { i++; } 
                 else if ((inArgStr === 1 && c === '\'') ||
                          (inArgStr === 2 && c === '"') ||
                          (inArgStr === 3 && c === '`')) {
@@ -122,7 +122,7 @@ function processCode(input) {
         if (state === STATE.CODE) {
             const { type: cType, len: mLen } = checkConsoleType(input, i, size);
             
-            if (cType === 1) { // console.log(...) 调用
+            if (cType === 1) { 
                 const rep = "void(0)";
                 for (const char of rep) output.push(char);
                 i += mLen;
@@ -133,7 +133,7 @@ function processCode(input) {
                     i++;
                 }
                 continue;
-            } else if (cType === 2) { // console.log 引用
+            } else if (cType === 2) { 
                 const rep = "(()=>{})";
                 for (const char of rep) output.push(char);
                 i += mLen;
@@ -145,14 +145,12 @@ function processCode(input) {
             else if (c === '`') { state = STATE.STRING_TMP; output.push(c); }
             else if (c === '/') {
                 if (next === '/') {
-                    // --- 核心改进：检测是否为整行注释 ---
-                    // 回溯检查 output 缓冲区
                     let tempIdx = output.length;
                     let onlySpaces = true;
                     
                     while (tempIdx > 0) {
                         const prev = output[tempIdx - 1];
-                        if (prev === '\n' || prev === '\r') break; // 到了上一行末尾
+                        if (prev === '\n' || prev === '\r') break; 
                         if (prev !== ' ' && prev !== '\t') {
                             onlySpaces = false;
                             break;
@@ -161,7 +159,6 @@ function processCode(input) {
                     }
 
                     if (onlySpaces) {
-                        // 是整行注释，回退指针（删除之前的缩进空格）
                         output.length = tempIdx;
                         isWholeLineComment = true;
                     } else {
@@ -169,10 +166,10 @@ function processCode(input) {
                     }
 
                     state = STATE.COMMENT_LINE;
-                    i++; // 跳过下一个 '/'
+                    i++; 
                 } else if (next === '*') {
                     state = STATE.COMMENT_BLOCK;
-                    i++; // 跳过 '*'
+                    i++; 
                 } else {
                     if (isRegexStart(input, i)) state = STATE.REGEX;
                     output.push(c);
@@ -181,7 +178,6 @@ function processCode(input) {
                 output.push(c);
             }
         }
-        // --- 字符串 / 正则 ---
         else if (state === STATE.STRING_SQ) {
             output.push(c);
             if (c === '\\') { if (next) { output.push(next); i++; } }
@@ -201,15 +197,18 @@ function processCode(input) {
             output.push(c);
             if (c === '\\') { if (next) { output.push(next); i++; } }
             else if (c === '/') state = STATE.CODE;
-            else if (c === '\n') state = STATE.CODE; // 防止正则跑出当前行
+            else if (c === '\n') state = STATE.CODE; 
         }
-        // --- 注释处理 (带空行清理) ---
+        // --- 注释处理 (修复 \r 丢失) ---
         else if (state === STATE.COMMENT_LINE) {
             if (c === '\n') {
                 if (!isWholeLineComment) {
-                    output.push(c); // 行尾注释，保留换行
+                    // 如果前一个字符是 \r，说明是 Windows 风格换行，需保留 \r
+                    if (i > 0 && input[i - 1] === '\r') {
+                        output.push('\r');
+                    }
+                    output.push(c); 
                 }
-                // 如果是整行注释，不写入 c (\n)，相当于整行删除
                 state = STATE.CODE;
                 isWholeLineComment = false;
             }
@@ -217,10 +216,14 @@ function processCode(input) {
         else if (state === STATE.COMMENT_BLOCK) {
             if (c === '*' && next === '/') {
                 state = STATE.CODE;
-                output.push(' '); // 用空格代替块注释，防止粘连
+                output.push(' '); 
                 i++;
             } else if (c === '\n') {
-                output.push(c); // 保留块注释内的换行，维持行号一致性
+                // 块注释内部换行同样需要检查并保留 \r
+                if (i > 0 && input[i - 1] === '\r') {
+                    output.push('\r');
+                }
+                output.push(c); 
             }
         }
         i++;
