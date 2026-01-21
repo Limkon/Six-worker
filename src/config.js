@@ -1,8 +1,8 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [修复] 为 fetch 请求添加 AbortSignal 超时控制，防止远程配置无响应导致 Worker 挂起。
- * 2. 保留原有缓存逻辑。
+ * 1. [修复] 为 ProxyIP 的 fetch 请求添加 AbortSignal 超时控制，防止远程源无响应导致 Worker 挂起。
+ * 2. 保持原有逻辑不变。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -227,7 +227,16 @@ export async function initializeContext(request, env) {
                  ctx.proxyIPList = proxyIPRemoteCache.data;
              } else {
                  try {
-                     const response = await fetch(rawProxyIP);
+                     // [修复] 添加超时控制 (5秒)
+                     const controller = new AbortController();
+                     const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+                     const response = await fetch(rawProxyIP, {
+                        signal: controller.signal
+                     });
+                     
+                     clearTimeout(timeoutId);
+
                      if (response.ok) {
                          const text = await response.text();
                          const list = await cleanList(text); 
