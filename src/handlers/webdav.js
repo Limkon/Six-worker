@@ -3,6 +3,7 @@
  * 修改说明: 
  * 1. [修复] 修复 URL 拼接逻辑，自动处理末尾斜杠。
  * 2. [稳健性] 增加 WORKER_DOMAIN 检查和内容解码容错。
+ * 3. [功能] 增加 WEBDAV 开关，通过环境变量控制推送功能 (0=关, 1=开)。
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
@@ -11,6 +12,14 @@ import { CONSTANTS } from '../constants.js';
 
 export async function executeWebDavPush(env, ctx, force = false) {
     try {
+        // [新增] WebDAV 功能开关检查
+        // 默认关闭 (0)，如需开启请在环境变量中设置 WEBDAV 为 1
+        // 注意：如果 force 为 true (例如手动触发)，则忽略开关状态
+        const enableWebdav = await getConfig(env, 'WEBDAV', '0');
+        if (enableWebdav !== '1' && !force) {
+            return;
+        }
+
         // 1. 获取 WebDAV 配置
         const rawWebdavUrl = await getConfig(env, 'WEBDAV_URL');
         const webdavUser = await getConfig(env, 'WEBDAV_USER');
