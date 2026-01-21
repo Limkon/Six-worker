@@ -5,6 +5,7 @@
  * 2. 优化了 URL 拼接逻辑，自动处理末尾斜杠。
  * 3. 增加了功能开关，防止未配置时的无效执行。
  * 4. [Refactor] 修正文件名时间戳为 UTC+8，与业务逻辑保持一致。
+ * 5. [新增] WebDAV 推送请求增加 5 秒超时控制。
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
@@ -96,10 +97,13 @@ export async function executeWebDavPush(env, ctx, force = false) {
         const timestamp = localDate.toISOString().replace(/[-:T.]/g, '').slice(0, 14); // 格式: YYYYMMDDHHMMSS
         const fileName = `${subName}_${timestamp}.txt`;
         
-        // 使用修正后的 webdavUrl 进行拼接
         const targetUrl = `${webdavUrl}${fileName}`;
         const auth = btoa(`${webdavUser}:${webdavPass}`);
         
+        // [新增] 5秒超时控制
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+
         const pushRequest = fetch(targetUrl, {
             method: 'PUT',
             headers: {
@@ -107,7 +111,10 @@ export async function executeWebDavPush(env, ctx, force = false) {
                 'Content-Type': 'text/plain; charset=utf-8',
                 'User-Agent': 'Cloudflare-Worker-Pusher'
             },
-            body: finalContent
+            body: finalContent,
+            signal: controller.signal
+        }).finally(() => {
+            clearTimeout(timeoutId); // 无论成功失败，清除定时器
         });
 
         if (ctx.waitUntil) ctx.waitUntil(pushRequest);
