@@ -1,9 +1,8 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [修复] 增加 UUID 缺失时的兜底生成逻辑，防止程序崩溃。
- * 2. [优化] 明确配置优先级，增强 initializeContext 的健壮性。
- * 3. [功能] 增加 REMOTE_CONFIG 开关，通过环境变量控制远程配置加载 (0=关, 1=开)。
+ * 1. [新增] 在 getConfig 的 UUID 查找链中加入 env.SUPER_PASSWORD，支持直接从环境变量读取超级密码。
+ * 2. [逻辑] 优化 initializeContext 中的兜底逻辑，当 UUID/KEY 缺失时，优先尝试使用 SUPER_PASSWORD 生成确定性 UUID，最后才回退到随机 UUID。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -88,7 +87,8 @@ export async function getConfig(env, key, defaultValue = undefined) {
     if (!val && env[key]) val = env[key];
     
     // 5. 兼容旧的 UUID/KEY 命名
-    if (!val && key === 'UUID') val = env.UUID || env.uuid || env.PASSWORD || env.pswd || CONSTANTS.SUPER_PASSWORD;
+    // [修改] 增加 env.SUPER_PASSWORD 检查，确保环境变量中的 SUPER_PASSWORD 能被作为 UUID 候补读取
+    if (!val && key === 'UUID') val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
     if (!val && key === 'KEY') val = env.KEY || env.TOKEN;
     
     const finalVal = val !== undefined ? val : defaultValue;
@@ -102,7 +102,6 @@ export async function getConfig(env, key, defaultValue = undefined) {
 export async function initializeContext(request, env) {
     // [新增] 远程配置开关检查
     // 默认关闭 (0)，如需开启请在环境变量中设置 REMOTE_CONFIG 为 1
-    // 必须在读取其他配置之前执行，以便 remoteConfigCache 被填充
     const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0');
     if (enableRemote === '1') {
         await loadRemoteConfig(env);
@@ -138,7 +137,7 @@ export async function initializeContext(request, env) {
         userID: '', 
         dynamicUUID: '', 
         userIDLow: '', 
-        expectedUserIDs: [], // [新增] 预存小写 ID 列表，优化协议握手性能
+        expectedUserIDs: [], 
         proxyIP: '', 
         proxyIPList: [], 
         dns64: dns64 || '', 
@@ -153,16 +152,16 @@ export async function initializeContext(request, env) {
     };
 
     // 处理 UUID
-    // 优先使用 rawUUID
+    // 优先使用 rawUUID (如果 getConfig('UUID') 读取到了 SUPER_PASSWORD，这里 rawUUID 就是那个密码)
     if (rawUUID) {
         ctx.userID = rawUUID;
         ctx.dynamicUUID = rawUUID;
     }
 
-    // 如果配置了 KEY，或者 UUID 不是标准 V4 格式，启用动态 UUID 逻辑
+    // 如果配置了 KEY，或者 UUID 不是标准 V4 格式 (例如是 SUPER_PASSWORD)，启用动态 UUID 逻辑
     if (rawKey || (rawUUID && !isStrictV4UUID(rawUUID))) {
         const seed = rawKey || rawUUID;
-        // 如果 seed 也不存在（即 UUID 和 KEY 都没配），将在下方兜底处理
+        
         if (seed) {
             const timeDays = Number(timeDaysStr) || 99999;
             const updateHour = Number(updateHourStr) || 0;
@@ -173,12 +172,27 @@ export async function initializeContext(request, env) {
         }
     }
 
-    // [关键修复] 如果此时 userID 仍为空，说明用户未配置 UUID/KEY，生成临时 UUID 并警告
+    // [关键修复] 如果此时 userID 仍为空，说明用户未配置 UUID/KEY
     if (!ctx.userID) {
-        console.warn('[CONFIG] CRITICAL: No UUID/KEY configured! Generating temporary UUID. Service may be unstable.');
-        const tempUUID = crypto.randomUUID();
-        ctx.userID = tempUUID;
-        ctx.dynamicUUID = tempUUID;
+        // [新增] 再次尝试直接获取 SUPER_PASSWORD，作为最后的挽救措施
+        // 这一步是为了防止 getConfig('UUID') 没能正确回退到 SUPER_PASSWORD 的情况
+        const superPass = await getConfig(env, 'SUPER_PASSWORD') || CONSTANTS.SUPER_PASSWORD;
+        
+        if (superPass) {
+             const timeDays = Number(timeDaysStr) || 99999;
+             const updateHour = Number(updateHourStr) || 0;
+             const userIDs = await generateDynamicUUID(superPass, timeDays, updateHour);
+             ctx.userID = userIDs[0]; 
+             ctx.userIDLow = userIDs[1]; 
+             ctx.dynamicUUID = superPass;
+             console.log('[CONFIG] Missing UUID/KEY, generated UUID using SUPER_PASSWORD.');
+        } else {
+            // 只有当 SUPER_PASSWORD 也没有时，才生成随机临时 UUID
+            console.warn('[CONFIG] CRITICAL: No UUID/KEY/SUPER_PASSWORD configured! Generating temporary UUID. Service may be unstable.');
+            const tempUUID = crypto.randomUUID();
+            ctx.userID = tempUUID;
+            ctx.dynamicUUID = tempUUID;
+        }
     }
 
     // [性能优化] 预生成小写 ID 列表，供各协议模块直接使用
@@ -189,7 +203,6 @@ export async function initializeContext(request, env) {
     
     if (rawProxyIP) { 
         if (rawProxyIP.startsWith('http')) {
-             // 检查远程 ProxyIP 缓存 (10分钟有效期)
              if (Date.now() < proxyIPRemoteCache.expires) {
                  ctx.proxyIPList = proxyIPRemoteCache.data;
              } else {
@@ -199,23 +212,18 @@ export async function initializeContext(request, env) {
                          const text = await response.text();
                          const list = await cleanList(text); 
                          ctx.proxyIPList = list;
-                         // 更新缓存
                          proxyIPRemoteCache.data = list;
                          proxyIPRemoteCache.expires = Date.now() + 600000;
                      }
                  } catch (e) {
                      console.error('Failed to fetch remote ProxyIP:', e);
-                     // 失败时回退到默认
                      const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
                      ctx.proxyIPList = defParams;
                  }
              }
         } else {
-             // [修复] 显式处理逗号(,)、分号(;)和换行(\n)
              ctx.proxyIPList = rawProxyIP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
         }
-
-        // 随机选择一个作为主 IP
         ctx.proxyIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)] || ''; 
     }
 
