@@ -1,9 +1,8 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [修复] 强化远程配置解析逻辑，增加对注释行（# 或 //）和空行的过滤。
- * 2. [修复] 修正行解析时对等号的处理，确保键值对校验更严谨。
- * 3. [优化] initializeContext 新增 expectedUserIDs 预处理，提升协议校验效率。
+ * 1. [修复] 增加 UUID 缺失时的兜底生成逻辑，防止程序崩溃。
+ * 2. [优化] 明确配置优先级，增强 initializeContext 的健壮性。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -73,7 +72,7 @@ export async function getConfig(env, key, defaultValue = undefined) {
 
     let val = undefined;
     
-    // 2. 读取 KV
+    // 2. 读取 KV (优先级：KV > 环境变量，允许动态覆盖)
     if (env.KV) {
         const kvVal = await env.KV.get(key);
         if (kvVal !== null) {
@@ -147,16 +146,32 @@ export async function initializeContext(request, env) {
     };
 
     // 处理 UUID
-    ctx.userID = rawUUID;
-    ctx.dynamicUUID = rawUUID;
+    // 优先使用 rawUUID
+    if (rawUUID) {
+        ctx.userID = rawUUID;
+        ctx.dynamicUUID = rawUUID;
+    }
+
+    // 如果配置了 KEY，或者 UUID 不是标准 V4 格式，启用动态 UUID 逻辑
     if (rawKey || (rawUUID && !isStrictV4UUID(rawUUID))) {
         const seed = rawKey || rawUUID;
-        const timeDays = Number(timeDaysStr) || 99999;
-        const updateHour = Number(updateHourStr) || 0;
-        const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
-        ctx.userID = userIDs[0]; 
-        ctx.userIDLow = userIDs[1]; 
-        ctx.dynamicUUID = seed;
+        // 如果 seed 也不存在（即 UUID 和 KEY 都没配），将在下方兜底处理
+        if (seed) {
+            const timeDays = Number(timeDaysStr) || 99999;
+            const updateHour = Number(updateHourStr) || 0;
+            const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
+            ctx.userID = userIDs[0]; 
+            ctx.userIDLow = userIDs[1]; 
+            ctx.dynamicUUID = seed;
+        }
+    }
+
+    // [关键修复] 如果此时 userID 仍为空，说明用户未配置 UUID/KEY，生成临时 UUID 并警告
+    if (!ctx.userID) {
+        console.warn('[CONFIG] CRITICAL: No UUID/KEY configured! Generating temporary UUID. Service may be unstable.');
+        const tempUUID = crypto.randomUUID();
+        ctx.userID = tempUUID;
+        ctx.dynamicUUID = tempUUID;
     }
 
     // [性能优化] 预生成小写 ID 列表，供各协议模块直接使用
