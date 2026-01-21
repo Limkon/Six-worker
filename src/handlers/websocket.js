@@ -1,8 +1,8 @@
 /**
  * 文件名: src/handlers/websocket.js
  * 修改内容: 
- * 1. [性能优化] 实现持久化 Writer 锁，避免每包数据重复 getWriter/releaseLock，显著提升吞吐量。
- * 2. [稳健性] 增加对 Socket 变更(重试)的自动检测和 Writer 更新逻辑。
+ * 1. [健壮性] 增强 Writer 锁释放逻辑，配合 outbound.js 的重试机制，防止 Socket 切换时的竞态报错。
+ * 2. [性能] 保持 Writer 持久化缓存优化。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -34,6 +34,7 @@ export async function handleWebSocketRequest(request, ctx) {
     webSocket.accept();
     
     // 状态变量
+    // buffer: 用于在重试连接期间暂存客户端发来的数据
     let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [] };
     let isConnected = false; 
     let socks5State = 0; 
@@ -62,35 +63,50 @@ export async function handleWebSocketRequest(request, ctx) {
         async write(chunk, controller) {
             const chunkArr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
 
-            // 1. 已连接状态：高性能直通 (核心优化区域)
+            // 1. 已连接状态：高性能直通
             if (isConnected) {
-                // [优化] 检测 Socket 是否发生变化 (例如触发了重试逻辑，Socket对象会被替换)
+                // 检测 Socket 是否发生变化 (例如触发了重试逻辑，Socket对象会被替换或置空)
                 if (activeSocket !== remoteSocketWrapper.value) {
-                    // 如果存在旧的 Writer，先释放锁
+                    // 如果持有旧锁，必须先释放
                     if (activeWriter) {
-                        try { activeWriter.releaseLock(); } catch(e) {}
+                        try {
+                            await activeWriter.ready; // 等待之前的写入完成
+                            activeWriter.releaseLock(); 
+                        } catch(e) {
+                            // 忽略释放锁时的错误（Socket可能已关闭）
+                        }
                         activeWriter = null;
                     }
                     
                     // 更新当前激活的 Socket
                     activeSocket = remoteSocketWrapper.value;
                     
-                    // 获取新 Socket 的 Writer
+                    // 如果新 Socket 存在，获取新 Writer
                     if (activeSocket) {
-                        activeWriter = activeSocket.writable.getWriter();
+                        try {
+                            activeWriter = activeSocket.writable.getWriter();
+                        } catch (e) {
+                            log('Failed to get writer for new socket', e);
+                            safeCloseWebSocket(webSocket);
+                            return;
+                        }
                     }
                 }
 
                 if (activeWriter) {
-                    // [优化] 直接使用持有的 Writer 写入，无需重复 getWriter/releaseLock
+                    // 正常直通写入
+                    // 注意：这里不做 await catch，如果写入失败由 stream 错误处理捕获
                     await activeWriter.write(chunkArr);
                 } else if (remoteSocketWrapper.isConnecting) {
+                    // 如果 Socket 为空且处于连接中（重试中），将数据缓冲
+                    // 这些数据将在 outbound.js 重试成功后通过 flushBuffer 写入
                     remoteSocketWrapper.buffer.push(chunkArr);
                 }
+                // 如果既没有 Writer 也不在 Connecting 状态，说明连接可能已断开，数据将被丢弃
                 return;
             }
 
-            // 2. 数据缓冲 (以下逻辑保持不变)
+            // 2. 数据缓冲 (协议探测阶段)
             headerBuffer = concatUint8(headerBuffer, chunkArr);
 
             // 3. Socks5 握手处理
@@ -127,7 +143,7 @@ export async function handleWebSocketRequest(request, ctx) {
                 // --- 成功识别 ---
                 isConnected = true;
                 clearTimeout(timeoutTimer); 
-                remoteSocketWrapper.isConnecting = true;
+                remoteSocketWrapper.isConnecting = true; // 标记开始建立连接
 
                 const { protocol, addressRemote, portRemote, addressType, rawDataIndex, isUDP } = result;
                 
@@ -148,25 +164,27 @@ export async function handleWebSocketRequest(request, ctx) {
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
+                    // SOCKS5 响应成功连接
                     webSocket.send(new Uint8Array([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]));
                     socks5State = 3;
                 }
 
-                headerBuffer = null; 
+                headerBuffer = null; // 释放内存
 
+                // 建立出站连接
                 handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
 
             } catch (e) {
                 if (headerBuffer && headerBuffer.length < 512 && headerBuffer.length < MAX_HEADER_BUFFER) {
-                    return; 
+                    return; // 数据不够，继续等待
                 }
                 clearTimeout(timeoutTimer);
                 log(`Detection failed: ${e.message}`);
                 safeCloseWebSocket(webSocket);
             }
         },
-        // [优化] 流关闭时释放 Writer 锁
         close() { 
+            // 释放锁
             if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
             log("Client WebSocket closed"); 
         },
@@ -177,7 +195,6 @@ export async function handleWebSocketRequest(request, ctx) {
         },
     })).catch((err) => {
         clearTimeout(timeoutTimer);
-        // 异常时也要确保释放锁
         if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
         log("Stream processing failed", err.toString());
         safeCloseWebSocket(webSocket);
@@ -188,7 +205,6 @@ export async function handleWebSocketRequest(request, ctx) {
     return new Response(null, { status: 101, webSocket: client });
 }
 
-// ... tryHandleSocks5Handshake 和 makeReadableWebSocketStream 保持原有逻辑不变 ...
 function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
     const res = { consumed: 0, newState: currentState, error: null };
     if (buffer.length === 0) return res;
