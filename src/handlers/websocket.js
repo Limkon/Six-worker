@@ -1,8 +1,8 @@
 /**
  * 文件名: src/handlers/websocket.js
  * 修改内容: 
- * 1. [健壮性] 增强 Writer 锁释放逻辑，配合 outbound.js 的重试机制，防止 Socket 切换时的竞态报错。
- * 2. [性能] 保持 Writer 持久化缓存优化。
+ * 1. [Fix] 修复资源泄漏问题：当客户端断开 WebSocket 时，主动关闭上游 TCP Socket。
+ * 2. [稳健性] 保持原有的锁竞争处理和缓冲区逻辑。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -186,16 +186,32 @@ export async function handleWebSocketRequest(request, ctx) {
         close() { 
             // 释放锁
             if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
+            
+            // [Fix] 客户端断开时，主动关闭远程 Socket，防止资源泄漏
+            if (remoteSocketWrapper.value) {
+                try { remoteSocketWrapper.value.close(); } catch(e) {}
+            }
+            
             log("Client WebSocket closed"); 
         },
         abort(reason) { 
             if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
+            
+            // [Fix] 客户端异常断开时，主动关闭远程 Socket
+            if (remoteSocketWrapper.value) {
+                try { remoteSocketWrapper.value.close(); } catch(e) {}
+            }
+            
             log("WebSocket aborted", reason); 
             safeCloseWebSocket(webSocket); 
         },
     })).catch((err) => {
         clearTimeout(timeoutTimer);
         if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
+        // 确保异常时也尝试清理
+        if (remoteSocketWrapper.value) {
+            try { remoteSocketWrapper.value.close(); } catch(e) {}
+        }
         log("Stream processing failed", err.toString());
         safeCloseWebSocket(webSocket);
     });
