@@ -1,7 +1,7 @@
 /**
  * 文件名: src/handlers/webdav.js
  * 审计确认: 
- * 1. 修复了 Scheduled 事件中无法获取 Host 的核心问题 (依赖 WORKER_DOMAIN)。
+ * 1. [功能升级] 实现了域名的自动发现。先读取环境变量，无则读取 KV 缓存(SAVED_DOMAIN)。
  * 2. 优化了 URL 拼接逻辑，自动处理末尾斜杠。
  * 3. 增加了功能开关，防止未配置时的无效执行。
  * 4. [Refactor] 修正文件名时间戳为 UTC+8，与业务逻辑保持一致。
@@ -39,11 +39,20 @@ export async function executeWebDavPush(env, ctx, force = false) {
 
         // 2. 准备请求上下文
         // [修复] 尝试获取 Worker 的真实域名。
-        // 在 Scheduled 事件中无法通过 Request 获取 Host，必须依赖环境变量 WORKER_DOMAIN
+        // 逻辑顺序: 1. 环境变量 WORKER_DOMAIN (手动覆盖) -> 2. KV SAVED_DOMAIN (自动获取) -> 3. Fallback
         let hostName = await getConfig(env, 'WORKER_DOMAIN');
+        
+        // 如果环境变量未设置，且 KV 存在，尝试读取自动保存的域名
+        if (!hostName && env.KV) {
+            hostName = await env.KV.get('SAVED_DOMAIN');
+            if (hostName) {
+                console.log(`[WebDAV] Using auto-detected domain from KV: ${hostName}`);
+            }
+        }
+
         if (!hostName) {
-            // [警告] 明确提示用户
-            console.warn('[WebDAV] CRITICAL Warning: WORKER_DOMAIN is not set! Generated subscription links will use "worker.local" and will NOT work on clients. Please set WORKER_DOMAIN variable.');
+            // [警告] 只有在从未访问过节点且未配置环境变量时才会触发
+            console.warn('[WebDAV] Warning: Domain not found! Please access your Worker url at least once to auto-detect domain, or set WORKER_DOMAIN variable.');
             hostName = 'worker.local';
         }
 
