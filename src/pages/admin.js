@@ -2,7 +2,7 @@
  * 文件名: src/pages/admin.js
  * 说明: 
  * 1. [新增] 引入 executeWebDavPush，实现配置变更后自动触发 WebDAV 推送。
- * 2. [保留] 保持原有的 BESTIP_SOURCES 解析修复。
+ * 2. [修复] 修复 BestIP 在线优选功能中加载 IPv6 CIDR (如 Cloudflare 官方列表) 失败的问题。
  */
 import { getConfig, cleanConfigCache, initializeContext } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
@@ -249,6 +249,13 @@ export async function handleBestIP(request, env) {
                         try {
                             if (!cidr.includes('/')) { ips.add(cidr); continue; }
                             const [network, prefixStr] = cidr.split('/');
+                            
+                            // [新增] IPv6 兼容逻辑：如果是 IPv6 CIDR，直接添加网络地址部分用于测试
+                            if (network.includes(':')) {
+                                ips.add(network);
+                                continue;
+                            }
+                            
                             const prefix = parseInt(prefixStr);
                             if (prefix < 12 || prefix > 31) continue;
                             const ipToInt = (ip) => ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
