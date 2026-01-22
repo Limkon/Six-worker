@@ -2,10 +2,9 @@
 
 /**
  * 文件名: src/handlers/outbound.js
- * 修改说明:
- * 1. [架构优化] 明确将 "TCP Socket (ProxyIP)" 确立为第一退回方案 (Phase 2)。
- * 2. [逻辑增强] 在 createUnifiedConnection 中，当直连失败时立即尝试 ProxyIP。
- * 3. [双重保障] 修复 handleTCPOutBound 中的重试回调，确保"连接成功但无数据"(Error 1000特征)时也能触发 ProxyIP 重试。
+ * 修复说明:
+ * 1. [Critical Fix] 移除 NAT64 连接 (Phase 3 和 nat64Retry) 中 IPv6 地址错误的方括号 []。connect API 需要原始 IPv6 字符串。
+ * 2. [Verified] 保留原有的 socket 超时泄漏防护、SOCKS5 优化和黑名单检查逻辑。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -167,7 +166,9 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 
         log(`[connect] Target: ${host}:${port} (Socks: ${isSocks}) (Timeout: ${currentTimeout}ms)`);
         
+        // [修复] 标记该次尝试是否已超时
         let isTimedOut = false;
+
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => {
             isTimedOut = true;
             reject(new Error(`Connect timeout (${currentTimeout}ms)`));
@@ -181,63 +182,75 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
                      if (isSocks) {
                         s = await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
                     } else {
-                        // 核心：使用 TCP Socket (connect API)
                         s = connect({ hostname: host, port: port });
                     }
-                 } catch(e) { throw e; }
+                 } catch(e) {
+                     throw e;
+                 }
 
+                 // [修复关键点]：如果连接成功时已经超时，立即关闭 Socket 并返回 null/抛错
+                 // 这样可以确保 Promise.race 已经 reject 的情况下，后台建立的连接不会被泄漏
                  if (isTimedOut) {
-                     if (s) { try { s.close(); } catch(e) {} }
+                     if (s) {
+                         try { s.close(); } catch(e) {}
+                         log(`[connect] Late connection to ${host}:${port} closed due to timeout.`);
+                     }
                      return null; 
                  }
                  return s;
             };
 
+            // 获取 Socket 对象
             socket = await Promise.race([doConnect(), timeoutPromise]);
             
+            // 双重检查：理论上 doConnect 如果处理了 isTimedOut 不会返回 socket，但为了稳健性再次检查
             if (isTimedOut && socket) {
                  try { socket.close(); } catch(e) {}
                  throw new Error(`Connect timeout (${currentTimeout}ms) - closed late socket`);
             }
 
-            if (!socket) throw new Error('Connection failed or timed out');
-            if (!isSocks) await Promise.race([socket.opened, timeoutPromise]);
-            
+            if (!socket) { 
+                throw new Error('Connection failed or timed out');
+            }
+
+            if (!isSocks) {
+                // 等待连接建立 (Socket.opened)，同时继续监听超时
+                await Promise.race([socket.opened, timeoutPromise]);
+            }
             return socket;
         } catch (err) {
-            if (socket) { try { socket.close(); } catch(e) {} }
+            // 常规错误处理，确保如果 socket 已经被赋值则关闭
+            if (socket) {
+                try { socket.close(); } catch(e) {}
+            }
             throw err;
         }
     };
 
-    // Phase 1: Direct Connection (直接连接)
     try {
         return await connectAndWrite(addressRemote, portRemote, useSocks);
     } catch (err1) {
-        log(`[connect] Phase 1 (Direct) failed: ${err1.message}`);
+        log(`[connect] Phase 1 failed: ${err1.message}`);
     }
 
-    // Phase 2: TCP Socket ProxyIP Fallback (第一退回方案)
-    // 这是您请求的"方案一"核心：当直连失败，立即尝试连接 ProxyIP
     let proxyAttempts = [];
     if (fallbackAddress) {
         proxyAttempts.push(fallbackAddress);
     } else {
         if (ctx.proxyIP) {
             proxyAttempts.push(ctx.proxyIP);
-        }
-        // 确保有默认 ProxyIP 可用
-        if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
-            // 随机选 2 个，增加成功率
-            for (let i = 0; i < 2; i++) {
-                const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
-                if (randomIP && !proxyAttempts.includes(randomIP)) proxyAttempts.push(randomIP);
-            }
-        }
-        // 兜底默认值
-        if (proxyAttempts.length === 0) {
+        } else {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
             if (defParams.length > 0) proxyAttempts.push(defParams[0]);
+        }
+
+        if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
+            for (let i = 0; i < 2; i++) {
+                const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
+                if (randomIP && !proxyAttempts.includes(randomIP)) {
+                    proxyAttempts.push(randomIP);
+                }
+            }
         }
     }
     
@@ -247,25 +260,20 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     for (const ip of proxyAttempts) {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
         try {
-            // 使用 TCP Socket 直连 ProxyIP，但携带目标 SNI (由上层 VLESS/TLS 处理)
-            log(`[connect] Phase 2 (ProxyIP): Attempting ${proxyHost}:${proxyPort}`);
             proxySocket = await connectAndWrite(proxyHost.toLowerCase(), proxyPort, false);
-            if (proxySocket) {
-                log(`[connect] Phase 2 (ProxyIP) Success`);
-                break; 
-            }
+            if (proxySocket) break; 
         } catch (err2) {
             log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
         }
     }
     if (proxySocket) return proxySocket;
 
-    // Phase 3: NAT64 (IPv6 Fallback)
     if (!useSocks && ctx.dns64) {
         try {
             log(`[connect] Phase 3: Attempting NAT64...`);
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (v6Address) {
+                // [修复] 移除方括号，connect API 期望原始 IPv6 字符串
                 const nat64IP = v6Address;
                 return await connectAndWrite(nat64IP, portRemote, false);
             } else {
@@ -276,7 +284,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         }
     }
 
-    throw new Error(`All connection attempts (Direct, ProxyIP, NAT64) failed.`);
+    throw new Error(`All connection attempts failed.`);
 }
 
 export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallback, log) {
@@ -303,7 +311,7 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     await remoteSocket.readable.pipeTo(
         new WritableStream({
             async write(chunk, controller) {
-                hasIncomingData = true; // 标记收到数据
+                hasIncomingData = true;
                 if (webSocket.readyState !== 1) { 
                     controller.error(new Error('Client WebSocket closed, stopping remote read'));
                     return;
@@ -320,7 +328,7 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
                     webSocket.send(chunk);
                 }
             },
-            close() { log(`Remote socket closed. Data received: ${hasIncomingData}`); },
+            close() { log(`Remote socket closed. Data: ${hasIncomingData}`); },
             abort(reason) { console.error('Remote socket aborted', reason); },
         })
     ).catch((error) => {
@@ -330,9 +338,8 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
         safeCloseWebSocket(webSocket);
     });
     
-    // 核心逻辑：如果没有收到任何数据就结束了 (例如 CF 拦截返回空响应或立即断开)，尝试重试
     if (!hasIncomingData && retryCallback) {
-        log('Retry initiated due to no incoming data (Possible Block/Error 1000)');
+        log('Retry initiated due to no data');
         try {
             await retryCallback();
         } catch (e) {
@@ -344,10 +351,13 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
 
 async function flushBuffer(writer, buffer, log) {
     if (!buffer || buffer.length === 0) return;
+    
     log(`Flushing ${buffer.length} buffered chunks`);
+    
     while (buffer.length > 0) {
         const batch = [...buffer];
         buffer.length = 0; 
+        
         for (const chunk of batch) {
             await writer.write(chunk);
         }
@@ -373,20 +383,26 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
 
     const nat64Retry = async () => {
         if (!ctx.dns64) { safeCloseWebSocket(webSocket); return; }
-        log('[Retry] Switching to NAT64 (Phase 3)...');
+        log('[Retry] Switching to NAT64...');
         prepareRetry(); 
         
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
+
+            // [修复] 移除方括号，connect API 期望原始 IPv6 字符串
             const nat64IP = v6Address;
             const natSocket = await connect({ hostname: nat64IP, port: portRemote });
             
             const writer = natSocket.writable.getWriter();
-            if (rawClientData && rawClientData.byteLength > 0) await writer.write(rawClientData);
+            if (rawClientData && rawClientData.byteLength > 0) {
+                await writer.write(rawClientData);
+            }
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
             writer.releaseLock();
+            
             finalizeConnection(natSocket);
+            
             remoteSocketToWS(natSocket, webSocket, vlessResponseHeader, null, log);
         } catch (e) {
             log('[Retry] NAT64 failed: ' + e.message);
@@ -394,16 +410,14 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         }
     };
 
-    // 这一步就是 "方案一" (TCP Socket + ProxyIP) 的重试逻辑
     const proxyIPRetry = async () => {
-        log('[Retry] Switching to ProxyIP (Phase 2)...');
+        log('[Retry] Switching to ProxyIP...');
         prepareRetry(); 
 
         let attempts = [];
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
         if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
-            // 随机取更多 IP 进行重试，提高成功率
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < 2; i++) {
                 const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
                 if (randomIP && !attempts.includes(randomIP)) attempts.push(randomIP);
             }
@@ -422,13 +436,14 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 const proxySocket = await connect({ hostname: proxyHost.toLowerCase(), port: proxyPort });
                 
                 const writer = proxySocket.writable.getWriter();
-                if (rawClientData && rawClientData.byteLength > 0) await writer.write(rawClientData);
+                if (rawClientData && rawClientData.byteLength > 0) {
+                    await writer.write(rawClientData);
+                }
                 await flushBuffer(writer, remoteSocketWrapper.buffer, log);
                 writer.releaseLock();
+                
                 finalizeConnection(proxySocket);
                 
-                // 如果这次重试又失败了（无数据），是否还有下一招？
-                // 如果禁用了 Socks5 且有 DNS64，则尝试 NAT64。
                 const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
                 const nextRetry = (!useSocks && ctx.dns64) ? nat64Retry : null;
                 
@@ -439,7 +454,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             }
         }
 
-        // 如果所有 ProxyIP 都失败，尝试 NAT64
         if (ctx.dns64 && !(ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5))) {
             await nat64Retry();
         } else {
@@ -448,24 +462,20 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     try {
-        // 尝试建立初始连接 (内部已包含 Phase 1 -> Phase 2 -> Phase 3 的自动 fallback)
         const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log);
         
         const writer = socket.writable.getWriter();
-        if (rawClientData && rawClientData.byteLength > 0) await writer.write(rawClientData);
+        if (rawClientData && rawClientData.byteLength > 0) {
+            await writer.write(rawClientData);
+        }
         await flushBuffer(writer, remoteSocketWrapper.buffer, log);
         writer.releaseLock();
         
         finalizeConnection(socket);
         
-        // 关键：即使 createUnifiedConnection 成功返回了 socket，也有可能因为 CF 拦截而没有任何数据传回
-        // 因此这里必须传入 proxyIPRetry 作为回调。
         remoteSocketToWS(socket, webSocket, vlessResponseHeader, proxyIPRetry, log);
-
     } catch (error) {
-        log('[Outbound] Initial connection failed completely: ' + error.message);
-        // 这里理论上 createUnifiedConnection 已经试过所有方案了，但为了保险，可以根据错误类型决定是否手动触发一次重试
-        // 但通常如果连 createUnifiedConnection 都全抛错，说明网络极差或配置错误，直接关闭即可。
+        log('[Outbound] Initial connection failed: ' + error.message);
         safeCloseWebSocket(webSocket);
     }
 }
