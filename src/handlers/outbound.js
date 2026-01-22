@@ -3,8 +3,10 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Critical Fix] 移除 NAT64 连接 (Phase 3 和 nat64Retry) 中 IPv6 地址错误的方括号 []。connect API 需要原始 IPv6 字符串。
- * 2. [Verified] 保留原有的 socket 超时泄漏防护、SOCKS5 优化和黑名单检查逻辑。
+ * 1. [关键修改] 移除了 ProxyIP 的轮询机制 (Rotation)。
+ * - 在 createUnifiedConnection 和 proxyIPRetry 中删除了随机从 ctx.proxyIPList 获取 IP 的逻辑。
+ * - 现在的行为：严格只连接 ctx.proxyIP 指定的那一个 IP，如果该 IP 失败，则根据流程进入 NAT64 或报错，不再尝试其他随机 IP。
+ * 2. [功能保留] 完整保留了 SOCKS5 协议栈、NAT64 处理、Socket 超时保护、Early Data 处理等所有原有功能。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -227,12 +229,15 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         }
     };
 
+    // Phase 1: 尝试直连 (或通过 SOCKS5)
     try {
         return await connectAndWrite(addressRemote, portRemote, useSocks);
     } catch (err1) {
         log(`[connect] Phase 1 failed: ${err1.message}`);
     }
 
+    // Phase 2: 尝试通过 ProxyIP
+    // [修改] 取消轮询：只保留 ctx.proxyIP 或 fallbackAddress，不再随机添加其他 IP
     let proxyAttempts = [];
     if (fallbackAddress) {
         proxyAttempts.push(fallbackAddress);
@@ -240,18 +245,16 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         if (ctx.proxyIP) {
             proxyAttempts.push(ctx.proxyIP);
         } else {
+            // 如果没有配置 ProxyIP，保留默认回退（作为最后的手段，但通常这符合用户预期）
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
             if (defParams.length > 0) proxyAttempts.push(defParams[0]);
         }
-
-        if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
-            for (let i = 0; i < 2; i++) {
-                const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
-                if (randomIP && !proxyAttempts.includes(randomIP)) {
-                    proxyAttempts.push(randomIP);
-                }
-            }
+        
+        // [已删除] 原有的随机补充 IP 逻辑：
+        /* if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
+            for (let i = 0; i < 2; i++) { ... }
         }
+        */
     }
     
     proxyAttempts = [...new Set(proxyAttempts)].filter(Boolean);
@@ -268,6 +271,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
     if (proxySocket) return proxySocket;
 
+    // Phase 3: NAT64 备选
     if (!useSocks && ctx.dns64) {
         try {
             log(`[connect] Phase 3: Attempting NAT64...`);
@@ -338,6 +342,7 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
         safeCloseWebSocket(webSocket);
     });
     
+    // 如果连接关闭但从未收到过数据，触发重试回调（例如切换 IP）
     if (!hasIncomingData && retryCallback) {
         log('Retry initiated due to no data');
         try {
@@ -414,14 +419,17 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         log('[Retry] Switching to ProxyIP...');
         prepareRetry(); 
 
+        // [修改] 取消轮询：只使用当前配置的单一 IP
         let attempts = [];
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
+        
+        // [已删除] 随机补充 IP 逻辑:
+        /*
         if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
-            for (let i = 0; i < 2; i++) {
-                const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
-                if (randomIP && !attempts.includes(randomIP)) attempts.push(randomIP);
-            }
+             for (let i = 0; i < 2; i++) { ... }
         }
+        */
+        
         attempts = [...new Set(attempts)].filter(Boolean);
         if (attempts.length === 0) {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
@@ -454,6 +462,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             }
         }
 
+        // 如果 ProxyIP 重试失败，根据配置决定是否回退到 NAT64
         if (ctx.dns64 && !(ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5))) {
             await nat64Retry();
         } else {
