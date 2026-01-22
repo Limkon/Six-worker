@@ -3,9 +3,11 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Critical Fix] 移除 NAT64 连接 (Phase 3 和 nat64Retry) 中 IPv6 地址错误的方括号 []。connect API 需要原始 IPv6 字符串。
- * 2. [Verified] 保留原有的 socket 超时泄漏防护、SOCKS5 优化和黑名单检查逻辑。
- * 3. [Refactor] 实施严格的 ProxyIP 策略：禁止轮询，限制 CF CDN 端口，CF 域名禁止重试。
+ * 1. [Strict Mode] 当直连失败回退到 ProxyIP 时，实施严格策略：
+ * - 强制端口 443：非 443 端口不使用 ProxyIP。
+ * - 禁止轮询：移除 proxyIPList 随机逻辑，仅使用单一 ctx.proxyIP。
+ * - 禁止重试：单次尝试失败即终止。
+ * 2. [Verified] 保留原有的 IPv6 格式修复和 Socket 安全逻辑。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -13,21 +15,16 @@ import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
 
 /**
- * 判断是否为 Cloudflare CDN 域名
- * 简单后缀匹配，用于实施特殊风控策略
+ * 判断目标是否为 Cloudflare CDN/Worker/Pages 域名
  */
 function isCloudflareCDN(host) {
     if (!host) return false;
     const h = host.toLowerCase();
     const cfDomains = [
-        'workers.dev',
-        'pages.dev',
-        'cloudflare.com',
-        'cloudflare.net',
-        'discord.gg', // 常见使用 CF 的服务
-        'discordapp.com'
+        'workers.dev', 'pages.dev', 'cloudflare.com', 'cloudflare.net',
+        'discord.gg', 'discordapp.com'
     ];
-    return cfDomains.some(d => h.endsWith(d) || h === d);
+    return cfDomains.some(d => h === d || h.endsWith('.' + d));
 }
 
 /**
@@ -157,7 +154,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     
     if (!connRes || connRes.length < 2 || connRes[0] !== 0x05 || connRes[1] !== 0x00) throw new Error(`SOCKS5 connection failed: ${connRes ? connRes[1] : 'No response'}`);
     
-    // 处理 SOCKS5 握手后的早期数据 (Early Data)
+    // 处理 SOCKS5 握手后的早期数据
     let headLen = 0;
     if (connRes.length >= 4) {
         if (connRes[3] === 1) headLen = 10; // IPv4
@@ -179,7 +176,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     const STEPPED_TIMEOUTS = [5000, 6000, 7000];
     let attemptCounter = 0;
 
-    // [New] 限制 Cloudflare CDN 访问端口 (仅允许 443)
+    // Cloudflare CDN 允许的端口检查（保留，防止 abuse）
     const isCF = isCloudflareCDN(addressRemote);
     if (isCF && portRemote !== 443) {
         throw new Error('Cloudflare CDN allowed only on port 443');
@@ -191,9 +188,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 
         log(`[connect] Target: ${host}:${port} (Socks: ${isSocks}) (Timeout: ${currentTimeout}ms)`);
         
-        // [修复] 标记该次尝试是否已超时
         let isTimedOut = false;
-
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => {
             isTimedOut = true;
             reject(new Error(`Connect timeout (${currentTimeout}ms)`));
@@ -209,12 +204,8 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
                     } else {
                         s = connect({ hostname: host, port: port });
                     }
-                 } catch(e) {
-                     throw e;
-                 }
+                 } catch(e) { throw e; }
 
-                 // [修复关键点]：如果连接成功时已经超时，立即关闭 Socket 并返回 null/抛错
-                 // 这样可以确保 Promise.race 已经 reject 的情况下，后台建立的连接不会被泄漏
                  if (isTimedOut) {
                      if (s) {
                          try { s.close(); } catch(e) {}
@@ -225,84 +216,63 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
                  return s;
             };
 
-            // 获取 Socket 对象
             socket = await Promise.race([doConnect(), timeoutPromise]);
             
-            // 双重检查：理论上 doConnect 如果处理了 isTimedOut 不会返回 socket，但为了稳健性再次检查
             if (isTimedOut && socket) {
                  try { socket.close(); } catch(e) {}
                  throw new Error(`Connect timeout (${currentTimeout}ms) - closed late socket`);
             }
-
-            if (!socket) { 
-                throw new Error('Connection failed or timed out');
-            }
-
-            if (!isSocks) {
-                // 等待连接建立 (Socket.opened)，同时继续监听超时
-                await Promise.race([socket.opened, timeoutPromise]);
-            }
+            if (!socket) throw new Error('Connection failed or timed out');
+            if (!isSocks) await Promise.race([socket.opened, timeoutPromise]);
             return socket;
         } catch (err) {
-            // 常规错误处理，确保如果 socket 已经被赋值则关闭
-            if (socket) {
-                try { socket.close(); } catch(e) {}
-            }
+            if (socket) { try { socket.close(); } catch(e) {} }
             throw err;
         }
     };
 
+    // Phase 1: 直连
     try {
         return await connectAndWrite(addressRemote, portRemote, useSocks);
     } catch (err1) {
         log(`[connect] Phase 1 failed: ${err1.message}`);
     }
 
-    // [Modify] 禁止 ProxyIP 轮询过度，严格单 IP 策略
-    let proxyAttempts = [];
-
-    // 如果是 CF CDN，强制只使用指定的 ProxyIP，不回退，不随机
-    if (isCF) {
-        if (ctx.proxyIP) {
-            proxyAttempts.push(ctx.proxyIP);
-        }
-        // 如果没有 proxyIP，则这里为空列表，直接跳过 Phase 2
-    } else {
-        // 非 CF 域名，允许常规逻辑，但移除了随机列表
+    // Phase 2: ProxyIP 回退逻辑
+    // [Policy] 仅限 443 端口
+    if (portRemote === 443) {
+        // [Policy] 禁止轮询 / 禁止随机：严格单 IP 模式
+        let proxyIP = null;
         if (fallbackAddress) {
-            proxyAttempts.push(fallbackAddress);
+            proxyIP = fallbackAddress;
+        } else if (ctx.proxyIP) {
+            proxyIP = ctx.proxyIP;
         } else {
-            if (ctx.proxyIP) {
-                proxyAttempts.push(ctx.proxyIP);
-            } else {
-                const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-                if (defParams.length > 0) proxyAttempts.push(defParams[0]);
+            // 仅在完全未配置时回退到默认
+            const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+            if (defParams.length > 0) proxyIP = defParams[0];
+        }
+
+        if (proxyIP) {
+            const { host: proxyHost, port: proxyPort } = parseProxyIP(proxyIP, portRemote);
+            try {
+                // [Policy] 禁止重试：这里只有一次尝试机会
+                return await connectAndWrite(proxyHost.toLowerCase(), proxyPort, false);
+            } catch (err2) {
+                log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
+                // 失败即在此中断，不会再去尝试列表中的其他 IP（因为没有列表了）
             }
-            // [Critical Change] 删除了遍历 ctx.proxyIPList 随机添加 IP 的逻辑
-            // 确保 "One Request, One ProxyIP"
         }
+    } else {
+        log(`[connect] Phase 2 skipped: ProxyIP policy requires port 443 (Target: ${portRemote})`);
     }
-    
-    proxyAttempts = [...new Set(proxyAttempts)].filter(Boolean);
 
-    let proxySocket = null;
-    for (const ip of proxyAttempts) {
-        const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
-        try {
-            proxySocket = await connectAndWrite(proxyHost.toLowerCase(), proxyPort, false);
-            if (proxySocket) break; 
-        } catch (err2) {
-            log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
-        }
-    }
-    if (proxySocket) return proxySocket;
-
+    // Phase 3: NAT64 (仅当未使用 Socks5 且 ProxyIP 阶段也失败/跳过时)
     if (!useSocks && ctx.dns64) {
         try {
             log(`[connect] Phase 3: Attempting NAT64...`);
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (v6Address) {
-                // [修复] 移除方括号，connect API 期望原始 IPv6 字符串
                 const nat64IP = v6Address;
                 return await connectAndWrite(nat64IP, portRemote, false);
             } else {
@@ -414,24 +384,18 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         if (!ctx.dns64) { safeCloseWebSocket(webSocket); return; }
         log('[Retry] Switching to NAT64...');
         prepareRetry(); 
-        
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
-
-            // [修复] 移除方括号，connect API 期望原始 IPv6 字符串
             const nat64IP = v6Address;
             const natSocket = await connect({ hostname: nat64IP, port: portRemote });
-            
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) {
                 await writer.write(rawClientData);
             }
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
             writer.releaseLock();
-            
             finalizeConnection(natSocket);
-            
             remoteSocketToWS(natSocket, webSocket, vlessResponseHeader, null, log);
         } catch (e) {
             log('[Retry] NAT64 failed: ' + e.message);
@@ -440,9 +404,21 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     const proxyIPRetry = async () => {
-        // [New] Cloudflare CDN 域名禁止 Retry
+        // [Policy] 强制端口 443
+        if (portRemote !== 443) {
+            log(`[Retry] ProxyIP skipped: Port ${portRemote} is not 443`);
+            // 如果不能用 ProxyIP，看是否可以用 NAT64
+            if (ctx.dns64 && !(ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5))) {
+                await nat64Retry();
+            } else {
+                safeCloseWebSocket(webSocket);
+            }
+            return;
+        }
+
+        // CF CDN 域名禁止 Retry (双重保险)
         if (isCloudflareCDN(addressRemote)) {
-            log(`[Retry] Cloudflare CDN (${addressRemote}) target - Retry disabled to prevent loop.`);
+            log(`[Retry] Cloudflare CDN (${addressRemote}) target - Retry disabled.`);
             safeCloseWebSocket(webSocket);
             return;
         }
@@ -450,22 +426,16 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         log('[Retry] Switching to ProxyIP...');
         prepareRetry(); 
 
-        let attempts = [];
-        // [New] 严格模式：只使用当前分配的 ctx.proxyIP，不随机
-        if (ctx.proxyIP) attempts.push(ctx.proxyIP);
-        
-        // [Critical Change] 移除了遍历 ctx.proxyIPList 的随机逻辑
-
-        attempts = [...new Set(attempts)].filter(Boolean);
-        // 如果没有 proxyIP，尝试默认值（仅非 CF 域名）
-        if (attempts.length === 0) {
-            const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-            if (defParams.length > 0) attempts.push(defParams[0]);
+        // [Policy] 禁止轮询 / 禁止随机：严格单 IP 模式
+        let proxyIP = ctx.proxyIP;
+        if (!proxyIP) {
+             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+             if (defParams.length > 0) proxyIP = defParams[0];
         }
 
-        for (const ip of attempts) {
+        if (proxyIP) {
             try {
-                const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
+                const { host: proxyHost, port: proxyPort } = parseProxyIP(proxyIP, portRemote);
                 log(`[Retry] Attempting ProxyIP: ${proxyHost}`);
                 
                 const proxySocket = await connect({ hostname: proxyHost.toLowerCase(), port: proxyPort });
@@ -485,7 +455,8 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 remoteSocketToWS(proxySocket, webSocket, vlessResponseHeader, nextRetry, log);
                 return; 
             } catch (e) {
-                log(`[Retry] ProxyIP (${ip}) failed: ${e.message}`);
+                log(`[Retry] ProxyIP failed: ${e.message}`);
+                // [Policy] 禁止重试：失败即止，不循环，直接去尝试 NAT64 或断开
             }
         }
 
