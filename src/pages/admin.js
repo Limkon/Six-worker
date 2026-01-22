@@ -38,10 +38,7 @@ export async function handleEditConfig(request, env, ctx) {
         ['SOCKS5', 'SOCKS5/HTTP代理', 'Worker出站时使用的前置代理 (如无可留空)。', 'user:pass@host:port 或 http://user:pass@host:port', 'text'],
         ['GO2SOCKS5', 'SOCKS5分流规则', '哪些域名走SOCKS5代理, 逗号隔开。', '*example.net,*example.com,all in', 'text'],
         ['BAN', '禁止访问的域名', '禁止通过Worker代理访问的域名, 逗号隔开。', 'example.com,example.org', 'text'],
-        ['WEBDAV', 'WebDAV 开关', '设置为 1 开启 WebDAV 推送功能。', '1', 'text'],
-        ['WEBDAV_URL', 'WebDAV 地址', 'WebDAV 服务器地址 (包含目录)。', 'https://dav.example.com/remote.php/dav/files/user/', 'text'],
-        ['WEBDAV_USER', 'WebDAV 用户名', 'WebDAV 登录用户名。', 'username', 'text'],
-        ['WEBDAV_PASS', 'WebDAV 密码', 'WebDAV 登录密码。', 'password', 'text'],
+        // WebDAV 选项已移除，实现静默处理
         ['URL302', '根路径跳转URL (302)', '访问根路径 / 时跳转到的地址。', 'https://github.com/', 'text'],
         ['URL', '根路径反代URL', '访问根路径 / 时反代的地址 (302优先)。', 'https://github.com/', 'text'],
         ['BESTIP_SOURCES', 'BestIP IP源', '自定义BestIP页面的IP源列表 (格式: 名称 网址，每行一个)。', 
@@ -84,7 +81,7 @@ export async function handleEditConfig(request, env, ctx) {
                 const appCtx = await initializeContext(request, env);
                 appCtx.waitUntil = ctx.waitUntil.bind(ctx);
                 ctx.waitUntil(executeWebDavPush(env, appCtx, true));
-                console.log('[Admin] Config updated, triggered WebDAV push.');
+                // console.log('[Admin] Config updated, triggered WebDAV push.'); // 静默
             } catch (err) {
                 console.error('[Admin] Failed to trigger WebDAV push:', err);
             }
