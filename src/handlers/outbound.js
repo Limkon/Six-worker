@@ -5,11 +5,30 @@
  * 修复说明:
  * 1. [Critical Fix] 移除 NAT64 连接 (Phase 3 和 nat64Retry) 中 IPv6 地址错误的方括号 []。connect API 需要原始 IPv6 字符串。
  * 2. [Verified] 保留原有的 socket 超时泄漏防护、SOCKS5 优化和黑名单检查逻辑。
+ * 3. [Refactor] 实施严格的 ProxyIP 策略：禁止轮询，限制 CF CDN 端口，CF 域名禁止重试。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
 import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
+
+/**
+ * 判断是否为 Cloudflare CDN 域名
+ * 简单后缀匹配，用于实施特殊风控策略
+ */
+function isCloudflareCDN(host) {
+    if (!host) return false;
+    const h = host.toLowerCase();
+    const cfDomains = [
+        'workers.dev',
+        'pages.dev',
+        'cloudflare.com',
+        'cloudflare.net',
+        'discord.gg', // 常见使用 CF 的服务
+        'discordapp.com'
+    ];
+    return cfDomains.some(d => h.endsWith(d) || h === d);
+}
 
 /**
  * 解析 ProxyIP 字符串，提取 host 和 port
@@ -160,6 +179,12 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     const STEPPED_TIMEOUTS = [5000, 6000, 7000];
     let attemptCounter = 0;
 
+    // [New] 限制 Cloudflare CDN 访问端口 (仅允许 443)
+    const isCF = isCloudflareCDN(addressRemote);
+    if (isCF && portRemote !== 443) {
+        throw new Error('Cloudflare CDN allowed only on port 443');
+    }
+
     const connectAndWrite = async (host, port, isSocks) => {
         const currentTimeout = STEPPED_TIMEOUTS[Math.min(attemptCounter, STEPPED_TIMEOUTS.length - 1)];
         attemptCounter++;
@@ -233,24 +258,28 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         log(`[connect] Phase 1 failed: ${err1.message}`);
     }
 
+    // [Modify] 禁止 ProxyIP 轮询过度，严格单 IP 策略
     let proxyAttempts = [];
-    if (fallbackAddress) {
-        proxyAttempts.push(fallbackAddress);
-    } else {
+
+    // 如果是 CF CDN，强制只使用指定的 ProxyIP，不回退，不随机
+    if (isCF) {
         if (ctx.proxyIP) {
             proxyAttempts.push(ctx.proxyIP);
-        } else {
-            const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-            if (defParams.length > 0) proxyAttempts.push(defParams[0]);
         }
-
-        if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
-            for (let i = 0; i < 2; i++) {
-                const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
-                if (randomIP && !proxyAttempts.includes(randomIP)) {
-                    proxyAttempts.push(randomIP);
-                }
+        // 如果没有 proxyIP，则这里为空列表，直接跳过 Phase 2
+    } else {
+        // 非 CF 域名，允许常规逻辑，但移除了随机列表
+        if (fallbackAddress) {
+            proxyAttempts.push(fallbackAddress);
+        } else {
+            if (ctx.proxyIP) {
+                proxyAttempts.push(ctx.proxyIP);
+            } else {
+                const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+                if (defParams.length > 0) proxyAttempts.push(defParams[0]);
             }
+            // [Critical Change] 删除了遍历 ctx.proxyIPList 随机添加 IP 的逻辑
+            // 确保 "One Request, One ProxyIP"
         }
     }
     
@@ -411,18 +440,24 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     const proxyIPRetry = async () => {
+        // [New] Cloudflare CDN 域名禁止 Retry
+        if (isCloudflareCDN(addressRemote)) {
+            log(`[Retry] Cloudflare CDN (${addressRemote}) target - Retry disabled to prevent loop.`);
+            safeCloseWebSocket(webSocket);
+            return;
+        }
+
         log('[Retry] Switching to ProxyIP...');
         prepareRetry(); 
 
         let attempts = [];
+        // [New] 严格模式：只使用当前分配的 ctx.proxyIP，不随机
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
-        if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
-            for (let i = 0; i < 2; i++) {
-                const randomIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)];
-                if (randomIP && !attempts.includes(randomIP)) attempts.push(randomIP);
-            }
-        }
+        
+        // [Critical Change] 移除了遍历 ctx.proxyIPList 的随机逻辑
+
         attempts = [...new Set(attempts)].filter(Boolean);
+        // 如果没有 proxyIP，尝试默认值（仅非 CF 域名）
         if (attempts.length === 0) {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
             if (defParams.length > 0) attempts.push(defParams[0]);
