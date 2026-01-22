@@ -3,7 +3,7 @@
  * 文件名: src/config.js
  * 修改说明:
  * 1. [修复] 为 ProxyIP 的 fetch 请求添加 AbortSignal 超时控制，防止远程源无响应导致 Worker 挂起。
- * 2. 保持原有逻辑不变。
+ * 2. [优化] 增加 ProxyIP 获取失败时的负面缓存机制，避免频繁重试。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -243,12 +243,17 @@ export async function initializeContext(request, env) {
                          const list = await cleanList(text); 
                          ctx.proxyIPList = list;
                          proxyIPRemoteCache.data = list;
-                         proxyIPRemoteCache.expires = Date.now() + 600000;
+                         proxyIPRemoteCache.expires = Date.now() + 600000; // 成功缓存 10 分钟
+                     } else {
+                         throw new Error(`ProxyIP fetch failed: ${response.status}`);
                      }
                  } catch (e) {
                      console.error('Failed to fetch remote ProxyIP:', e);
                      const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
                      ctx.proxyIPList = defParams;
+                     // [优化] 失败时缓存默认值 1 分钟，避免频繁重试
+                     proxyIPRemoteCache.data = defParams;
+                     proxyIPRemoteCache.expires = Date.now() + 60000; 
                  }
              }
         } else {
