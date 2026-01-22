@@ -3,10 +3,8 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [关键修改] 移除了 ProxyIP 的轮询机制 (Rotation)。
- * - 在 createUnifiedConnection 和 proxyIPRetry 中删除了随机从 ctx.proxyIPList 获取 IP 的逻辑。
- * - 现在的行为：严格只连接 ctx.proxyIP 指定的那一个 IP，如果该 IP 失败，则根据流程进入 NAT64 或报错，不再尝试其他随机 IP。
- * 2. [功能保留] 完整保留了 SOCKS5 协议栈、NAT64 处理、Socket 超时保护、Early Data 处理等所有原有功能。
+ * 1. [Clean] 清理了废弃的轮询代码，保持代码整洁。
+ * 2. [Logic] 保持单一 ProxyIP 连接逻辑，确保行为可预测。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -191,7 +189,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
                  }
 
                  // [修复关键点]：如果连接成功时已经超时，立即关闭 Socket 并返回 null/抛错
-                 // 这样可以确保 Promise.race 已经 reject 的情况下，后台建立的连接不会被泄漏
                  if (isTimedOut) {
                      if (s) {
                          try { s.close(); } catch(e) {}
@@ -205,7 +202,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             // 获取 Socket 对象
             socket = await Promise.race([doConnect(), timeoutPromise]);
             
-            // 双重检查：理论上 doConnect 如果处理了 isTimedOut 不会返回 socket，但为了稳健性再次检查
             if (isTimedOut && socket) {
                  try { socket.close(); } catch(e) {}
                  throw new Error(`Connect timeout (${currentTimeout}ms) - closed late socket`);
@@ -221,7 +217,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             }
             return socket;
         } catch (err) {
-            // 常规错误处理，确保如果 socket 已经被赋值则关闭
             if (socket) {
                 try { socket.close(); } catch(e) {}
             }
@@ -237,7 +232,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
 
     // Phase 2: 尝试通过 ProxyIP
-    // [修改] 取消轮询：只保留 ctx.proxyIP 或 fallbackAddress，不再随机添加其他 IP
+    // [修改] 取消轮询：只保留 ctx.proxyIP 或 fallbackAddress
     let proxyAttempts = [];
     if (fallbackAddress) {
         proxyAttempts.push(fallbackAddress);
@@ -245,16 +240,10 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         if (ctx.proxyIP) {
             proxyAttempts.push(ctx.proxyIP);
         } else {
-            // 如果没有配置 ProxyIP，保留默认回退（作为最后的手段，但通常这符合用户预期）
+            // 如果没有配置 ProxyIP，保留默认回退
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
             if (defParams.length > 0) proxyAttempts.push(defParams[0]);
         }
-        
-        // [已删除] 原有的随机补充 IP 逻辑：
-        /* if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
-            for (let i = 0; i < 2; i++) { ... }
-        }
-        */
     }
     
     proxyAttempts = [...new Set(proxyAttempts)].filter(Boolean);
@@ -277,7 +266,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             log(`[connect] Phase 3: Attempting NAT64...`);
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (v6Address) {
-                // [修复] 移除方括号，connect API 期望原始 IPv6 字符串
                 const nat64IP = v6Address;
                 return await connectAndWrite(nat64IP, portRemote, false);
             } else {
@@ -395,7 +383,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
 
-            // [修复] 移除方括号，connect API 期望原始 IPv6 字符串
             const nat64IP = v6Address;
             const natSocket = await connect({ hostname: nat64IP, port: portRemote });
             
@@ -419,16 +406,9 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         log('[Retry] Switching to ProxyIP...');
         prepareRetry(); 
 
-        // [修改] 取消轮询：只使用当前配置的单一 IP
+        // [修改] 只使用当前配置的单一 IP
         let attempts = [];
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
-        
-        // [已删除] 随机补充 IP 逻辑:
-        /*
-        if (ctx.proxyIPList && ctx.proxyIPList.length > 0) {
-             for (let i = 0; i < 2; i++) { ... }
-        }
-        */
         
         attempts = [...new Set(attempts)].filter(Boolean);
         if (attempts.length === 0) {
