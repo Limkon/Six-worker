@@ -3,6 +3,7 @@
  * 说明: 
  * 1. [新增] 引入 executeWebDavPush，实现配置变更后自动触发 WebDAV 推送。
  * 2. [修复] 修复 BestIP 在线优选功能中加载 IPv6 CIDR (如 Cloudflare 官方列表) 失败的问题。
+ * 3. [修复] 增加循环检测机制，防止在 IP 生成耗尽时陷入死循环导致 Worker 超时。
  */
 import { getConfig, cleanConfigCache, initializeContext } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
@@ -243,16 +244,30 @@ export async function handleBestIP(request, env) {
                 const text = response.ok ? await response.text() : '';
                 const cidrs = text.split('\n').filter(line => line.trim() && !line.startsWith('#'));
                 const ips = new Set();
+                
+                // [修复] 防止无限循环：如果一轮循环后IP数量没有增加，强制退出
+                // 这解决了 IPv6 静态添加或 IPv4 无法生成新 IP 时导致的超时问题
                 while (ips.size < 512 && cidrs.length > 0) {
+                    const startSize = ips.size; // 记录循环开始时的数量
+                    
                     for (const cidr of cidrs) {
                         if (ips.size >= 512) break;
                         try {
                             if (!cidr.includes('/')) { ips.add(cidr); continue; }
                             const [network, prefixStr] = cidr.split('/');
                             
-                            // [新增] IPv6 兼容逻辑：如果是 IPv6 CIDR，直接添加网络地址部分用于测试
+                            // [新增] IPv6 兼容逻辑
                             if (network.includes(':')) {
-                                ips.add(network);
+                                // 针对 :: 结尾的网段 (如 Cloudflare 官方列表 2400:cb00::/32)
+                                // 尝试追加随机 Hex 字符，这样可以让 Set 收集到不同的 IP，而不是永远只有一个
+                                if (network.endsWith('::')) {
+                                    // 生成 0-FFFF 之间的随机数
+                                    const rand = Math.floor(Math.random() * 0xffff).toString(16);
+                                    ips.add(network + rand);
+                                } else {
+                                    // 其他情况直接添加网络地址
+                                    ips.add(network);
+                                }
                                 continue;
                             }
                             
@@ -269,7 +284,9 @@ export async function handleBestIP(request, env) {
                             }
                         } catch (e) {}
                     }
-                    if (cidrs.length === 0) break;
+                    
+                    // [关键] 如果这一轮没有新增任何 IP，退出循环，防止死锁
+                    if (ips.size === startSize) break;
                 }
                 return Array.from(ips);
             } catch (error) { return []; }
