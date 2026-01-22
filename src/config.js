@@ -190,7 +190,7 @@ export async function initializeContext(request, env) {
         const seed = rawKey || rawUUID;
         
         if (seed) {
-            const timeDays = Number(timeDaysStr) || 99999;
+            const timeDays = Number(timeDaysStr) || 0;
             const updateHour = Number(updateHourStr) || 0;
             const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
             ctx.userID = userIDs[0]; 
@@ -203,7 +203,7 @@ export async function initializeContext(request, env) {
         const superPass = await getConfig(env, 'SUPER_PASSWORD') || CONSTANTS.SUPER_PASSWORD;
         
         if (superPass) {
-             const timeDays = Number(timeDaysStr) || 99999;
+             const timeDays = Number(timeDaysStr) || 0;
              const updateHour = Number(updateHourStr) || 0;
              const userIDs = await generateDynamicUUID(superPass, timeDays, updateHour);
              ctx.userID = userIDs[0]; 
