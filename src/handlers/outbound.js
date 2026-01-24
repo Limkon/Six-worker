@@ -1,10 +1,10 @@
 // src/handlers/outbound.js
 /**
  * 文件名: src/handlers/outbound.js
- * 最终优化版:
- * 1. [Fix] 修复 proxyIPRetry/nat64Retry 缺少超时保护的问题，防止重试阶段卡死。
- * 2. [Refactor] 提取 connectWithTimeout 核心函数，统一所有连接的超时行为。
- * 3. [Perf] 确保所有连接建立都遵循 "Fail Fast" 原则。
+ * 修正说明:
+ * 1. [Revert] 撤销跳过 Phase 1 的逻辑。现在的顺序严格遵循: 直连 -> ProxyIP(如有) -> NAT64。
+ * 2. [Logic] 当 ProxyIP 未配置时，Phase 2 会自动因列表为空而跳过，自然形成 "直连 -> NAT64" 的流程。
+ * 3. [Retain] 保留 DIRECT_TIMEOUTS = 1500ms 的极速超时设置，确保能抢在客户端断开前触发回退。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -173,7 +173,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     return socket;
 }
 
-// [新增] 核心连接函数，统一管理超时
+// 核心连接函数，统一管理超时
 async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null) {
     let isTimedOut = false;
     let socket = null;
@@ -203,7 +203,6 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
         
         if (!socket) throw new Error('Connection failed');
 
-        // 如果不是 Socks5 (Socks5 内部已经 wait opened)，则等待 opened
         if (!socksConfig) {
             await Promise.race([socket.opened, timeoutPromise]);
         }
@@ -217,12 +216,12 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    const DIRECT_TIMEOUTS = [5000, 6000]; 
+    // [极速超时] 1.5秒内连不上直接判定为被墙
+    const DIRECT_TIMEOUTS = [1500, 2500]; 
     const PROXY_TIMEOUT = 3000; 
 
-    let attemptCounter = 0;
-
     // --- Phase 1: Direct Connection (带熔断) ---
+    // 只有当不在熔断黑名单时，才尝试直连
     if (!failureCache.has(addressRemote)) {
         const currentTimeout = DIRECT_TIMEOUTS[0];
         try {
@@ -240,6 +239,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             );
         } catch (err1) {
             log(`[connect] Phase 1 failed: ${err1.message}`);
+            // 连接失败/超时，立刻加入熔断缓存
             if (err1.message.includes('timeout') || err1.message.includes('failed') || err1.message.includes('refused')) {
                 log(`[Smart] Adding ${addressRemote} to failure cache (Circuit Breaker)`);
                 addToFailureCache(addressRemote);
@@ -259,10 +259,10 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
     proxyAttempts = [...new Set(proxyAttempts)].filter(Boolean);
 
+    // 如果 proxyAttempts 为空，循环不执行，直接跳过 Phase 2
     for (const ip of proxyAttempts) {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
         try {
-            // ProxyIP 统一使用短超时
             return await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, PROXY_TIMEOUT, log);
         } catch (err2) {
             log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
@@ -270,6 +270,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
 
     // --- Phase 3: NAT64 ---
+    // 只有在 Direct 和 ProxyIP 都失败（或跳过）后，才执行
     if (!useSocks && ctx.dns64) {
         try {
             log(`[connect] Phase 3: Attempting NAT64...`);
@@ -383,7 +384,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
-            // [Fix] 使用带超时的连接
             const natSocket = await connectWithTimeout(v6Address, portRemote, 3000, log);
             
             const writer = natSocket.writable.getWriter();
@@ -408,17 +408,16 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
 
         let attempts = [];
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
-        attempts = [...new Set(attempts)].filter(Boolean);
-        if (attempts.length === 0) {
+        else {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
             if (defParams.length > 0) attempts.push(defParams[0]);
         }
+        attempts = [...new Set(attempts)].filter(Boolean);
 
         for (const ip of attempts) {
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
                 log(`[Retry] Attempting ProxyIP: ${proxyHost}`);
-                // [Fix] 使用带超时的连接 (3000ms)
                 const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 3000, log);
                 
                 const writer = proxySocket.writable.getWriter();
@@ -483,7 +482,6 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
-            // [Fix] 使用带超时的连接
             const natSocket = await connectWithTimeout(v6Address, portRemote, 3000, log);
             
             const writer = natSocket.writable.getWriter();
@@ -508,17 +506,16 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
 
         let attempts = [];
         if (ctx.proxyIP) attempts.push(ctx.proxyIP);
-        attempts = [...new Set(attempts)].filter(Boolean);
-        if (attempts.length === 0) {
+        else {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
             if (defParams.length > 0) attempts.push(defParams[0]);
         }
+        attempts = [...new Set(attempts)].filter(Boolean);
 
         for (const ip of attempts) {
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
                 log(`[Retry:UDP] Attempting ProxyIP: ${proxyHost}`);
-                // [Fix] 使用带超时的连接 (3000ms)
                 const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 3000, log);
                 
                 const writer = proxySocket.writable.getWriter();
