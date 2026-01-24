@@ -3,7 +3,7 @@ import { CONSTANTS } from '../constants.js';
 export const textDecoder = new TextDecoder();
 export const textEncoder = new TextEncoder();
 
-// --- UUID Regex (优化：提取到模块作用域，避免重复编译) ---
+// --- UUID Regex (静态资源) ---
 const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const UUID_SIMPLE_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -22,7 +22,7 @@ export async function sha1(str) {
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// --- SHA224 静态资源 (优化：提取到模块作用域，实现一次初始化) ---
+// --- SHA224 静态资源 (一次初始化) ---
 const SHA224_CONSTANTS = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -38,6 +38,7 @@ const sha224RotateRight = (value, shift) => {
     return ((value >>> shift) | (value << (32 - shift))) >>> 0;
 };
 
+// 保留原有的 unescape hack 以支持二进制字符串操作，保持核心算法一致性
 const sha224ToUtf8 = (str) => { return unescape(encodeURIComponent(str)) };
 
 const sha224BytesToHex = (byteArray) => {
@@ -50,6 +51,7 @@ const sha224BytesToHex = (byteArray) => {
 };
 
 const computeSha224Core = (inputStr) => {
+    // SHA-224 初始哈希值
     let hState = [0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4];
     
     const messageBitLength = inputStr.length * 8;
@@ -69,8 +71,10 @@ const computeSha224Core = (inputStr) => {
         words.push((inputStr.charCodeAt(i) << 24) | (inputStr.charCodeAt(i + 1) << 16) | (inputStr.charCodeAt(i + 2) << 8) | inputStr.charCodeAt(i + 3));
     }
 
+    // 优化：将 w 数组分配移出循环，避免重复分配内存
+    const w = new Array(64);
+
     for (let i = 0; i < words.length; i += 16) {
-        const w = new Array(64);
         for (let j = 0; j < 16; j++) {
             w[j] = words[i + j];
         }
@@ -124,6 +128,10 @@ export function base64ToArrayBuffer(base64Str) {
     }
     try {
         base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
+        // 修复：自动补全 Base64 填充字符 '='
+        while (base64Str.length % 4) {
+            base64Str += '=';
+        }
         const decode = atob(base64Str);
         const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
         return { earlyData: arryBuffer.buffer, error: null };
@@ -134,7 +142,8 @@ export function base64ToArrayBuffer(base64Str) {
 
 export async function cleanList(content) {
     if (!content) return [];
-    let replaced = content.replace(/[	"'\r\n]+/g, ',').replace(/,+/g, ',');
+    // 优化：显式使用 \t 提高正则可读性
+    let replaced = content.replace(/[\t"'\r\n]+/g, ',').replace(/,+/g, ',');
     if (replaced.startsWith(',')) replaced = replaced.slice(1);
     if (replaced.endsWith(',')) replaced = replaced.slice(0, -1);
     return replaced.split(',').filter(Boolean);
@@ -150,7 +159,9 @@ export function safeCloseWebSocket(socket) {
     }
 }
 
+// ByteToHex 查找表 (模块级单例)
 const byteToHex = Array.from({ length: 256 }, (v, i) => (i + 256).toString(16).slice(1));
+
 export function stringifyUUID(arr, offset = 0) {
     const uuid = (byteToHex[arr[offset+0]]+byteToHex[arr[offset+1]]+byteToHex[arr[offset+2]]+byteToHex[arr[offset+3]]+"-"+byteToHex[arr[offset+4]]+byteToHex[arr[offset+5]]+"-"+byteToHex[arr[offset+6]]+byteToHex[arr[offset+7]]+"-"+byteToHex[arr[offset+8]]+byteToHex[arr[offset+9]]+"-"+byteToHex[arr[offset+10]]+byteToHex[arr[offset+11]]+byteToHex[arr[offset+12]]+byteToHex[arr[offset+13]]+byteToHex[arr[offset+14]]+byteToHex[arr[offset+15]]).toLowerCase();
     if (!isValidUUID(uuid)) {
