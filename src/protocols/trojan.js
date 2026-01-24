@@ -1,3 +1,4 @@
+// src/protocols/trojan.js
 import { CONSTANTS } from '../constants.js';
 import { textDecoder, sha224Hash } from '../utils/helpers.js';
 
@@ -47,7 +48,13 @@ export async function parseTrojanHeader(trojanBuffer, password) {
     
     const requestView = new DataView(requestData.buffer, requestData.byteOffset, requestData.byteLength);
     const command = requestView.getUint8(0);
-    if (command !== 1) return { hasError: true, message: 'Unsupported Trojan cmd: ' + command };
+    
+    // [修改] 允许 CONNECT(1) 和 UDP(3)
+    const isUDP = (command === 3);
+    
+    if (command !== 1 && !isUDP) {
+        return { hasError: true, message: 'Unsupported Trojan cmd: ' + command };
+    }
     
     const atyp = requestView.getUint8(1);
     let host, port, addressEndIndex = 0;
@@ -87,5 +94,13 @@ export async function parseTrojanHeader(trojanBuffer, password) {
     // [优化] 返回剩余数据的视图
     const rawClientData = requestData.subarray(payloadStartIndex + 2);
     
-    return { hasError: false, addressRemote: host, addressType: atyp, portRemote: port, rawClientData, isUDP: false, rawDataIndex: 0 };
+    return { 
+        hasError: false, 
+        addressRemote: host, 
+        addressType: atyp, 
+        portRemote: port, 
+        rawClientData, 
+        isUDP: isUDP, // [修改] 返回正确的 UDP 状态
+        rawDataIndex: 0 
+    };
 }
