@@ -2,10 +2,10 @@
 
 /**
  * 文件名: src/handlers/outbound.js
- * 重构说明:
- * 1. [New] 引入 DirectFailureCache (熔断缓存)，记录直连失败的 Host。
- * 2. [Feature] createUnifiedConnection 新增熔断检查，命中缓存时直接跳过直连阶段。
- * 3. [Fix] 优化错误捕获逻辑，确保超时或网络错误能正确触发熔断记录。
+ * 审计优化版:
+ * 1. [Fix] 修复 ProxyIP 超时递增问题，ProxyIP 统一使用短超时 (3s) 以加快故障转移。
+ * 2. [Feat] 导出 addToFailureCache，支持在"连接成功但无数据"时主动触发熔断。
+ * 3. [Opt] 熔断机制现在能覆盖"握手阻断"和"数据阻断"两种场景。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -14,7 +14,7 @@ import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
 
 // --- 熔断缓存机制 ---
 const CACHE_TTL = 10 * 60 * 1000; // 缓存有效期 10 分钟
-const MAX_CACHE_SIZE = 500; // 最大缓存条数，防止内存泄漏
+const MAX_CACHE_SIZE = 500; 
 
 class DirectFailureCache {
     constructor() {
@@ -23,7 +23,9 @@ class DirectFailureCache {
 
     add(host) {
         if (!host) return;
-        // 如果缓存已满，删除最早的一个 (简单的清理策略)
+        // 如果已存在且未过期，不重复添加
+        if (this.has(host)) return;
+
         if (this.cache.size >= MAX_CACHE_SIZE) {
             const firstKey = this.cache.keys().next().value;
             this.cache.delete(firstKey);
@@ -37,15 +39,21 @@ class DirectFailureCache {
         if (!expireTime) return false;
         
         if (Date.now() > expireTime) {
-            this.cache.delete(host); // 过期删除
+            this.cache.delete(host); 
             return false;
         }
         return true;
     }
 }
 
-// 全局单例，Worker 实例存活期间数据保留
 const failureCache = new DirectFailureCache();
+
+// 导出此函数，允许在 Read 阶段发现无数据时手动熔断
+export function addToFailureCache(host) {
+    if (host) {
+        failureCache.add(host);
+    }
+}
 // --------------------
 
 function parseProxyIP(proxyAddr, defaultPort) {
@@ -188,11 +196,22 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    const STEPPED_TIMEOUTS = [5000, 6000, 7000];
+    
+    // [优化] 直连超时策略 (Phase 1)
+    const DIRECT_TIMEOUTS = [5000, 6000]; 
+    // [优化] 代理/NAT64 超时策略 (Phase 2/3) - 缩短时间，快速试错
+    const PROXY_TIMEOUT = 3000; 
+
     let attemptCounter = 0;
 
-    const connectAndWrite = async (host, port, isSocks) => {
-        const currentTimeout = STEPPED_TIMEOUTS[Math.min(attemptCounter, STEPPED_TIMEOUTS.length - 1)];
+    const connectAndWrite = async (host, port, isSocks, isDirectPhase) => {
+        // 根据阶段选择超时时间
+        let currentTimeout;
+        if (isDirectPhase) {
+            currentTimeout = DIRECT_TIMEOUTS[Math.min(attemptCounter, DIRECT_TIMEOUTS.length - 1)];
+        } else {
+            currentTimeout = PROXY_TIMEOUT;
+        }
         attemptCounter++;
 
         const protoLabel = isUDP ? 'UDP' : 'TCP';
@@ -253,17 +272,16 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     };
 
     // --- Phase 1: Direct Connection (带熔断机制) ---
-    // 如果不在熔断缓存中，才尝试直连
     if (!failureCache.has(addressRemote)) {
         try {
-            return await connectAndWrite(addressRemote, portRemote, useSocks);
+            // isDirectPhase = true
+            return await connectAndWrite(addressRemote, portRemote, useSocks, true);
         } catch (err1) {
             log(`[connect] Phase 1 failed: ${err1.message}`);
-            // 只有当明确是连接相关错误时，才记录到熔断缓存
-            // 这样下一次重试会直接跳过 Phase 1
+            // 连接阶段的失败直接进入缓存
             if (err1.message.includes('timeout') || err1.message.includes('failed') || err1.message.includes('refused')) {
                 log(`[Smart] Adding ${addressRemote} to failure cache (Circuit Breaker)`);
-                failureCache.add(addressRemote);
+                addToFailureCache(addressRemote);
             }
         }
     } else {
@@ -271,6 +289,9 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
 
     // --- Phase 2: ProxyIP ---
+    // [Fix] 重置 counter，避免 ProxyIP 继承直连的重试计数
+    attemptCounter = 0; 
+    
     let proxyAttempts = [];
     if (fallbackAddress) {
         proxyAttempts.push(fallbackAddress);
@@ -289,7 +310,8 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     for (const ip of proxyAttempts) {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
         try {
-            proxySocket = await connectAndWrite(proxyHost.toLowerCase(), proxyPort, false);
+            // isDirectPhase = false
+            proxySocket = await connectAndWrite(proxyHost.toLowerCase(), proxyPort, false, false);
             if (proxySocket) break; 
         } catch (err2) {
             log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
@@ -304,7 +326,8 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (v6Address) {
                 const nat64IP = v6Address;
-                return await connectAndWrite(nat64IP, portRemote, false);
+                // isDirectPhase = false
+                return await connectAndWrite(nat64IP, portRemote, false, false);
             } else {
                 log(`[connect] Phase 3 (NAT64) skipped: DNS resolution failed`);
             }
@@ -439,6 +462,12 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     const proxyIPRetry = async () => {
+        // [Smart] 只有走到这里，说明直连 Socket 没吐出数据。
+        // 这意味着：直连看似成功了(握手OK)，但实际上是不通的(被墙)。
+        // 必须立刻把这个 addressRemote 拉黑，防止下次又走直连。
+        log(`[Smart] Detection: Direct connection had no data. Adding ${addressRemote} to failure cache.`);
+        addToFailureCache(addressRemote);
+
         log('[Retry] Switching to ProxyIP...');
         prepareRetry(); 
 
@@ -499,8 +528,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         remoteSocketToWS(socket, webSocket, vlessResponseHeader, proxyIPRetry, log);
     } catch (error) {
         log('[Outbound] Initial connection failed: ' + error.message);
-        // 如果初始连接直接彻底失败(包括重试都失败)，这里其实已经没有挽回余地了
-        // 但 createUnifiedConnection 内部已经记录了 failureCache，所以下次会变快
         safeCloseWebSocket(webSocket);
     }
 }
@@ -553,6 +580,10 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     const proxyIPRetry = async () => {
+        // [Smart] UDP 同样适用：如果直连无数据，说明 UDP 被阻断，拉黑。
+        log(`[Smart:UDP] Detection: Direct connection had no data. Adding ${addressRemote} to failure cache.`);
+        addToFailureCache(addressRemote);
+
         log('[Retry:UDP] Switching to ProxyIP...');
         prepareRetry(); 
 
