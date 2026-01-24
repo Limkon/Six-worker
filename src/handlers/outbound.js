@@ -1,11 +1,11 @@
 // src/handlers/outbound.js
 /**
  * 文件名: src/handlers/outbound.js
- * 紧急修复说明:
- * 1. [Fix Hang] 修复 flushBuffer 可能导致的死循环。当客户端数据发送极快时，buffer 永远无法清空，导致 Worker 挂起。
- * 增加了 MAX_FLUSH_LOOPS (10次) 限制，防止死循环。
- * 2. [Fix Hang] 给 writer.write 增加超时保护 (WRITE_TIMEOUT)。防止连接是 "僵尸连接" (握手成功但无法写入) 时导致 Worker 永久等待。
- * 3. [Robustness] 优化 connectWithTimeout，确保 socket.opened 状态被正确等待。
+ * 最终完整修订版:
+ * 1. [Fix Hang] 包含 safeWrite 和 flushBuffer 循环限制，修复 Worker 挂起问题。
+ * 2. [Speed] 直连超时设为 1.5s，抢在客户端断开前触发回退。
+ * 3. [Logic] 严格遵循 直连 -> ProxyIP -> NAT64 顺序，且包含智能熔断机制。
+ * 4. [Complete] 修复了之前输出可能截断的问题，确保代码完整。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -195,8 +195,6 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
             return s;
         };
 
-        // Cloudflare connect() returns instantly, so Promise.race returns instantly with the socket object.
-        // We must waiting for opened below.
         socket = await Promise.race([doConnect(), timeoutPromise]);
 
         if (isTimedOut) {
@@ -207,7 +205,6 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
         if (!socket) throw new Error('Connection failed');
 
         if (!socksConfig) {
-            // [Critical] Must wait for socket to be truly opened, otherwise writes might hang or fail silently
             await Promise.race([socket.opened, timeoutPromise]);
         }
         
