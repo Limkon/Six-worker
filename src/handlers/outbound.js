@@ -1,10 +1,11 @@
 // src/handlers/outbound.js
 /**
  * 文件名: src/handlers/outbound.js
- * 修正说明:
- * 1. [Revert] 撤销跳过 Phase 1 的逻辑。现在的顺序严格遵循: 直连 -> ProxyIP(如有) -> NAT64。
- * 2. [Logic] 当 ProxyIP 未配置时，Phase 2 会自动因列表为空而跳过，自然形成 "直连 -> NAT64" 的流程。
- * 3. [Retain] 保留 DIRECT_TIMEOUTS = 1500ms 的极速超时设置，确保能抢在客户端断开前触发回退。
+ * 紧急修复说明:
+ * 1. [Fix Hang] 修复 flushBuffer 可能导致的死循环。当客户端数据发送极快时，buffer 永远无法清空，导致 Worker 挂起。
+ * 增加了 MAX_FLUSH_LOOPS (10次) 限制，防止死循环。
+ * 2. [Fix Hang] 给 writer.write 增加超时保护 (WRITE_TIMEOUT)。防止连接是 "僵尸连接" (握手成功但无法写入) 时导致 Worker 永久等待。
+ * 3. [Robustness] 优化 connectWithTimeout，确保 socket.opened 状态被正确等待。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -194,6 +195,8 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
             return s;
         };
 
+        // Cloudflare connect() returns instantly, so Promise.race returns instantly with the socket object.
+        // We must waiting for opened below.
         socket = await Promise.race([doConnect(), timeoutPromise]);
 
         if (isTimedOut) {
@@ -204,6 +207,7 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
         if (!socket) throw new Error('Connection failed');
 
         if (!socksConfig) {
+            // [Critical] Must wait for socket to be truly opened, otherwise writes might hang or fail silently
             await Promise.race([socket.opened, timeoutPromise]);
         }
         
@@ -216,12 +220,10 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    // [极速超时] 1.5秒内连不上直接判定为被墙
     const DIRECT_TIMEOUTS = [1500, 2500]; 
     const PROXY_TIMEOUT = 3000; 
 
     // --- Phase 1: Direct Connection (带熔断) ---
-    // 只有当不在熔断黑名单时，才尝试直连
     if (!failureCache.has(addressRemote)) {
         const currentTimeout = DIRECT_TIMEOUTS[0];
         try {
@@ -239,7 +241,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             );
         } catch (err1) {
             log(`[connect] Phase 1 failed: ${err1.message}`);
-            // 连接失败/超时，立刻加入熔断缓存
             if (err1.message.includes('timeout') || err1.message.includes('failed') || err1.message.includes('refused')) {
                 log(`[Smart] Adding ${addressRemote} to failure cache (Circuit Breaker)`);
                 addToFailureCache(addressRemote);
@@ -259,7 +260,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
     proxyAttempts = [...new Set(proxyAttempts)].filter(Boolean);
 
-    // 如果 proxyAttempts 为空，循环不执行，直接跳过 Phase 2
     for (const ip of proxyAttempts) {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
         try {
@@ -270,7 +270,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
 
     // --- Phase 3: NAT64 ---
-    // 只有在 Direct 和 ProxyIP 都失败（或跳过）后，才执行
     if (!useSocks && ctx.dns64) {
         try {
             log(`[connect] Phase 3: Attempting NAT64...`);
@@ -350,13 +349,42 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     }
 }
 
+// [Fix] 增加写入超时，防止 writer.write 在僵尸连接上永久挂起
+async function safeWrite(writer, chunk) {
+    const WRITE_TIMEOUT = 2000; // 2秒写入超时
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Write timeout')), WRITE_TIMEOUT));
+    await Promise.race([writer.write(chunk), timeoutPromise]);
+}
+
+// [Fix] 优化 flushBuffer，防止无限循环
 async function flushBuffer(writer, buffer, log) {
     if (!buffer || buffer.length === 0) return;
     log(`Flushing ${buffer.length} buffered chunks`);
+    
+    // [Safety] 限制最大循环次数，防止 Input > Output 导致的死循环挂起
+    let loops = 0;
+    const MAX_FLUSH_LOOPS = 10; 
+
     while (buffer.length > 0) {
+        if (loops >= MAX_FLUSH_LOOPS) {
+            log('[Warn] Buffer flush limit reached. Dropping remaining chunks to prevent hang.');
+            buffer.length = 0;
+            break;
+        }
+        
         const batch = [...buffer];
         buffer.length = 0; 
-        for (const chunk of batch) await writer.write(chunk);
+        
+        for (const chunk of batch) {
+            try {
+                await safeWrite(writer, chunk);
+            } catch (e) {
+                log(`[Warn] Write failed during flush: ${e.message}`);
+                // 如果写入失败，通常意味着连接已死，这里不再尝试继续写入
+                return; 
+            }
+        }
+        loops++;
     }
 }
 
@@ -387,7 +415,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             const natSocket = await connectWithTimeout(v6Address, portRemote, 3000, log);
             
             const writer = natSocket.writable.getWriter();
-            if (rawClientData && rawClientData.byteLength > 0) await writer.write(rawClientData);
+            if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
             writer.releaseLock();
             
@@ -421,7 +449,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
                 const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 3000, log);
                 
                 const writer = proxySocket.writable.getWriter();
-                if (rawClientData && rawClientData.byteLength > 0) await writer.write(rawClientData);
+                if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
                 await flushBuffer(writer, remoteSocketWrapper.buffer, log);
                 writer.releaseLock();
                 
@@ -445,7 +473,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     try {
         const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, null, false);
         const writer = socket.writable.getWriter();
-        if (rawClientData && rawClientData.byteLength > 0) await writer.write(rawClientData);
+        if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
         await flushBuffer(writer, remoteSocketWrapper.buffer, log);
         writer.releaseLock();
         finalizeConnection(socket);
@@ -485,7 +513,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
             const natSocket = await connectWithTimeout(v6Address, portRemote, 3000, log);
             
             const writer = natSocket.writable.getWriter();
-            if (rawClientData && rawClientData.byteLength > 0) await writer.write(rawClientData);
+            if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
             writer.releaseLock();
             
@@ -519,7 +547,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
                 const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 3000, log);
                 
                 const writer = proxySocket.writable.getWriter();
-                if (rawClientData && rawClientData.byteLength > 0) await writer.write(rawClientData);
+                if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
                 await flushBuffer(writer, remoteSocketWrapper.buffer, log);
                 writer.releaseLock();
                 
@@ -543,7 +571,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
     try {
         const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, null, true);
         const writer = socket.writable.getWriter();
-        if (rawClientData && rawClientData.byteLength > 0) await writer.write(rawClientData);
+        if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
         await flushBuffer(writer, remoteSocketWrapper.buffer, log);
         writer.releaseLock();
         finalizeConnection(socket);
