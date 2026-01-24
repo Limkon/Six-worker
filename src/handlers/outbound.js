@@ -1,12 +1,11 @@
 // src/handlers/outbound.js
 /**
  * 文件名: src/handlers/outbound.js
- * 最终完整修订版:
- * 1. [Fix Hang] 包含 safeWrite 和 flushBuffer 循环限制，修复 Worker 挂起问题。
- * 2. [Speed] 直连超时设为 1.5s，抢在客户端断开前触发回退。
- * 3. [Logic] 严格遵循 直连 -> ProxyIP -> NAT64 顺序，且包含智能熔断机制。
- * 4. [Complete] 修复了之前输出可能截断的问题，确保代码完整。
- * 5. [Fix Leak] 修复 connectWithTimeout 中因竞态条件导致的 Socket 句柄泄漏。
+ * 修复版说明:
+ * 1. [Fix] 将直连超时从 1.5s 增加到 4s，防止网络波动导致连接失败。
+ * 2. [Fix] 熔断机制移除对 'timeout' 的判定，避免因慢速网络误杀节点。
+ * 3. [Fix] 写入超时 (safeWrite) 从 2s 增加到 10s，修复上传中断问题。
+ * 4. [Fix] 修复 flushBuffer 失败后仍继续建立管道的逻辑错误。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -14,7 +13,7 @@ import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
 
 // --- 熔断缓存机制 ---
-const CACHE_TTL = 10 * 60 * 1000; 
+const CACHE_TTL = 10 * 60 * 1000; // 10分钟
 const MAX_CACHE_SIZE = 500; 
 
 class DirectFailureCache {
@@ -175,7 +174,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     return socket;
 }
 
-// [Fixed] 核心连接函数，修复了潜在的 Socket 泄漏问题
+// 核心连接函数，包含防止句柄泄漏的逻辑
 async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null) {
     let isTimedOut = false;
     let socket = null;
@@ -194,8 +193,7 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
                 s = connect({ hostname: host, port: port });
             }
             
-            // [Critical Fix] 如果在建立连接的过程中已经超时，必须立即关闭这个“迟到”的 Socket
-            // 否则该 Socket 将被遗弃但保持打开状态，导致 Worker 资源泄漏
+            // 如果超时已触发，必须关闭这个迟到的连接
             if (isTimedOut) {
                 if (s) {
                     try { s.close(); } catch(e) {}
@@ -204,7 +202,6 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
             }
             return s;
         } catch (e) {
-            // 如果连接过程本身出错，直接抛出
             throw e;
         }
     };
@@ -213,7 +210,6 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
         socket = await Promise.race([doConnect(), timeoutPromise]);
 
         if (isTimedOut) {
-            // 防御性代码，理论上 doConnect 会处理，但此处再次检查
             if (socket) { try { socket.close(); } catch(e) {} }
             throw new Error(`Connect timeout (${timeoutMs}ms)`);
         }
@@ -221,7 +217,6 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
         if (!socket) throw new Error('Connection failed or aborted');
 
         if (!socksConfig) {
-            // 对于直连，等待 opened 事件
             await Promise.race([socket.opened, timeoutPromise]);
         }
         
@@ -234,8 +229,9 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    const DIRECT_TIMEOUTS = [1500, 2500]; 
-    const PROXY_TIMEOUT = 3000; 
+    // [Fix] 增加直连超时时间，1.5s 在跨国网络下太短
+    const DIRECT_TIMEOUTS = [4000, 5000]; 
+    const PROXY_TIMEOUT = 5000; 
 
     // --- Phase 1: Direct Connection (带熔断) ---
     if (!failureCache.has(addressRemote)) {
@@ -255,7 +251,8 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             );
         } catch (err1) {
             log(`[connect] Phase 1 failed: ${err1.message}`);
-            if (err1.message.includes('timeout') || err1.message.includes('failed') || err1.message.includes('refused')) {
+            // [Fix] 只有明确的连接拒绝或重置才加入熔断缓存，超时不应直接封禁
+            if (err1.message.includes('refused') || err1.message.includes('reset') || err1.message.includes('abort')) {
                 log(`[Smart] Adding ${addressRemote} to failure cache (Circuit Breaker)`);
                 addToFailureCache(addressRemote);
             }
@@ -277,6 +274,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     for (const ip of proxyAttempts) {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
         try {
+            // ProxyIP 也可以适当放宽超时
             return await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, PROXY_TIMEOUT, log);
         } catch (err2) {
             log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
@@ -363,26 +361,24 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     }
 }
 
-// [Fix] 增加写入超时，防止 writer.write 在僵尸连接上永久挂起
+// [Fix] 增加写入超时到 10s，防止大流量上传中断
 async function safeWrite(writer, chunk) {
-    const WRITE_TIMEOUT = 2000; // 2秒写入超时
+    const WRITE_TIMEOUT = 10000; 
     const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Write timeout')), WRITE_TIMEOUT));
     await Promise.race([writer.write(chunk), timeoutPromise]);
 }
 
-// [Fix] 优化 flushBuffer，防止无限循环
+// [Fix] 优化 flushBuffer
 async function flushBuffer(writer, buffer, log) {
     if (!buffer || buffer.length === 0) return;
     log(`Flushing ${buffer.length} buffered chunks`);
     
-    // [Safety] 限制最大循环次数，防止 Input > Output 导致的死循环挂起
     let loops = 0;
-    const MAX_FLUSH_LOOPS = 10; 
+    const MAX_FLUSH_LOOPS = 20; // 稍微放宽循环限制
 
     while (buffer.length > 0) {
         if (loops >= MAX_FLUSH_LOOPS) {
-            log('[Warn] Buffer flush limit reached. Dropping remaining chunks to prevent hang.');
-            buffer.length = 0;
+            log('[Warn] Buffer flush limit reached.');
             break;
         }
         
@@ -393,9 +389,9 @@ async function flushBuffer(writer, buffer, log) {
             try {
                 await safeWrite(writer, chunk);
             } catch (e) {
-                log(`[Warn] Write failed during flush: ${e.message}`);
-                // 如果写入失败，通常意味着连接已死，这里不再尝试继续写入
-                return; 
+                log(`[Error] Write failed during flush: ${e.message}`);
+                // [Critical] 如果写入失败，抛出错误让上层关闭连接，而不是静默返回导致死锁
+                throw e; 
             }
         }
         loops++;
@@ -426,7 +422,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
-            const natSocket = await connectWithTimeout(v6Address, portRemote, 3000, log);
+            const natSocket = await connectWithTimeout(v6Address, portRemote, 5000, log);
             
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
@@ -442,9 +438,8 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     const proxyIPRetry = async () => {
-        log(`[Smart] Detection: Direct connection had no data. Adding ${addressRemote} to failure cache.`);
-        addToFailureCache(addressRemote);
-
+        // [Smart] 只有在直接连接成功但无数据时，才认为该节点可能有问题
+        // 这里不进行封禁，因为可能是协议不兼容等临时问题
         log('[Retry] Switching to ProxyIP...');
         prepareRetry(); 
 
@@ -460,7 +455,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
                 log(`[Retry] Attempting ProxyIP: ${proxyHost}`);
-                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 3000, log);
+                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5000, log);
                 
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
@@ -524,7 +519,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
-            const natSocket = await connectWithTimeout(v6Address, portRemote, 3000, log);
+            const natSocket = await connectWithTimeout(v6Address, portRemote, 5000, log);
             
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
@@ -540,9 +535,6 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     const proxyIPRetry = async () => {
-        log(`[Smart:UDP] Detection: Direct connection had no data. Adding ${addressRemote} to failure cache.`);
-        addToFailureCache(addressRemote);
-
         log('[Retry:UDP] Switching to ProxyIP...');
         prepareRetry(); 
 
@@ -558,7 +550,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
                 log(`[Retry:UDP] Attempting ProxyIP: ${proxyHost}`);
-                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 3000, log);
+                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5000, log);
                 
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
