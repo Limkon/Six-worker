@@ -20,7 +20,10 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     const salt = buffer.subarray(0, 4);
 
     // 3. 异或解密 (XOR)
+    // 这里必须创建新内存，因为要写入解密数据。
     const decrypted = new Uint8Array(buffer.length - 4);
+    
+    // [优化] 循环中使用位运算 & 3 代替模运算 % 4
     for (let i = 0; i < decrypted.length; i++) {
         decrypted[i] = buffer[i + 4] ^ salt[i & 3];
     }
@@ -58,8 +61,9 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     if (cursor >= decrypted.length) return { hasError: true, message: 'Buffer too short after padding' };
 
     // 6. 解析指令 (CMD)
-    // [修改] 支持 TCP(1) 和 UDP(3)
     const cmd = decrypted[cursor];
+    
+    // [Fix] 允许 TCP(1) 和 UDP(3)
     const isUDP = (cmd === 3);
 
     if (cmd !== 1 && !isUDP) {
@@ -69,6 +73,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
 
     // 7. 解析地址 (ATYP + Addr)
     const atyp = decrypted[cursor];
+    // parseAddressAndPort 从 atyp 开始解析 (offset = cursor + 1)
     const addrResult = parseAddressAndPort(decrypted.buffer, cursor + 1, atyp);
     
     if (addrResult.hasError) return addrResult;
@@ -110,7 +115,8 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         addressRemote,
         portRemote: port,
         addressType: atyp,
-        isUDP: isUDP, // [修改] 传递 UDP 状态
+        isUDP: isUDP, // 正确返回 UDP 状态
+        // [优化] 返回解密后剩余数据的视图 (Zero-copy)
         rawClientData: decrypted.subarray(headerEnd + 2),
         protocol: 'mandala'
     };
