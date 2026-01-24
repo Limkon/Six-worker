@@ -2,15 +2,51 @@
 
 /**
  * 文件名: src/handlers/outbound.js
- * 修复说明:
- * 1. [Fix] handleUDPOutBound 现在包含完整的 Failover (ProxyIP/NAT64) 逻辑，与 TCP 保持一致。
- * 2. [Refactor] createUnifiedConnection 支持 isUDP 参数，便于日志追踪。
- * 3. [Logic] 统一了连接建立和数据重放的逻辑。
+ * 重构说明:
+ * 1. [New] 引入 DirectFailureCache (熔断缓存)，记录直连失败的 Host。
+ * 2. [Feature] createUnifiedConnection 新增熔断检查，命中缓存时直接跳过直连阶段。
+ * 3. [Fix] 优化错误捕获逻辑，确保超时或网络错误能正确触发熔断记录。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
 import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned } from '../utils/helpers.js';
+
+// --- 熔断缓存机制 ---
+const CACHE_TTL = 10 * 60 * 1000; // 缓存有效期 10 分钟
+const MAX_CACHE_SIZE = 500; // 最大缓存条数，防止内存泄漏
+
+class DirectFailureCache {
+    constructor() {
+        this.cache = new Map();
+    }
+
+    add(host) {
+        if (!host) return;
+        // 如果缓存已满，删除最早的一个 (简单的清理策略)
+        if (this.cache.size >= MAX_CACHE_SIZE) {
+            const firstKey = this.cache.keys().next().value;
+            this.cache.delete(firstKey);
+        }
+        this.cache.set(host, Date.now() + CACHE_TTL);
+    }
+
+    has(host) {
+        if (!host) return false;
+        const expireTime = this.cache.get(host);
+        if (!expireTime) return false;
+        
+        if (Date.now() > expireTime) {
+            this.cache.delete(host); // 过期删除
+            return false;
+        }
+        return true;
+    }
+}
+
+// 全局单例，Worker 实例存活期间数据保留
+const failureCache = new DirectFailureCache();
+// --------------------
 
 function parseProxyIP(proxyAddr, defaultPort) {
     if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP.split(',')[0].trim(), port: defaultPort };
@@ -177,7 +213,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
                      if (isSocks) {
                         s = await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
                     } else {
-                        // 尝试建立连接 (不区分物理层是否支持 UDP，按逻辑执行)
                         s = connect({ hostname: host, port: port });
                     }
                  } catch(e) {
@@ -205,8 +240,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
                 throw new Error('Connection failed or timed out');
             }
 
-            // 对于标准 TCP connect，我们等待 opened。
-            // 对于 UDP，假设未来 connect 兼容或目前使用模拟，等待 opened 也是合理的流程。
             if (!isSocks) {
                 await Promise.race([socket.opened, timeoutPromise]);
             }
@@ -219,12 +252,25 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         }
     };
 
-    try {
-        return await connectAndWrite(addressRemote, portRemote, useSocks);
-    } catch (err1) {
-        log(`[connect] Phase 1 failed: ${err1.message}`);
+    // --- Phase 1: Direct Connection (带熔断机制) ---
+    // 如果不在熔断缓存中，才尝试直连
+    if (!failureCache.has(addressRemote)) {
+        try {
+            return await connectAndWrite(addressRemote, portRemote, useSocks);
+        } catch (err1) {
+            log(`[connect] Phase 1 failed: ${err1.message}`);
+            // 只有当明确是连接相关错误时，才记录到熔断缓存
+            // 这样下一次重试会直接跳过 Phase 1
+            if (err1.message.includes('timeout') || err1.message.includes('failed') || err1.message.includes('refused')) {
+                log(`[Smart] Adding ${addressRemote} to failure cache (Circuit Breaker)`);
+                failureCache.add(addressRemote);
+            }
+        }
+    } else {
+        log(`[Smart] Skipping Phase 1 (Direct) for cached failed host: ${addressRemote}`);
     }
 
+    // --- Phase 2: ProxyIP ---
     let proxyAttempts = [];
     if (fallbackAddress) {
         proxyAttempts.push(fallbackAddress);
@@ -251,6 +297,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
     if (proxySocket) return proxySocket;
 
+    // --- Phase 3: NAT64 ---
     if (!useSocks && ctx.dns64) {
         try {
             log(`[connect] Phase 3: Attempting NAT64...`);
@@ -438,7 +485,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     try {
-        const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, null, false); // isUDP = false
+        const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, null, false);
         
         const writer = socket.writable.getWriter();
         if (rawClientData && rawClientData.byteLength > 0) {
@@ -452,12 +499,12 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         remoteSocketToWS(socket, webSocket, vlessResponseHeader, proxyIPRetry, log);
     } catch (error) {
         log('[Outbound] Initial connection failed: ' + error.message);
+        // 如果初始连接直接彻底失败(包括重试都失败)，这里其实已经没有挽回余地了
+        // 但 createUnifiedConnection 内部已经记录了 failureCache，所以下次会变快
         safeCloseWebSocket(webSocket);
     }
 }
 
-// [修改] handleUDPOutBound
-// 现在它拥有完整的 Retry/Failover 闭包，与 handleTCPOutBound 功能对等。
 export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
     if (isHostBanned(addressRemote, ctx.banHosts)) {
         log(`[Outbound:UDP] Host banned: ${addressRemote}`);
@@ -477,7 +524,6 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         remoteSocketWrapper.isConnecting = false;
     };
 
-    // [Added] NAT64 Retry Logic for UDP
     const nat64Retry = async () => {
         if (!ctx.dns64) { safeCloseWebSocket(webSocket); return; }
         log('[Retry:UDP] Switching to NAT64...');
@@ -506,7 +552,6 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         }
     };
 
-    // [Added] ProxyIP Retry Logic for UDP
     const proxyIPRetry = async () => {
         log('[Retry:UDP] Switching to ProxyIP...');
         prepareRetry(); 
@@ -554,7 +599,6 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     try {
-        // 调用统一连接函数，传入 isUDP=true
         const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, null, true);
         
         const writer = socket.writable.getWriter();
@@ -566,7 +610,6 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         
         finalizeConnection(socket);
         
-        // 传入 proxyIPRetry 回调，当连接中断或无数据时触发重试
         remoteSocketToWS(socket, webSocket, vlessResponseHeader, proxyIPRetry, log);
     } catch (error) {
         log('[Outbound:UDP] Connection failed: ' + error.message);
