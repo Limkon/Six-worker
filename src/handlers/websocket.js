@@ -2,9 +2,9 @@
 /**
  * 文件名: src/handlers/websocket.js
  * 修改内容: 
- * 1. [Refactor] 移除全局 UDP 拦截逻辑，支持 UDP 转发。
- * 2. [Refactor] 区分 TCP 和 UDP 请求，分别调用 handleTCPOutBound 和 handleUDPOutBound。
- * 3. [Robustness] 保持原有异常处理和资源释放逻辑。
+ * 1. [Logic] 彻底移除所有 UDP 拦截逻辑。
+ * 2. [Socks5] 允许 UDP ASSOCIATE 握手成功，不阻断客户端。
+ * 3. [Architecture] 保持 TCP/UDP 逻辑分流，遵循“正常处理”原则。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -35,13 +35,11 @@ export async function handleWebSocketRequest(request, ctx) {
     const [client, webSocket] = Object.values(webSocketPair);
     webSocket.accept();
     
-    // 状态变量
     let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [] };
     let isConnected = false; 
     let socks5State = 0; 
     let headerBuffer = new Uint8Array(0); 
     
-    // [优化] 持久化 Writer 状态变量
     let activeWriter = null;
     let activeSocket = null;
     
@@ -64,9 +62,7 @@ export async function handleWebSocketRequest(request, ctx) {
         async write(chunk, controller) {
             const chunkArr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
 
-            // 1. 已连接状态：高性能直通
             if (isConnected) {
-                // 检测 Socket 是否发生变化
                 if (activeSocket !== remoteSocketWrapper.value) {
                     if (activeWriter) {
                         try {
@@ -95,10 +91,8 @@ export async function handleWebSocketRequest(request, ctx) {
                 return;
             }
 
-            // 2. 数据缓冲
             headerBuffer = concatUint8(headerBuffer, chunkArr);
 
-            // 3. Socks5 握手处理 (Auth阶段)
             if (socks5State < 2) {
                 const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
                 if (error) {
@@ -112,7 +106,6 @@ export async function handleWebSocketRequest(request, ctx) {
                 }
             }
 
-            // 4. 协议探测
             if (headerBuffer.length === 0) return;
 
             try {
@@ -138,7 +131,6 @@ export async function handleWebSocketRequest(request, ctx) {
                     throw new Error(`Blocked: ${addressRemote}`);
                 }
                 
-                // 连接确认，停止超时计时器
                 isConnected = true;
                 clearTimeout(timeoutTimer); 
                 remoteSocketWrapper.isConnecting = true;
@@ -148,21 +140,25 @@ export async function handleWebSocketRequest(request, ctx) {
 
                 if (protocol === 'vless') {
                     clientData = headerBuffer.subarray(rawDataIndex);
-                    // VLESS UDP 同样发送响应头，客户端根据此判断连接建立
                     responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
                 } else if (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') {
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
-                    // 发送 Socks5 成功响应
-                    // 注意：如果是 UDP Associate，这里仅仅表示“握手成功”，数据传输逻辑由 handleUDPOutBound 处理
+                    
+                    // [Socks5 UDP 修正]
+                    // 即使是 UDP 请求，我们也发送握手成功 (0x00)，
+                    // 这样客户端才会继续发送后续数据，或者维持连接。
+                    // 这是一个“正常”服务端应有的行为。
                     webSocket.send(new Uint8Array([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]));
                     socks5State = 3;
                 }
 
-                headerBuffer = null; // 释放内存
+                headerBuffer = null;
 
-                // 区分 TCP 和 UDP 逻辑
+                // [逻辑分流]
+                // 既然要区分处理，就分别进入不同的处理函数。
+                // 即使底层实现相似，保持语义上的分离对后续维护至关重要。
                 if (isUDP) {
                     handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
                 } else {
@@ -171,7 +167,7 @@ export async function handleWebSocketRequest(request, ctx) {
 
             } catch (e) {
                 if (headerBuffer && headerBuffer.length < 512 && headerBuffer.length < MAX_HEADER_BUFFER) {
-                    return; // 数据不够，继续等待
+                    return; 
                 }
                 clearTimeout(timeoutTimer);
                 log(`Detection failed: ${e.message}`);
