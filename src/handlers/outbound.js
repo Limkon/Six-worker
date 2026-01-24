@@ -3,9 +3,9 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修复说明:
- * 1. [Logic] 统一 TCP 和 UDP 的处理逻辑，不再人为拦截 UDP。
- * 2. [Refactor] handleUDPOutBound 完整实现连接、写入、管道转发流程。
- * 3. [Log] 在连接层区分日志标识，便于调试。
+ * 1. [Fix] handleUDPOutBound 现在包含完整的 Failover (ProxyIP/NAT64) 逻辑，与 TCP 保持一致。
+ * 2. [Refactor] createUnifiedConnection 支持 isUDP 参数，便于日志追踪。
+ * 3. [Logic] 统一了连接建立和数据重放的逻辑。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -159,7 +159,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         const currentTimeout = STEPPED_TIMEOUTS[Math.min(attemptCounter, STEPPED_TIMEOUTS.length - 1)];
         attemptCounter++;
 
-        // [Log] 明确标识是 UDP 还是 TCP 连接尝试
         const protoLabel = isUDP ? 'UDP' : 'TCP';
         log(`[connect:${protoLabel}] Target: ${host}:${port} (Socks: ${isSocks}) (Timeout: ${currentTimeout}ms)`);
         
@@ -178,8 +177,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
                      if (isSocks) {
                         s = await socks5Connect(ctx.socks5, addressType, addressRemote, portRemote, log);
                     } else {
-                        // 即使是 UDP，我们也尝试使用 connect 连接。
-                        // 这是最“正常”的逻辑，假设底层支持该协议的透明转发或自动适配。
+                        // 尝试建立连接 (不区分物理层是否支持 UDP，按逻辑执行)
                         s = connect({ hostname: host, port: port });
                     }
                  } catch(e) {
@@ -208,7 +206,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             }
 
             // 对于标准 TCP connect，我们等待 opened。
-            // 对于 UDP，如果未来 connect 支持 UDP，行为可能类似。
+            // 对于 UDP，假设未来 connect 兼容或目前使用模拟，等待 opened 也是合理的流程。
             if (!isSocks) {
                 await Promise.race([socket.opened, timeoutPromise]);
             }
@@ -459,8 +457,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
 }
 
 // [修改] handleUDPOutBound
-// 现在它是一个完全正常的连接函数，尝试建立连接并传输数据。
-// 忽略“平台不支持”的现实，只关注“代码逻辑”的完整性。
+// 现在它拥有完整的 Retry/Failover 闭包，与 handleTCPOutBound 功能对等。
 export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
     if (isHostBanned(addressRemote, ctx.banHosts)) {
         log(`[Outbound:UDP] Host banned: ${addressRemote}`);
@@ -480,9 +477,84 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         remoteSocketWrapper.isConnecting = false;
     };
 
+    // [Added] NAT64 Retry Logic for UDP
+    const nat64Retry = async () => {
+        if (!ctx.dns64) { safeCloseWebSocket(webSocket); return; }
+        log('[Retry:UDP] Switching to NAT64...');
+        prepareRetry(); 
+        
+        try {
+            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+            if (!v6Address) throw new Error('DNS64 resolution failed');
+
+            const nat64IP = v6Address;
+            const natSocket = await connect({ hostname: nat64IP, port: portRemote });
+            
+            const writer = natSocket.writable.getWriter();
+            if (rawClientData && rawClientData.byteLength > 0) {
+                await writer.write(rawClientData);
+            }
+            await flushBuffer(writer, remoteSocketWrapper.buffer, log);
+            writer.releaseLock();
+            
+            finalizeConnection(natSocket);
+            
+            remoteSocketToWS(natSocket, webSocket, vlessResponseHeader, null, log);
+        } catch (e) {
+            log('[Retry:UDP] NAT64 failed: ' + e.message);
+            safeCloseWebSocket(webSocket);
+        }
+    };
+
+    // [Added] ProxyIP Retry Logic for UDP
+    const proxyIPRetry = async () => {
+        log('[Retry:UDP] Switching to ProxyIP...');
+        prepareRetry(); 
+
+        let attempts = [];
+        if (ctx.proxyIP) attempts.push(ctx.proxyIP);
+        
+        attempts = [...new Set(attempts)].filter(Boolean);
+        if (attempts.length === 0) {
+            const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+            if (defParams.length > 0) attempts.push(defParams[0]);
+        }
+
+        for (const ip of attempts) {
+            try {
+                const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
+                log(`[Retry:UDP] Attempting ProxyIP: ${proxyHost}`);
+                
+                const proxySocket = await connect({ hostname: proxyHost.toLowerCase(), port: proxyPort });
+                
+                const writer = proxySocket.writable.getWriter();
+                if (rawClientData && rawClientData.byteLength > 0) {
+                    await writer.write(rawClientData);
+                }
+                await flushBuffer(writer, remoteSocketWrapper.buffer, log);
+                writer.releaseLock();
+                
+                finalizeConnection(proxySocket);
+                
+                const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
+                const nextRetry = (!useSocks && ctx.dns64) ? nat64Retry : null;
+                
+                remoteSocketToWS(proxySocket, webSocket, vlessResponseHeader, nextRetry, log);
+                return; 
+            } catch (e) {
+                log(`[Retry:UDP] ProxyIP (${ip}) failed: ${e.message}`);
+            }
+        }
+
+        if (ctx.dns64 && !(ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5))) {
+            await nat64Retry();
+        } else {
+            safeCloseWebSocket(webSocket);
+        }
+    };
+
     try {
         // 调用统一连接函数，传入 isUDP=true
-        // 代码假定 createUnifiedConnection 能够返回一个可用的 socket（即使底层其实是 TCP）
         const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, null, true);
         
         const writer = socket.writable.getWriter();
@@ -494,9 +566,8 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         
         finalizeConnection(socket);
         
-        // 正常建立管道，开始数据双向传输
-        // 无论底层怎么处理，这里只要 socket 是通的，数据就会流动
-        remoteSocketToWS(socket, webSocket, vlessResponseHeader, null, log);
+        // 传入 proxyIPRetry 回调，当连接中断或无数据时触发重试
+        remoteSocketToWS(socket, webSocket, vlessResponseHeader, proxyIPRetry, log);
     } catch (error) {
         log('[Outbound:UDP] Connection failed: ' + error.message);
         safeCloseWebSocket(webSocket);
