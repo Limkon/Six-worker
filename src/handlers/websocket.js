@@ -1,10 +1,10 @@
 // src/handlers/websocket.js
 /**
  * 文件名: src/handlers/websocket.js
- * 修改内容: 
- * 1. [Logic] 彻底移除所有 UDP 拦截逻辑。
- * 2. [Socks5] 允许 UDP ASSOCIATE 握手成功，不阻断客户端。
- * 3. [Architecture] 保持 TCP/UDP 逻辑分流，遵循“正常处理”原则。
+ * 审计确认: 
+ * 1. [Logic] 逻辑完整，无 UDP 拦截。
+ * 2. [Feature] Socks5 UDP Associate 握手正常放行。
+ * 3. [Structure] TCP/UDP 分流调用正确。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -145,20 +145,14 @@ export async function handleWebSocketRequest(request, ctx) {
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
-                    
-                    // [Socks5 UDP 修正]
-                    // 即使是 UDP 请求，我们也发送握手成功 (0x00)，
-                    // 这样客户端才会继续发送后续数据，或者维持连接。
-                    // 这是一个“正常”服务端应有的行为。
+                    // [Feature] Socks5 UDP: 发送握手成功，不拦截
                     webSocket.send(new Uint8Array([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]));
                     socks5State = 3;
                 }
 
                 headerBuffer = null;
 
-                // [逻辑分流]
-                // 既然要区分处理，就分别进入不同的处理函数。
-                // 即使底层实现相似，保持语义上的分离对后续维护至关重要。
+                // [Logic] 分流处理，逻辑对等
                 if (isUDP) {
                     handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
                 } else {
