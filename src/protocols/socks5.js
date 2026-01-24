@@ -4,7 +4,6 @@ import { textDecoder } from '../utils/helpers.js';
 import { parseAddressAndPort } from './utils.js';
 
 export async function parseSocks5Header(socksBuffer, offset = 0) {
-    // [优化] 避免不必要的封装
     const buffer = socksBuffer instanceof Uint8Array ? socksBuffer : new Uint8Array(socksBuffer);
     const originalLength = buffer.length;
     if (!offset) offset = 0; 
@@ -16,10 +15,10 @@ export async function parseSocks5Header(socksBuffer, offset = 0) {
     
     const cmd = buffer[offset + 1];
     
-    // [修改] 允许 CONNECT (1) 和 UDP ASSOCIATE (3)
-    // 注意：标准 Socks5 中 UDP Associate 是 0x03
+    // [Fix] 允许 CONNECT (1) 和 UDP ASSOCIATE (3)
     const isUDP = (cmd === 3);
     
+    // 兼容性检查：如果不是 CONNECT 且不是 UDP，则报错
     if (cmd !== CONSTANTS.SOCKS_CMD_CONNECT && !isUDP) {
         return { hasError: true, message: 'Unsupported SOCKS command: ' + cmd };
     }
@@ -34,7 +33,6 @@ export async function parseSocks5Header(socksBuffer, offset = 0) {
     
     if (addressInfo.dataOffset + 2 > originalLength) return { hasError: true, message: 'SOCKS buffer too short for port' };
     
-    // [优化] 确保 DataView 使用正确的 offset/length
     const dataView = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     const port = dataView.getUint16(addressInfo.dataOffset, false);
     
@@ -48,7 +46,6 @@ export async function parseSocks5Header(socksBuffer, offset = 0) {
             break;
         case CONSTANTS.ATYP_TROJAN_IPV6:
             const ipv6 = [];
-            // [优化] 基于 buffer 视图创建 DataView
             const addrBytesView = new DataView(addressInfo.targetAddrBytes.buffer, addressInfo.targetAddrBytes.byteOffset, addressInfo.targetAddrBytes.byteLength);
             for (let i = 0; i < 8; i++) ipv6.push(addrBytesView.getUint16(i * 2, false).toString(16));
             addressRemote = '[' + ipv6.join(':') + ']';
@@ -61,9 +58,8 @@ export async function parseSocks5Header(socksBuffer, offset = 0) {
         addressRemote, 
         addressType: addrType, 
         portRemote: port, 
-        // [优化] 返回剩余数据的视图 (Zero-copy)
         rawClientData: buffer.subarray(addressInfo.dataOffset + 2), 
-        isUDP: isUDP, // [修改] 返回正确的 UDP 状态
+        isUDP: isUDP, 
         rawDataIndex: 0, 
         isSocks5: true 
     };
