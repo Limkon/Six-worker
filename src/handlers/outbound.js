@@ -6,6 +6,7 @@
  * 2. [Speed] 直连超时设为 1.5s，抢在客户端断开前触发回退。
  * 3. [Logic] 严格遵循 直连 -> ProxyIP -> NAT64 顺序，且包含智能熔断机制。
  * 4. [Complete] 修复了之前输出可能截断的问题，确保代码完整。
+ * 5. [Fix Leak] 修复 connectWithTimeout 中因竞态条件导致的 Socket 句柄泄漏。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -174,7 +175,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     return socket;
 }
 
-// 核心连接函数，统一管理超时
+// [Fixed] 核心连接函数，修复了潜在的 Socket 泄漏问题
 async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null) {
     let isTimedOut = false;
     let socket = null;
@@ -184,27 +185,43 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
         reject(new Error(`Connect timeout (${timeoutMs}ms)`));
     }, timeoutMs));
 
-    try {
-        const doConnect = async () => {
-            let s;
+    const doConnect = async () => {
+        let s;
+        try {
             if (socksConfig) {
                 s = await socks5Connect(socksConfig, addressType, addressRemote, port, log);
             } else {
                 s = connect({ hostname: host, port: port });
             }
+            
+            // [Critical Fix] 如果在建立连接的过程中已经超时，必须立即关闭这个“迟到”的 Socket
+            // 否则该 Socket 将被遗弃但保持打开状态，导致 Worker 资源泄漏
+            if (isTimedOut) {
+                if (s) {
+                    try { s.close(); } catch(e) {}
+                }
+                return null;
+            }
             return s;
-        };
+        } catch (e) {
+            // 如果连接过程本身出错，直接抛出
+            throw e;
+        }
+    };
 
+    try {
         socket = await Promise.race([doConnect(), timeoutPromise]);
 
         if (isTimedOut) {
+            // 防御性代码，理论上 doConnect 会处理，但此处再次检查
             if (socket) { try { socket.close(); } catch(e) {} }
-            throw new Error(`Connect timeout (${timeoutMs}ms) - closed late socket`);
+            throw new Error(`Connect timeout (${timeoutMs}ms)`);
         }
         
-        if (!socket) throw new Error('Connection failed');
+        if (!socket) throw new Error('Connection failed or aborted');
 
         if (!socksConfig) {
+            // 对于直连，等待 opened 事件
             await Promise.race([socket.opened, timeoutPromise]);
         }
         
