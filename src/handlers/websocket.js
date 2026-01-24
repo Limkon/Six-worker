@@ -2,9 +2,9 @@
 /**
  * 文件名: src/handlers/websocket.js
  * 修改内容: 
- * 1. [Global Fix] 将 UDP 拦截逻辑提升为全局检查，覆盖 Trojan, Shadowsocks, Socks5 等所有协议。
- * 2. [Safety] 针对 Socks5 的 UDP ASSOCIATE 请求，拒绝连接而不是错误地返回成功握手。
- * 3. [Robustness] 保持之前的资源泄漏修复和零拷贝优化。
+ * 1. [Refactor] 移除全局 UDP 拦截逻辑，支持 UDP 转发。
+ * 2. [Refactor] 区分 TCP 和 UDP 请求，分别调用 handleTCPOutBound 和 handleUDPOutBound。
+ * 3. [Robustness] 保持原有异常处理和资源释放逻辑。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -12,7 +12,7 @@ import { parseTrojanHeader } from '../protocols/trojan.js';
 import { parseMandalaHeader } from '../protocols/mandala.js';
 import { parseSocks5Header } from '../protocols/socks5.js';
 import { parseShadowsocksHeader } from '../protocols/shadowsocks.js';
-import { handleTCPOutBound } from './outbound.js';
+import { handleTCPOutBound, handleUDPOutBound } from './outbound.js';
 import { safeCloseWebSocket, base64ToArrayBuffer, isHostBanned } from '../utils/helpers.js';
 
 const protocolManager = new ProtocolManager()
@@ -134,17 +134,6 @@ export async function handleWebSocketRequest(request, ctx) {
                 
                 log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote} (UDP: ${isUDP})`);
                 
-                // [Global Fix] 全局 UDP 拦截
-                // Cloudflare Workers 不支持出站 UDP。任何协议的 UDP 请求都应被拦截，
-                // 否则会导致尝试建立错误的 TCP 连接或错误的 Socks5 响应。
-                if (isUDP) {
-                    // 对于 Socks5，可以尝试发送特定的 UDP 拒绝响应，但直接断开通常是最兼容的行为
-                    log(`[${protocol.toUpperCase()}] UDP blocked: Cloudflare Workers does not support UDP outbound.`);
-                    clearTimeout(timeoutTimer);
-                    safeCloseWebSocket(webSocket);
-                    return;
-                }
-
                 if (isHostBanned(addressRemote, ctx.banHosts)) {
                     throw new Error(`Blocked: ${addressRemote}`);
                 }
@@ -159,20 +148,26 @@ export async function handleWebSocketRequest(request, ctx) {
 
                 if (protocol === 'vless') {
                     clientData = headerBuffer.subarray(rawDataIndex);
+                    // VLESS UDP 同样发送响应头，客户端根据此判断连接建立
                     responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
                 } else if (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') {
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
-                    // 仅当确定不是 UDP (Cmd != 0x03) 后，才发送 Socks5 成功响应
+                    // 发送 Socks5 成功响应
+                    // 注意：如果是 UDP Associate，这里仅仅表示“握手成功”，数据传输逻辑由 handleUDPOutBound 处理
                     webSocket.send(new Uint8Array([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]));
                     socks5State = 3;
                 }
 
                 headerBuffer = null; // 释放内存
 
-                // 建立出站 TCP 连接
-                handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
+                // 区分 TCP 和 UDP 逻辑
+                if (isUDP) {
+                    handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
+                } else {
+                    handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
+                }
 
             } catch (e) {
                 if (headerBuffer && headerBuffer.length < 512 && headerBuffer.length < MAX_HEADER_BUFFER) {
