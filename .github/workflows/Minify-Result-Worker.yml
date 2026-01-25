@@ -1,0 +1,61 @@
+name: Minify Result Worker
+
+on:
+  workflow_dispatch: # 手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  minify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Terser
+        run: npm install -g terser
+
+      - name: Check original size
+        run: |
+          echo "原始文件大小："
+          ls -lh result/_worker.js || echo "File not found"
+
+      - name: Minify worker script
+        run: |
+          # 极致压缩命令详解：
+          # -o: 输出文件（覆盖原文件）
+          # --compress (缩写 -c): 启用压缩
+          #   passes=3: 运行 3 遍压缩算法，最大程度优化
+          #   drop_console=true: 移除所有 console.log 等调试信息
+          #   drop_debugger=true: 移除 debugger 语句
+          # --mangle (缩写 -m): 混淆变量名（缩短变量名为 a, b, c...）
+          # --module: 明确作为 ES Module 处理（Cloudflare Worker 常用格式）
+          # --toplevel: 混淆顶级作用域的变量和函数名称
+          # --comments false: 移除所有注释
+          
+          terser result/_worker.js -o result/_worker.js \
+            --compress passes=3,drop_console=true,drop_debugger=true,ecma=2020 \
+            --mangle \
+            --module \
+            --toplevel \
+            --comments false
+
+      - name: Check minified size
+        run: |
+          echo "压缩后文件大小："
+          ls -lh result/_worker.js
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add result/_worker.js
+          git commit -m "chore: extreme minify result/_worker.js [skip ci]" || echo "No changes to commit"
+          git push
