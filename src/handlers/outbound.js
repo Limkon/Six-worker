@@ -1,11 +1,9 @@
 // src/handlers/outbound.js
 /**
  * 文件名: src/handlers/outbound.js
- * 修复版说明:
- * 1. [Fix] 将直连超时从 1.5s 增加到 4s，防止网络波动导致连接失败。
- * 2. [Fix] 熔断机制移除对 'timeout' 的判定，避免因慢速网络误杀节点。
- * 3. [Fix] 写入超时 (safeWrite) 从 2s 增加到 10s，修复上传中断问题。
- * 4. [Fix] 修复 flushBuffer 失败后仍继续建立管道的逻辑错误。
+ * 修改说明:
+ * 1. [修复] 移除 IP 列表轮询逻辑，确保同一连接生命周期只使用 ctx.proxyIP 指定的单一 IP。
+ * 2. [完整版] 包含所有辅助函数，无删减。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -261,18 +259,18 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         log(`[Smart] Skipping Phase 1 (Direct) for cached failed host: ${addressRemote}`);
     }
 
-    // --- Phase 2: ProxyIP ---
-    let proxyAttempts = [];
-    if (fallbackAddress) proxyAttempts.push(fallbackAddress);
-    else if (ctx.proxyIP) proxyAttempts.push(ctx.proxyIP);
-    else {
+    // --- Phase 2: ProxyIP (Strict Single IP) ---
+    // [修改] 仅使用 ctx.proxyIP，不尝试任何其他 IP
+    let proxyIP = fallbackAddress || ctx.proxyIP;
+    
+    // 如果没有 proxyIP，尝试默认配置中的第一个，但也只取一个，不轮询
+    if (!proxyIP) {
         const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-        if (defParams.length > 0) proxyAttempts.push(defParams[0]);
+        if (defParams.length > 0) proxyIP = defParams[0];
     }
-    proxyAttempts = [...new Set(proxyAttempts)].filter(Boolean);
 
-    for (const ip of proxyAttempts) {
-        const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
+    if (proxyIP) {
+        const { host: proxyHost, port: proxyPort } = parseProxyIP(proxyIP, portRemote);
         try {
             // ProxyIP 也可以适当放宽超时
             return await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, PROXY_TIMEOUT, log);
@@ -438,20 +436,17 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     const proxyIPRetry = async () => {
-        // [Smart] 只有在直接连接成功但无数据时，才认为该节点可能有问题
-        // 这里不进行封禁，因为可能是协议不兼容等临时问题
-        log('[Retry] Switching to ProxyIP...');
+        // [修改] 仅重试当前选定的 ctx.proxyIP，不进行列表轮询
+        log('[Retry] Retrying ProxyIP (Single IP Policy)...');
         prepareRetry(); 
 
-        let attempts = [];
-        if (ctx.proxyIP) attempts.push(ctx.proxyIP);
-        else {
+        let ip = ctx.proxyIP;
+        if (!ip) {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-            if (defParams.length > 0) attempts.push(defParams[0]);
+            if (defParams.length > 0) ip = defParams[0];
         }
-        attempts = [...new Set(attempts)].filter(Boolean);
 
-        for (const ip of attempts) {
+        if (ip) {
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
                 log(`[Retry] Attempting ProxyIP: ${proxyHost}`);
@@ -535,18 +530,16 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     const proxyIPRetry = async () => {
-        log('[Retry:UDP] Switching to ProxyIP...');
+        log('[Retry:UDP] Retrying ProxyIP (Single IP Policy)...');
         prepareRetry(); 
 
-        let attempts = [];
-        if (ctx.proxyIP) attempts.push(ctx.proxyIP);
-        else {
+        let ip = ctx.proxyIP;
+        if (!ip) {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-            if (defParams.length > 0) attempts.push(defParams[0]);
+            if (defParams.length > 0) ip = defParams[0];
         }
-        attempts = [...new Set(attempts)].filter(Boolean);
 
-        for (const ip of attempts) {
+        if (ip) {
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
                 log(`[Retry:UDP] Attempting ProxyIP: ${proxyHost}`);
