@@ -31,12 +31,12 @@ jobs:
           mkdir -p result
           mv dist/_worker.js result/_worker.js
 
-      - name: Upload worker artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: worker-script
-          path: result/_worker.js # 路径已更新为 result 目录
-          retention-days: 5
+    # - name: Upload worker artifact
+    #   uses: actions/upload-artifact@v4
+    #   with:
+    #     name: worker-script
+    #     path: result/_worker.js # 路径已更新为 result 目录
+    #     retention-days: 5
 
       - name: Commit and push result
         run: |
