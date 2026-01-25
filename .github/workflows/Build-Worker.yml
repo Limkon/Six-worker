@@ -17,7 +17,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20' # 使用较新的 LTS 版本
+          node-version: '20'
 
       - name: Install dependencies
         run: npm install
@@ -25,19 +25,23 @@ jobs:
       - name: Build worker
         run: npm run build
 
+      - name: Move output to result
+        # 创建 result 目录并将 dist 中的文件移动过去，不再保留 dist 中的副本
+        run: |
+          mkdir -p result
+          mv dist/_worker.js result/_worker.js
+
       - name: Upload worker artifact
         uses: actions/upload-artifact@v4
         with:
           name: worker-script
-          path: dist/_worker.js
+          path: result/_worker.js # 路径已更新为 result 目录
           retention-days: 5
 
       - name: Commit and push result
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          mkdir -p result
-          cp dist/_worker.js result/_worker.js
           git add result/_worker.js
           git commit -m "build: update worker script in result/ [skip ci]" || echo "No changes to commit"
           git push
