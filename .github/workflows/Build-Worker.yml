@@ -1,4 +1,4 @@
-name: Build Worker Manually
+name: Build Worker
 
 on:
   workflow_dispatch:
