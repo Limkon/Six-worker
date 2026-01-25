@@ -32,12 +32,14 @@ export function cleanConfigCache() {
 export async function loadRemoteConfig(env, forceReload = false) {
     const remoteConfigUrl = await env.KV.get('REMOTE_CONFIG_URL');
     
+    // 如果不是强制刷新(forceReload为false)，且缓存中有数据，直接返回缓存。
     if (!forceReload && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
         return remoteConfigCache.data;
     }
     
     if (remoteConfigUrl) {
         try {
+            // 添加超时控制 (5秒)
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
             
@@ -45,7 +47,7 @@ export async function loadRemoteConfig(env, forceReload = false) {
                 signal: controller.signal
             });
             
-            clearTimeout(timeoutId); 
+            clearTimeout(timeoutId); // 请求成功，清除定时器
 
             if (response.ok) {
                 const text = await response.text();
@@ -54,6 +56,8 @@ export async function loadRemoteConfig(env, forceReload = false) {
                     const newData = JSON.parse(text);
                     remoteConfigCache.data = newData;
                     remoteConfigCache.lastFetch = now;
+                    
+                    // 远程配置更新后，清空本地 key-value 缓存，确保生效
                     configCache = {}; 
                 } catch (e) {
                     console.warn('Remote config is not JSON, trying line parse');
@@ -116,8 +120,9 @@ export async function getConfig(env, key, defaultValue = undefined) {
 }
 
 export async function initializeContext(request, env) {
+    // 解析 URL 以检查 flush 参数
     const url = new URL(request ? request.url : 'http://localhost');
-    const forceReload = url.searchParams.has('flush'); 
+    const forceReload = url.searchParams.has('flush'); // 只要 URL 包含 ?flush 即可触发
 
     const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0');
     if (enableRemote === '1') {
@@ -188,6 +193,7 @@ export async function initializeContext(request, env) {
 
     if (!ctx.userID) {
         const superPass = await getConfig(env, 'SUPER_PASSWORD') || CONSTANTS.SUPER_PASSWORD;
+        
         if (superPass) {
              const timeDays = Number(timeDaysStr) || 0;
              const updateHour = Number(updateHourStr) || 0;
@@ -197,7 +203,7 @@ export async function initializeContext(request, env) {
              ctx.dynamicUUID = superPass;
              console.log('[CONFIG] Missing UUID/KEY, generated UUID using SUPER_PASSWORD.');
         } else {
-            console.warn('[CONFIG] CRITICAL: No UUID/KEY/SUPER_PASSWORD configured! Generating temporary UUID.');
+            console.warn('[CONFIG] CRITICAL: No UUID/KEY/SUPER_PASSWORD configured! Generating temporary UUID. Service may be unstable.');
             const tempUUID = crypto.randomUUID();
             ctx.userID = tempUUID;
             ctx.dynamicUUID = tempUUID;
@@ -216,6 +222,7 @@ export async function initializeContext(request, env) {
                  rawList = proxyIPRemoteCache.data;
              } else {
                  try {
+                     // 添加超时控制 (5秒)
                      const controller = new AbortController();
                      const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -230,7 +237,7 @@ export async function initializeContext(request, env) {
                          const list = await cleanList(text); 
                          rawList = list;
                          proxyIPRemoteCache.data = list;
-                         proxyIPRemoteCache.expires = Date.now() + 600000; 
+                         proxyIPRemoteCache.expires = Date.now() + 600000; // 成功缓存 10 分钟
                      } else {
                          throw new Error(`ProxyIP fetch failed: ${response.status}`);
                      }
@@ -238,6 +245,7 @@ export async function initializeContext(request, env) {
                      console.error('Failed to fetch remote ProxyIP:', e);
                      const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
                      rawList = defParams;
+                     // 失败时缓存默认值 1 分钟，避免频繁重试
                      proxyIPRemoteCache.data = defParams;
                      proxyIPRemoteCache.expires = Date.now() + 60000; 
                  }
@@ -252,7 +260,8 @@ export async function initializeContext(request, env) {
     if (rawList && rawList.length > 0) {
         const selectedIP = rawList[Math.floor(Math.random() * rawList.length)];
         ctx.proxyIP = selectedIP;
-        ctx.proxyIPList = [selectedIP]; // 锁定列表，防止 Outbound 模块尝试其他 IP
+        // 锁定列表仅包含这一个 IP，防止 Outbound 模块意外使用其他 IP
+        ctx.proxyIPList = [selectedIP]; 
     } else {
         ctx.proxyIP = '';
         ctx.proxyIPList = [];
