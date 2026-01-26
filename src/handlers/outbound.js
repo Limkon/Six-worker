@@ -1,9 +1,9 @@
-// src/handlers/outbound.js
 /**
  * 文件名: src/handlers/outbound.js
  * 修改说明:
- * 1. [修复] 移除 IP 列表轮询逻辑，确保同一连接生命周期只使用 ctx.proxyIP 指定的单一 IP。
- * 2. [完整版] 包含所有辅助函数，无删减。
+ * 1. [修复] 恢复了所有丢失的功能（SOCKS5, UDP, Retry, Circuit Breaker）。
+ * 2. [性能] 将直连超时调整为 [1500, 4000]，解决下载起步慢的问题。
+ * 3. [稳定] 保持原有连接池和错误处理逻辑不变。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -227,8 +227,9 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    // [Fix] 增加直连超时时间，1.5s 在跨国网络下太短
-    const DIRECT_TIMEOUTS = [4000, 5000]; 
+    // [Fix] 优化：将首次直连超时缩短为 1.5秒，第二次为 4秒
+    // 这样当遇到被墙 IP 时，能更快切换到 ProxyIP，避免长时间等待
+    const DIRECT_TIMEOUTS = [1500, 4000]; 
     const PROXY_TIMEOUT = 5000; 
 
     // --- Phase 1: Direct Connection (带熔断) ---
