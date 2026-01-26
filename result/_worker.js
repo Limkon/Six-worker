@@ -492,41 +492,43 @@ async function initializeContext(request, env) {
 
 var ProtocolManager = class {
   constructor() {
-    this.protocols = [];
+    this.handlers = [];
   }
-  register(name, parser) {
-    this.protocols.push({ name, parser });
+  register(name, validator) {
+    this.handlers.push({ name, validator });
     return this;
   }
-  async detect(buffer, ctx) {
-    for (const { name, parser } of this.protocols) {
-      let result = null;
+  async detect(chunk, context) {
+    const vlessIds = [context.userID];
+    if (context.userIDLow) vlessIds.push(context.userIDLow);
+    const password = context.userID;
+    for (const handler of this.handlers) {
       try {
-        if (name === "vless") {
-          result = await parser(buffer, ctx.expectedUserIDs);
-        } else if (name === "trojan") {
-          result = await parser(buffer, ctx.userID);
-          if (result.hasError && ctx.userIDLow) {
-            const resLow = await parser(buffer, ctx.userIDLow);
+        let result = null;
+        if (handler.name === "vless") {
+          result = await handler.validator(chunk, vlessIds);
+        } else if (handler.name === "trojan") {
+          result = await handler.validator(chunk, password);
+          if (result.hasError && context.userIDLow) {
+            const resLow = await handler.validator(chunk, context.userIDLow);
             if (!resLow.hasError) result = resLow;
           }
-        } else if (name === "ss") {
-          result = await parser(buffer, ctx.userID, ctx.expectedUserIDs);
-        } else if (name === "socks5") {
-          result = await parser(buffer);
-        } else if (name === "mandala") {
-          result = await parser(buffer, ctx.expectedUserIDs);
+        } else if (handler.name === "mandala") {
+          result = await handler.validator(chunk, password);
+        } else if (handler.name === "ss") {
+          result = await handler.validator(chunk, context.userID, vlessIds);
+        } else if (handler.name === "socks5") {
+          result = await handler.validator(chunk);
         } else {
-          result = await parser(buffer, ctx);
+          result = await handler.validator(chunk, context);
+        }
+        if (result && !result.hasError) {
+          return { ...result, protocol: handler.name };
         }
       } catch (e) {
-        continue;
-      }
-      if (result && !result.hasError) {
-        return { protocol: name, ...result };
       }
     }
-    throw new Error("Unknown protocol");
+    throw new Error("Protocol detection failed.");
   }
 };
 
@@ -1491,7 +1493,7 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
       res.newState = 1;
     } else {
       webSocket.send(new Uint8Array([5, 255]));
-      res.error = "Socks5: No supported auth method (Requires User/Pass)";
+      res.error = "Socks5: No supported auth method";
       return res;
     }
     res.consumed = 2 + nMethods;
@@ -1519,7 +1521,7 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
       res.consumed = offset;
     } else {
       webSocket.send(new Uint8Array([1, 1]));
-      res.error = `Socks5 Auth Failed: User=${user}`;
+      res.error = `Socks5 Auth Failed: ${user}`;
     }
     return res;
   }
