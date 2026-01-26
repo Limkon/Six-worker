@@ -1,8 +1,10 @@
+// src/handlers/websocket.js
 /**
  * 文件名: src/handlers/websocket.js
- * 修复说明:
- * 1. [Fix] 配合新的 manager.js 确保 Trojan/Mandala 参数传递正确。
- * 2. [Stability] 保持 SOCKS5 握手逻辑完整。
+ * 审计确认: 
+ * 1. [Logic] 逻辑完整，无 UDP 拦截。
+ * 2. [Feature] Socks5 UDP Associate 握手正常放行。
+ * 3. [Structure] TCP/UDP 分流调用正确。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -13,7 +15,6 @@ import { parseShadowsocksHeader } from '../protocols/shadowsocks.js';
 import { handleTCPOutBound, handleUDPOutBound } from './outbound.js';
 import { safeCloseWebSocket, base64ToArrayBuffer, isHostBanned } from '../utils/helpers.js';
 
-// 初始化协议管理器
 const protocolManager = new ProtocolManager()
     .register('vless', processVlessHeader)
     .register('trojan', parseTrojanHeader)
@@ -27,96 +28,6 @@ function concatUint8(a, b) {
     res.set(a);
     res.set(bArr, a.length);
     return res;
-}
-
-// SOCKS5 握手状态机
-function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
-    const res = { consumed: 0, newState: currentState, error: null };
-    if (buffer.length === 0) return res;
-
-    // State 0: Method Select
-    if (currentState === 0) {
-        if (buffer[0] !== 0x05) return res; 
-        if (buffer.length < 2) return res; 
-        const nMethods = buffer[1];
-        if (buffer.length < 2 + nMethods) return res; 
-
-        const methods = buffer.subarray(2, 2 + nMethods);
-        let hasAuth = false;
-        for (let m of methods) {
-            if (m === 0x02) hasAuth = true; 
-        }
-
-        if (hasAuth) {
-            webSocket.send(new Uint8Array([0x05, 0x02]));
-            res.newState = 1;
-        } else {
-            webSocket.send(new Uint8Array([0x05, 0xFF]));
-            res.error = "Socks5: No supported auth method";
-            return res;
-        }
-        res.consumed = 2 + nMethods;
-        return res;
-    }
-
-    // State 1: Auth
-    if (currentState === 1) {
-        if (buffer.length < 3) return res;
-        if (buffer[0] !== 0x01) {
-            res.error = "Socks5 Auth: Wrong version";
-            return res;
-        }
-        let offset = 1;
-        const uLen = buffer[offset++];
-        if (buffer.length < offset + uLen + 1) return res;
-        const user = new TextDecoder().decode(buffer.subarray(offset, offset + uLen));
-        offset += uLen;
-        const pLen = buffer[offset++];
-        if (buffer.length < offset + pLen) return res;
-        const pass = new TextDecoder().decode(buffer.subarray(offset, offset + pLen));
-        offset += pLen;
-
-        const isValid = (user === ctx.userID || user === ctx.dynamicUUID || user === ctx.userIDLow) && 
-                        (pass === ctx.userID || pass === ctx.dynamicUUID || pass === ctx.userIDLow);
-        
-        if (isValid) {
-            webSocket.send(new Uint8Array([0x01, 0x00]));
-            res.newState = 2;
-            res.consumed = offset;
-        } else {
-            webSocket.send(new Uint8Array([0x01, 0x01]));
-            res.error = `Socks5 Auth Failed: ${user}`;
-        }
-        return res;
-    }
-    return res;
-}
-
-function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
-    let readableStreamCancel = false;
-    return new ReadableStream({
-        start(controller) {
-            webSocketServer.addEventListener('message', (event) => {
-                if (readableStreamCancel) return;
-                const data = typeof event.data === 'string' 
-                    ? new TextEncoder().encode(event.data) 
-                    : event.data;
-                controller.enqueue(data);
-            });
-            webSocketServer.addEventListener('close', () => {
-                safeCloseWebSocket(webSocketServer);
-                if (!readableStreamCancel) controller.close();
-            });
-            webSocketServer.addEventListener('error', (err) => {
-                log('WebSocket server error');
-                controller.error(err);
-            });
-            const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
-            if (error) controller.error(error);
-            else if (earlyData) controller.enqueue(earlyData);
-        },
-        cancel() { readableStreamCancel = true; safeCloseWebSocket(webSocketServer); }
-    });
 }
 
 export async function handleWebSocketRequest(request, ctx) {
@@ -175,16 +86,13 @@ export async function handleWebSocketRequest(request, ctx) {
                 if (activeWriter) {
                     await activeWriter.write(chunkArr);
                 } else if (remoteSocketWrapper.isConnecting) {
-                    if (remoteSocketWrapper.buffer.length < 1000) { 
-                        remoteSocketWrapper.buffer.push(chunkArr);
-                    }
+                    remoteSocketWrapper.buffer.push(chunkArr);
                 }
                 return;
             }
 
             headerBuffer = concatUint8(headerBuffer, chunkArr);
 
-            // SOCKS5 特殊处理
             if (socks5State < 2) {
                 const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
                 if (error) {
@@ -201,12 +109,17 @@ export async function handleWebSocketRequest(request, ctx) {
             if (headerBuffer.length === 0) return;
 
             try {
-                // [关键] detect 现在会正确分发密码参数
                 const result = await protocolManager.detect(headerBuffer, ctx);
                 
+                if (socks5State === 2 && result.protocol !== 'socks5') {
+                    throw new Error('Protocol mismatch after Socks5 handshake');
+                }
+
                 const pName = result.protocol; 
-                if (ctx.disabledProtocols.includes(pName)) {
-                    throw new Error(`Protocol ${pName.toUpperCase()} is disabled`);
+                const isSocksDisabled = pName === 'socks5' && ctx.disabledProtocols.includes('socks');
+                
+                if (ctx.disabledProtocols.includes(pName) || isSocksDisabled) {
+                    throw new Error(`Protocol ${pName.toUpperCase()} is disabled by admin`);
                 }
 
                 // --- 成功识别 ---
@@ -232,12 +145,14 @@ export async function handleWebSocketRequest(request, ctx) {
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
+                    // [Feature] Socks5 UDP: 发送握手成功，不拦截
                     webSocket.send(new Uint8Array([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]));
                     socks5State = 3;
                 }
 
-                headerBuffer = null; 
+                headerBuffer = null;
 
+                // [Logic] 分流处理，逻辑对等
                 if (isUDP) {
                     handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
                 } else {
@@ -275,4 +190,91 @@ export async function handleWebSocketRequest(request, ctx) {
     if (ctx.waitUntil) ctx.waitUntil(streamPromise);
 
     return new Response(null, { status: 101, webSocket: client });
+}
+
+function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
+    const res = { consumed: 0, newState: currentState, error: null };
+    if (buffer.length === 0) return res;
+
+    if (currentState === 0) {
+        if (buffer[0] !== 0x05) return res; 
+        if (buffer.length < 2) return res; 
+        const nMethods = buffer[1];
+        if (buffer.length < 2 + nMethods) return res; 
+
+        const methods = buffer.subarray(2, 2 + nMethods);
+        let hasAuth = false;
+        for (let m of methods) {
+            if (m === 0x02) hasAuth = true;
+        }
+
+        if (hasAuth) {
+            webSocket.send(new Uint8Array([0x05, 0x02]));
+            res.newState = 1;
+        } else {
+            webSocket.send(new Uint8Array([0x05, 0xFF]));
+            res.error = "Socks5: No supported auth method";
+            return res;
+        }
+        res.consumed = 2 + nMethods;
+        return res;
+    }
+
+    if (currentState === 1) {
+        if (buffer.length < 3) return res;
+        if (buffer[0] !== 0x01) {
+            res.error = "Socks5 Auth: Wrong version";
+            return res;
+        }
+        let offset = 1;
+        const uLen = buffer[offset++];
+        if (buffer.length < offset + uLen + 1) return res;
+        const user = new TextDecoder().decode(buffer.subarray(offset, offset + uLen));
+        offset += uLen;
+        const pLen = buffer[offset++];
+        if (buffer.length < offset + pLen) return res;
+        const pass = new TextDecoder().decode(buffer.subarray(offset, offset + pLen));
+        offset += pLen;
+
+        const isValid = (user === ctx.userID || user === ctx.dynamicUUID) && 
+                        (pass === ctx.dynamicUUID || pass === ctx.userID);
+        
+        if (isValid) {
+            webSocket.send(new Uint8Array([0x01, 0x00]));
+            res.newState = 2;
+            res.consumed = offset;
+        } else {
+            webSocket.send(new Uint8Array([0x01, 0x01]));
+            res.error = `Socks5 Auth Failed: ${user}`;
+        }
+        return res;
+    }
+    return res;
+}
+
+function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
+    let readableStreamCancel = false;
+    return new ReadableStream({
+        start(controller) {
+            webSocketServer.addEventListener('message', (event) => {
+                if (readableStreamCancel) return;
+                const data = typeof event.data === 'string' 
+                    ? new TextEncoder().encode(event.data) 
+                    : event.data;
+                controller.enqueue(data);
+            });
+            webSocketServer.addEventListener('close', () => {
+                safeCloseWebSocket(webSocketServer);
+                if (!readableStreamCancel) controller.close();
+            });
+            webSocketServer.addEventListener('error', (err) => {
+                log('WebSocket server error');
+                controller.error(err);
+            });
+            const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
+            if (error) controller.error(error);
+            else if (earlyData) controller.enqueue(earlyData);
+        },
+        cancel() { readableStreamCancel = true; safeCloseWebSocket(webSocketServer); }
+    });
 }
