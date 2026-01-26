@@ -4,6 +4,7 @@
  * 1. [Fix] 修复了 ProxyIP 为数组时导致的类型错误崩溃问题 (ProxyIP Array Bug)。
  * 2. [Feature] 完整保留 SOCKS5、UDP、熔断机制 (Circuit Breaker)、智能重试逻辑。
  * 3. [Performance] 直连超时优化为 [1500, 4000]，提升被墙环境下的切换速度。
+ * 4. [Fix] 修复 WebSocket 发送未捕获异常，增加 safeSend 包装。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -308,6 +309,19 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallback, log) {
     let hasIncomingData = false;
     let responseHeader = vlessHeader;
+
+    // [Fix] 安全发送函数，防止 send 抛出异常导致崩溃
+    const safeSend = (data) => {
+        try {
+            if (webSocket.readyState === 1) {
+                webSocket.send(data);
+                return true;
+            }
+        } catch (error) {
+            log(`[WS] Send Error: ${error.message}`);
+        }
+        return false;
+    };
     
     if (remoteSocket.initialData && remoteSocket.initialData.byteLength > 0) {
         hasIncomingData = true;
@@ -318,10 +332,12 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             const combined = new Uint8Array(header.length + data.length);
             combined.set(header);
             combined.set(data, header.length);
-            webSocket.send(combined);
+            // [Fix] 使用 safeSend
+            if (!safeSend(combined)) return; 
             responseHeader = null;
         } else {
-            webSocket.send(remoteSocket.initialData);
+            // [Fix] 使用 safeSend
+            if (!safeSend(remoteSocket.initialData)) return;
         }
         remoteSocket.initialData = null;
     }
@@ -340,10 +356,18 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
                     const combined = new Uint8Array(header.length + data.length);
                     combined.set(header);
                     combined.set(data, header.length);
-                    webSocket.send(combined);
+                    // [Fix] 使用 safeSend 并处理错误
+                    if (!safeSend(combined)) {
+                        controller.error(new Error('WebSocket send failed'));
+                        return;
+                    }
                     responseHeader = null;
                 } else {
-                    webSocket.send(chunk);
+                    // [Fix] 使用 safeSend 并处理错误
+                    if (!safeSend(chunk)) {
+                         controller.error(new Error('WebSocket send failed'));
+                         return;
+                    }
                 }
             },
             close() { log(`Remote socket closed. Data: ${hasIncomingData}`); },
