@@ -267,10 +267,19 @@ var proxyIPRemoteCache = {
   data: [],
   expires: 0
 };
-function cleanConfigCache() {
-  configCache = {};
-  remoteConfigCache = { data: {}, lastFetch: 0 };
-  proxyIPRemoteCache = { data: [], expires: 0 };
+function cleanConfigCache(updatedKeys) {
+  if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes("REMOTE_CONFIG_URL")) {
+    configCache = {};
+    remoteConfigCache = { data: {}, lastFetch: 0 };
+    proxyIPRemoteCache = { data: [], expires: 0 };
+    return;
+  }
+  for (const key of updatedKeys) {
+    delete configCache[key];
+  }
+  if (updatedKeys.includes("PROXYIP")) {
+    proxyIPRemoteCache = { data: [], expires: 0 };
+  }
 }
 async function loadRemoteConfig(env, forceReload = false) {
   const remoteConfigUrl = await env.KV.get("REMOTE_CONFIG_URL");
@@ -861,6 +870,9 @@ function parseIPv6(ip) {
 }
 async function resolveToIPv6(domain, dnsServer) {
   if (!dnsServer) return null;
+  if (dnsCache.size > 1e3) {
+    dnsCache.clear();
+  }
   const cacheKey = `${domain}|${dnsServer}`;
   const cached = dnsCache.get(cacheKey);
   if (cached && Date.now() < cached.expires) {
@@ -979,20 +991,23 @@ function parseProxyIP(proxyAddr, defaultPort) {
   let host = proxyAddr;
   let port = defaultPort;
   if (host.startsWith("[")) {
-    const bracketEnd = host.lastIndexOf("]");
-    if (bracketEnd === -1) return { host, port: defaultPort };
+    const bracketEnd = host.indexOf("]");
     if (bracketEnd > 0) {
-      const remainder = host.substring(bracketEnd + 1);
-      if (remainder.startsWith(":")) {
-        const portStr = remainder.substring(1);
-        if (/^\d+$/.test(portStr)) port = parseInt(portStr, 10);
+      const ipPart = host.substring(1, bracketEnd);
+      const portPart = host.substring(bracketEnd + 1);
+      if (portPart.startsWith(":")) {
+        const p = parseInt(portPart.substring(1), 10);
+        if (!isNaN(p)) port = p;
       }
-      host = host.substring(1, bracketEnd);
-      return { host, port };
+      return { host: ipPart, port };
     }
   }
+  const colonCount = (host.match(/:/g) || []).length;
+  if (colonCount > 1) {
+    return { host, port };
+  }
   const lastColon = host.lastIndexOf(":");
-  if (lastColon > 0 && host.indexOf(":") === lastColon) {
+  if (lastColon > 0) {
     const portStr = host.substring(lastColon + 1);
     if (/^\d+$/.test(portStr)) {
       port = parseInt(portStr, 10);
@@ -1200,6 +1215,17 @@ async function createUnifiedConnection(ctx, addressRemote, portRemote, addressTy
 async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallback, log) {
   let hasIncomingData = false;
   let responseHeader = vlessHeader;
+  const safeSend = (data) => {
+    try {
+      if (webSocket.readyState === 1) {
+        webSocket.send(data);
+        return true;
+      }
+    } catch (error) {
+      log(`[WS] Send Error: ${error.message}`);
+    }
+    return false;
+  };
   if (remoteSocket.initialData && remoteSocket.initialData.byteLength > 0) {
     hasIncomingData = true;
     log(`[Socks5] Flushing ${remoteSocket.initialData.byteLength} bytes of early data`);
@@ -1209,10 +1235,10 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallb
       const combined = new Uint8Array(header.length + data.length);
       combined.set(header);
       combined.set(data, header.length);
-      webSocket.send(combined);
+      if (!safeSend(combined)) return;
       responseHeader = null;
     } else {
-      webSocket.send(remoteSocket.initialData);
+      if (!safeSend(remoteSocket.initialData)) return;
     }
     remoteSocket.initialData = null;
   }
@@ -1230,10 +1256,16 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallb
           const combined = new Uint8Array(header.length + data.length);
           combined.set(header);
           combined.set(data, header.length);
-          webSocket.send(combined);
+          if (!safeSend(combined)) {
+            controller.error(new Error("WebSocket send failed"));
+            return;
+          }
           responseHeader = null;
         } else {
-          webSocket.send(chunk);
+          if (!safeSend(chunk)) {
+            controller.error(new Error("WebSocket send failed"));
+            return;
+          }
         }
       },
       close() {
