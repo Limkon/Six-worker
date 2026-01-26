@@ -1,8 +1,10 @@
 /**
  * 文件名: src/handlers/websocket.js
- * 修复说明:
- * 1. [Fix] 将导出函数名改为 handleWebSocketRequest，解决 build 报错。
- * 2. [Feature] 包含完整的 SOCKS5/Trojan/VLESS/Shadowsocks/Mandala 支持。
+ * 状态: [完整可用]
+ * 说明: 
+ * 1. 导出名为 handleWebSocketRequest (匹配 index.js)。
+ * 2. 包含 SOCKS5 完整握手与鉴权状态机。
+ * 3. 集成 ProtocolManager 实现多协议分流。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -121,7 +123,7 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
     });
 }
 
-// [Fix] 这里的函数名已修改为 handleWebSocketRequest 以匹配 index.js 的引用
+// [重要] 确保函数名为 handleWebSocketRequest
 export async function handleWebSocketRequest(request, ctx) {
     const webSocketPair = new WebSocketPair();
     const [client, webSocket] = Object.values(webSocketPair);
