@@ -3,7 +3,7 @@
  * 文件名: src/config.js
  * 修改说明:
  * 1. [修复] 严格执行“单一连接只使用一个ProxyIP”策略。
- * 2. [优化] 从获取到的列表中随机选择 1 个 IP，并强制上下文仅锁定该 IP，防止 outbound 模块轮询。
+ * 2. [优化] cleanConfigCache 支持按需更新变更的键值，避免全量清空缓存。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -23,10 +23,28 @@ let proxyIPRemoteCache = {
     expires: 0
 };
 
-export function cleanConfigCache() {
-    configCache = {};
-    remoteConfigCache = { data: {}, lastFetch: 0 };
-    proxyIPRemoteCache = { data: [], expires: 0 };
+/**
+ * 清理配置缓存
+ * @param {Array<string>} [updatedKeys] - 可选，仅清理指定的键名。如果不传或包含全局影响的键，则全量清空。
+ */
+export function cleanConfigCache(updatedKeys) {
+    // 如果变更了远程配置地址，或者没有提供具体的键列表，则执行全量清空（这是最安全的操作）
+    if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes('REMOTE_CONFIG_URL')) {
+        configCache = {};
+        remoteConfigCache = { data: {}, lastFetch: 0 };
+        proxyIPRemoteCache = { data: [], expires: 0 };
+        return;
+    }
+
+    // 执行增量清理：仅删除变更的键
+    for (const key of updatedKeys) {
+        delete configCache[key];
+    }
+
+    // 特殊处理：如果 PROXYIP 变更，需要同时重置 IP 列表缓存
+    if (updatedKeys.includes('PROXYIP')) {
+        proxyIPRemoteCache = { data: [], expires: 0 };
+    }
 }
 
 export async function loadRemoteConfig(env, forceReload = false) {
