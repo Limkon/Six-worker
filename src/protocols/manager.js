@@ -1,52 +1,64 @@
 /**
  * 文件名: src/protocols/manager.js
- * 说明: 简单的协议探测管理器，用于 websocket.js 分流
+ * 修复说明:
+ * 1. [Fix] 修复 detect 方法中 credentials 的传递逻辑，确保 Trojan 和 Mandala 能收到密码。
+ * 2. [Feature] 支持多用户 ID 匹配 (VLESS/Shadowsocks)。
  */
 export class ProtocolManager {
-    constructor() {
-        this.protocols = [];
+    constructor() { 
+        this.handlers = []; 
     }
-
-    register(name, parser) {
-        this.protocols.push({ name, parser });
-        return this;
+    
+    register(name, validator) { 
+        this.handlers.push({ name, validator }); 
+        return this; 
     }
+    
+    async detect(chunk, context) {
+        // 准备凭据
+        const vlessIds = [context.userID];
+        if (context.userIDLow) vlessIds.push(context.userIDLow);
+        
+        // Trojan 和 Mandala 通常使用 UUID 作为密码
+        const password = context.userID; 
 
-    async detect(buffer, ctx) {
-        for (const { name, parser } of this.protocols) {
-            // 传入 buffer 和 ctx (包含 userID, expectedUserIDs 等)
-            // parser 需要返回 { hasError: boolean, ...metadata }
-            let result = null;
+        for (const handler of this.handlers) {
             try {
-                // 如果是 SOCKS5，parser 可能只需要 buffer，但为了统一，我们传入 ctx
-                // 注意：vless/trojan 等 parser 参数签名可能不同，这里做一个适配调用
-                if (name === 'vless') {
-                    result = await parser(buffer, ctx.expectedUserIDs);
-                } else if (name === 'trojan') {
-                    result = await parser(buffer, ctx.userID);
-                    if (result.hasError && ctx.userIDLow) {
-                         const resLow = await parser(buffer, ctx.userIDLow);
-                         if (!resLow.hasError) result = resLow;
+                let result = null;
+                
+                // 根据协议类型分发不同的凭据
+                if (handler.name === 'vless') {
+                    // VLESS 需要 ID 列表
+                    result = await handler.validator(chunk, vlessIds);
+                } else if (handler.name === 'trojan') {
+                    // Trojan 需要单个密码 (或尝试主密码)
+                    result = await handler.validator(chunk, password);
+                    // 如果主密码失败且有副 ID，尝试副 ID (兼容性)
+                    if (result.hasError && context.userIDLow) {
+                        const resLow = await handler.validator(chunk, context.userIDLow);
+                        if (!resLow.hasError) result = resLow;
                     }
-                } else if (name === 'ss') {
-                    result = await parser(buffer, ctx.userID, ctx.expectedUserIDs);
-                } else if (name === 'socks5') {
-                    // SOCKS5 Request 阶段通常不需要密码（握手阶段已验证），或者是无密码模式
-                    result = await parser(buffer); 
-                } else if (name === 'mandala') {
-                    result = await parser(buffer, ctx.expectedUserIDs);
+                } else if (handler.name === 'mandala') {
+                    // Mandala 使用密码进行 Hash 校验
+                    result = await handler.validator(chunk, password);
+                } else if (handler.name === 'ss') {
+                    // SS 需要 ID 列表 (用于多用户支持)
+                    result = await handler.validator(chunk, context.userID, vlessIds);
+                } else if (handler.name === 'socks5') {
+                    // SOCKS5 无需密码 (握手阶段已完成鉴权)
+                    result = await handler.validator(chunk);
                 } else {
-                    result = await parser(buffer, ctx);
+                    // 默认传递整个 context
+                    result = await handler.validator(chunk, context);
+                }
+                
+                if (result && !result.hasError) {
+                    return { ...result, protocol: handler.name };
                 }
             } catch (e) {
-                // 解析器抛错视为不匹配
-                continue;
-            }
-
-            if (result && !result.hasError) {
-                return { protocol: name, ...result };
+                // 忽略解析错误，继续尝试下一个协议
             }
         }
-        throw new Error('Unknown protocol');
+        throw new Error('Protocol detection failed.');
     }
 }
