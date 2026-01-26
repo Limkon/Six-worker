@@ -1,10 +1,8 @@
 /**
  * 文件名: src/handlers/websocket.js
- * 状态: [完整可用]
- * 说明: 
- * 1. 导出名为 handleWebSocketRequest (匹配 index.js)。
- * 2. 包含 SOCKS5 完整握手与鉴权状态机。
- * 3. 集成 ProtocolManager 实现多协议分流。
+ * 修复说明:
+ * 1. [Fix] 配合新的 manager.js 确保 Trojan/Mandala 参数传递正确。
+ * 2. [Stability] 保持 SOCKS5 握手逻辑完整。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -31,38 +29,37 @@ function concatUint8(a, b) {
     return res;
 }
 
-// SOCKS5 握手状态机 (Method Select -> Auth -> Request)
+// SOCKS5 握手状态机
 function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
     const res = { consumed: 0, newState: currentState, error: null };
     if (buffer.length === 0) return res;
 
-    // State 0: 等待客户端发送 Method List
+    // State 0: Method Select
     if (currentState === 0) {
-        if (buffer[0] !== 0x05) return res; // 不是 SOCKS5，跳过
-        if (buffer.length < 2) return res; // 数据不够
+        if (buffer[0] !== 0x05) return res; 
+        if (buffer.length < 2) return res; 
         const nMethods = buffer[1];
-        if (buffer.length < 2 + nMethods) return res; // 数据不够
+        if (buffer.length < 2 + nMethods) return res; 
 
         const methods = buffer.subarray(2, 2 + nMethods);
         let hasAuth = false;
         for (let m of methods) {
-            if (m === 0x02) hasAuth = true; // 0x02 = Username/Password Auth
+            if (m === 0x02) hasAuth = true; 
         }
 
-        // 强制要求鉴权
         if (hasAuth) {
             webSocket.send(new Uint8Array([0x05, 0x02]));
             res.newState = 1;
         } else {
             webSocket.send(new Uint8Array([0x05, 0xFF]));
-            res.error = "Socks5: No supported auth method (Requires User/Pass)";
+            res.error = "Socks5: No supported auth method";
             return res;
         }
         res.consumed = 2 + nMethods;
         return res;
     }
 
-    // State 1: 等待客户端发送 Username/Password
+    // State 1: Auth
     if (currentState === 1) {
         if (buffer.length < 3) return res;
         if (buffer[0] !== 0x01) {
@@ -79,17 +76,16 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
         const pass = new TextDecoder().decode(buffer.subarray(offset, offset + pLen));
         offset += pLen;
 
-        // 验证用户名密码
         const isValid = (user === ctx.userID || user === ctx.dynamicUUID || user === ctx.userIDLow) && 
                         (pass === ctx.userID || pass === ctx.dynamicUUID || pass === ctx.userIDLow);
         
         if (isValid) {
-            webSocket.send(new Uint8Array([0x01, 0x00])); // Auth Success
-            res.newState = 2; // 进入 Request 阶段
+            webSocket.send(new Uint8Array([0x01, 0x00]));
+            res.newState = 2;
             res.consumed = offset;
         } else {
-            webSocket.send(new Uint8Array([0x01, 0x01])); // Auth Fail
-            res.error = `Socks5 Auth Failed: User=${user}`;
+            webSocket.send(new Uint8Array([0x01, 0x01]));
+            res.error = `Socks5 Auth Failed: ${user}`;
         }
         return res;
     }
@@ -123,7 +119,6 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
     });
 }
 
-// [重要] 确保函数名为 handleWebSocketRequest
 export async function handleWebSocketRequest(request, ctx) {
     const webSocketPair = new WebSocketPair();
     const [client, webSocket] = Object.values(webSocketPair);
@@ -131,7 +126,7 @@ export async function handleWebSocketRequest(request, ctx) {
     
     let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [] };
     let isConnected = false; 
-    let socks5State = 0; // 0:Init, 1:Auth, 2:Request, 3:Established
+    let socks5State = 0; 
     let headerBuffer = new Uint8Array(0); 
     
     let activeWriter = null;
@@ -156,7 +151,6 @@ export async function handleWebSocketRequest(request, ctx) {
         async write(chunk, controller) {
             const chunkArr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
 
-            // 1. 已连接状态：直接转发数据
             if (isConnected) {
                 if (activeSocket !== remoteSocketWrapper.value) {
                     if (activeWriter) {
@@ -188,7 +182,6 @@ export async function handleWebSocketRequest(request, ctx) {
                 return;
             }
 
-            // 2. 未连接状态：协议探测与握手
             headerBuffer = concatUint8(headerBuffer, chunkArr);
 
             // SOCKS5 特殊处理
@@ -208,11 +201,10 @@ export async function handleWebSocketRequest(request, ctx) {
             if (headerBuffer.length === 0) return;
 
             try {
-                // 探测协议
+                // [关键] detect 现在会正确分发密码参数
                 const result = await protocolManager.detect(headerBuffer, ctx);
                 
                 const pName = result.protocol; 
-                
                 if (ctx.disabledProtocols.includes(pName)) {
                     throw new Error(`Protocol ${pName.toUpperCase()} is disabled`);
                 }
@@ -240,14 +232,12 @@ export async function handleWebSocketRequest(request, ctx) {
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
-                    // SOCKS5 Connect Success Response
                     webSocket.send(new Uint8Array([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]));
                     socks5State = 3;
                 }
 
                 headerBuffer = null; 
 
-                // 发起出站连接
                 if (isUDP) {
                     handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
                 } else {
