@@ -4,6 +4,7 @@
  * 修复说明: 
  * 1. [Fix] 重构 detectNat64Prefix: 移除脆弱的字符串匹配，完全依赖 parseIPv6 解析后的数值进行判断。
  * 2. [优化] 增强对不同 DNS 响应格式（Hex/Dotted/Compressed）的兼容性。
+ * 3. [Fix] 为 dnsCache 添加容量限制 (Max 1000)，防止内存泄漏。
  */
 import { CONSTANTS } from '../constants.js';
 
@@ -98,17 +99,6 @@ export async function detectNat64Prefix(dnsServer) {
                             // 提取前 96 位 (前 6 段) 作为前缀
                             const prefixParts = parts.slice(0, 6);
                             
-                            // 重新组合为标准格式，确保以 :: 结尾
-                            // 例如: [0x64, 0xff9b, 0, 0, 0, 0] => "64:ff9b:0:0:0:0::" -> 简写优化可选，这里直接用标准拼装
-                            // 为了兼容 resolveToIPv6 的简单的字符串拼接逻辑，我们返回最规范的形式
-                            // 过滤掉尾部的连续 0 以生成更短的前缀字符串 (可选，但为了稳健直接拼装即可)
-                            const prefixStr = prefixParts.map(p => p.toString(16)).join(':') + ':';
-                            
-                            // 修正：resolveToIPv6 中期望前缀以 : 结尾，如 "64:ff9b::"
-                            // 如果前缀本身包含连续0，toString(16) 会变成 "0"，这里我们手动构造一个带双冒号的格式以防万一
-                            // 最简单且兼容性最好的方式：直接返回 hex 串 + ":"，例如 "64:ff9b:0:0:0:0:"
-                            // 或者如果是 64:ff9b::，则返回 "64:ff9b::"
-                            
                             // 优化输出格式：检测是否为知名 Well-Known Prefix (64:ff9b::)
                             if (prefixParts[0] === 0x64 && prefixParts[1] === 0xff9b && 
                                 prefixParts[2] === 0 && prefixParts[3] === 0 && 
@@ -131,6 +121,12 @@ export async function detectNat64Prefix(dnsServer) {
 
 export async function resolveToIPv6(domain, dnsServer) {
     if (!dnsServer) return null;
+
+    // [新增] 缓存容量保护：防止 Worker 内存溢出
+    // 当缓存条目超过 1000 条时，清空缓存
+    if (dnsCache.size > 1000) {
+        dnsCache.clear();
+    }
 
     const cacheKey = `${domain}|${dnsServer}`;
     const cached = dnsCache.get(cacheKey);
@@ -218,8 +214,6 @@ export async function resolveToIPv6(domain, dnsServer) {
     if (!prefix.endsWith(':')) prefix += ':';
     
     // 简单的合成逻辑 (适用于 /96 前缀)
-    // 如果前缀是 "64:ff9b::"，拼接 ipv4 "1.2.3.4" 变成 "64:ff9b::1.2.3.4"
-    // 系统会在 connect 时自动识别这种混合格式
     const synthesizedIP = prefix + ipv4;
     
     dnsCache.set(cacheKey, { ip: synthesizedIP, expires: Date.now() + 60000 });
