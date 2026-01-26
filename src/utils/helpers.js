@@ -1,3 +1,9 @@
+/**
+ * 文件名: src/utils/helpers.js
+ * 优化说明:
+ * 1. [Performance] 优化 isHostBanned，增加对纯域名匹配的快速路径，减少正则编译开销。
+ * 2. [Stability] 保持 sha224Hash、UUID 生成等核心工具函数的稳定性。
+ */
 import { CONSTANTS } from '../constants.js';
 
 export const textDecoder = new TextDecoder();
@@ -142,7 +148,6 @@ export function base64ToArrayBuffer(base64Str) {
 
 export async function cleanList(content) {
     if (!content) return [];
-    // 优化：显式使用 \t 提高正则可读性
     let replaced = content.replace(/[\t"'\r\n]+/g, ',').replace(/,+/g, ',');
     if (replaced.startsWith(',')) replaced = replaced.slice(1);
     if (replaced.endsWith(',')) replaced = replaced.slice(0, -1);
@@ -199,6 +204,10 @@ export async function generateDynamicUUID(key, timeDays, updateHour) {
 export function isHostBanned(hostname, banList) {
     if (!banList || banList.length === 0) return false;
     return banList.some(pattern => {
+        // [优化] 快速路径：如果规则不含通配符，直接进行字符串比较，避免 new RegExp 开销
+        if (!pattern.includes('*')) {
+            return hostname.toLowerCase() === pattern.toLowerCase();
+        }
         let regexPattern = pattern.replace(/\*/g, '.*');
         let regex = new RegExp(`^${regexPattern}$`, 'i');
         return regex.test(hostname);
