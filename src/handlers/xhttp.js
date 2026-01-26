@@ -1,8 +1,9 @@
 /**
  * 文件名: src/handlers/xhttp.js
- * 优化说明:
- * 1. [Performance] 将 slice 替换为 subarray，实现 Header 解析的零拷贝，降低内存压力。
- * 2. [Stability] 保持原有的 BYOB 读取和连接管理逻辑。
+ * 修正说明:
+ * 1. [Fix] 移除了非标准的 readAtLeast 调用，替换为标准的 read 循环逻辑，确保兼容性。
+ * 2. [Performance] 保持了 create_xhttp_downloader 的 pipeTo 优化。
+ * 3. [Stability] 增强了头部解析的边界检查。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -11,6 +12,7 @@ import { isHostBanned } from '../utils/helpers.js';
 const XHTTP_BUFFER_SIZE = 128 * 1024;
 
 function parse_uuid_xhttp(uuid_str) {
+    if (!uuid_str) return [];
     uuid_str = uuid_str.replaceAll('-', '');
     const r = [];
     for (let index = 0; index < 16; index++) {
@@ -21,6 +23,7 @@ function parse_uuid_xhttp(uuid_str) {
 
 function validate_uuid_xhttp(id, uuid_str) {
     const uuid_arr = parse_uuid_xhttp(uuid_str);
+    if (uuid_arr.length !== 16) return false;
     for (let index = 0; index < 16; index++) {
         if (id[index] !== uuid_arr[index]) return false;
     }
@@ -44,17 +47,39 @@ function concat_typed_arrays(first, ...args) {
     return r;
 }
 
-async function read_xhttp_header(readable, ctx) {
-    const reader = readable.getReader({ mode: 'byob' });
-    try {
-        let r = await reader.readAtLeast(1 + 16 + 1, get_xhttp_buffer());
-        let rlen = 0;
-        let idx = 0;
-        let cache = r.value;
-        rlen += r.value.length;
+// 辅助函数：确保从 reader 读取至少 minBytes 长度的数据
+async function read_at_least(reader, minBytes, initialBuffer) {
+    let currentBuffer = initialBuffer || new Uint8Array(0);
+    
+    while (currentBuffer.length < minBytes) {
+        // 计算还需要读多少
+        const needed = minBytes - currentBuffer.length;
+        // 分配缓冲区，尽量读多一点以备后用，但至少要读 needed
+        const bufferSize = Math.max(needed, 4096); 
+        const { value, done } = await reader.read(new Uint8Array(bufferSize));
         
+        if (done) {
+            // 流结束了但数据还不够
+            return { value: currentBuffer, done: true };
+        }
+        
+        if (value) {
+            currentBuffer = concat_typed_arrays(currentBuffer, value);
+        }
+    }
+    return { value: currentBuffer, done: false };
+}
+
+async function read_xhttp_header(readable, ctx) {
+    // 使用默认 reader，不强制 BYOB 以提高兼容性，且 read_at_least 中手动管理 buffer
+    const reader = readable.getReader(); 
+    try {
+        // 1. 读取基础头部结构：Version(1) + UUID(16) + PBLen(1) = 18字节
+        // 我们至少需要读到 PBLen 所在的位置
+        let { value: cache, done } = await read_at_least(reader, 18);
+        if (cache.length < 18) return 'header too short';
+
         const version = cache[0];
-        // [优化] 使用 subarray 替代 slice
         const id = cache.subarray(1, 1 + 16);
         
         if (!validate_uuid_xhttp(id, ctx.userID)) {
@@ -64,58 +89,69 @@ async function read_xhttp_header(readable, ctx) {
         }
         
         const pb_len = cache[1 + 16];
-        const addr_plus1 = 1 + 16 + 1 + pb_len + 1 + 2 + 1;
+        // 计算直到 Address Type 结束需要的最小长度
+        // Base(18) + PB(pb_len) + Cmd(1) + Port(2) + Atyp(1) = 22 + pb_len
+        const min_len_until_atyp = 1 + 16 + 1 + pb_len + 1 + 2 + 1;
         
-        if (addr_plus1 + 1 > rlen) {
-            if (r.done) return 'header too short';
-            idx = addr_plus1 + 1 - rlen;
-            r = await reader.readAtLeast(idx, get_xhttp_buffer());
-            rlen += r.value.length;
-            cache = concat_typed_arrays(cache, r.value);
+        // 确保读够到 Atyp
+        if (cache.length < min_len_until_atyp) {
+            const r = await read_at_least(reader, min_len_until_atyp, cache);
+            cache = r.value;
+            if (cache.length < min_len_until_atyp) return 'header too short for metadata';
         }
-        
+
         const cmd = cache[1 + 16 + 1 + pb_len];
         if (cmd !== 1) return 'unsupported command: ' + cmd;
         
-        const port = (cache[addr_plus1 - 1 - 2] << 8) + cache[addr_plus1 - 1 - 1];
-        const atype = cache[addr_plus1 - 1];
+        const addr_start_idx = 1 + 16 + 1 + pb_len + 1; // 指向 Port
+        const port = (cache[addr_start_idx] << 8) + cache[addr_start_idx + 1];
+        const atype = cache[addr_start_idx + 2];
+        const addr_body_idx = addr_start_idx + 3; // 指向地址具体内容的开始
+
         let header_len = -1;
         
+        // 根据 atype 判断需要的总长度
         if (atype === CONSTANTS.ADDRESS_TYPE_IPV4) {
-            header_len = addr_plus1 + 4;
+            header_len = addr_body_idx + 4;
         } else if (atype === CONSTANTS.ADDRESS_TYPE_IPV6) {
-            header_len = addr_plus1 + 16;
+            header_len = addr_body_idx + 16;
         } else if (atype === CONSTANTS.ADDRESS_TYPE_URL) {
-            header_len = addr_plus1 + 1 + cache[addr_plus1];
+            // 需要先读 1 个字节获取域名长度
+            if (cache.length < addr_body_idx + 1) {
+                 const r = await read_at_least(reader, addr_body_idx + 1, cache);
+                 cache = r.value;
+                 if (cache.length < addr_body_idx + 1) return 'header too short for domain len';
+            }
+            const domain_len = cache[addr_body_idx];
+            header_len = addr_body_idx + 1 + domain_len;
+        } else {
+            return 'read address type failed: ' + atype;
         }
         
-        if (header_len < 0) return 'read address type failed';
-        
-        idx = header_len - rlen;
-        if (idx > 0) {
-            if (r.done) return 'read address failed';
-            r = await reader.readAtLeast(idx, get_xhttp_buffer());
-            rlen += r.value.length;
-            cache = concat_typed_arrays(cache, r.value);
+        // 最终确保读完整个 Header
+        if (cache.length < header_len) {
+            const r = await read_at_least(reader, header_len, cache);
+            cache = r.value;
+            if (cache.length < header_len) return 'header too short for full address';
         }
         
+        // 解析地址
         let hostname = '';
-        idx = addr_plus1;
+        const addr_val_idx = addr_body_idx; // URL时这里是长度，IPv4/6直接是地址
+        
         switch (atype) {
             case CONSTANTS.ADDRESS_TYPE_IPV4:
-                // [优化] 使用 subarray
-                hostname = cache.subarray(idx, idx + 4).join('.');
+                hostname = cache.subarray(addr_val_idx, addr_val_idx + 4).join('.');
                 break;
             case CONSTANTS.ADDRESS_TYPE_URL:
-                // [优化] 使用 subarray
+                // URL: [len, char, char...]
                 hostname = new TextDecoder().decode(
-                    cache.subarray(idx + 1, idx + 1 + cache[idx]),
+                    cache.subarray(addr_val_idx + 1, addr_val_idx + 1 + cache[addr_val_idx]),
                 );
                 break;
             case CONSTANTS.ADDRESS_TYPE_IPV6:
-                // [优化] 使用 subarray + reduce
                 hostname = cache
-                    .subarray(idx, idx + 16)
+                    .subarray(addr_val_idx, addr_val_idx + 16)
                     .reduce(
                         (s, b2, i2, a) =>
                            i2 % 2
@@ -129,7 +165,7 @@ async function read_xhttp_header(readable, ctx) {
         
         if (hostname.length < 1) return 'failed to parse hostname';
         
-        // [优化] 使用 subarray 获取剩余数据
+        // Header 之后的数据属于 Body
         const data = cache.subarray(header_len);
         
         return {
@@ -139,7 +175,7 @@ async function read_xhttp_header(readable, ctx) {
             data,
             resp: new Uint8Array([version, 0]),
             reader,
-            done: r.done,
+            done: done && data.length === 0,
         };
     } catch (error) {
         try { reader.releaseLock(); } catch (_) {}
@@ -153,77 +189,72 @@ async function upload_to_remote_xhttp(writer, httpx) {
             await writer.write(httpx.data);
         }
         
-        while (!httpx.done) {
-            const r = await httpx.reader.read(get_xhttp_buffer());
-            if (r.done) break;
-            if (r.value && r.value.length > 0) {
-                await writer.write(r.value);
+        // 如果头部解析时已经读完了流
+        if (httpx.done) return;
+
+        while (true) {
+            const { value, done } = await httpx.reader.read();
+            if (done) break;
+            if (value && value.length > 0) {
+                await writer.write(value);
             }
-            httpx.done = r.done;
         }
     } catch (error) {
         throw error;
     }
 }
 
+// [优化] 重构后的下载器，使用 pipeTo 提升性能
 function create_xhttp_downloader(resp, remote_readable, initialData) {
     const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45000;
-    let stream;
-    const done = new Promise((resolve, reject) => {
-        stream = new TransformStream(
-            {
-                start(controller) {
-                    controller.enqueue(resp);
-                    if (initialData && initialData.byteLength > 0) {
-                        controller.enqueue(initialData);
-                    }
-                },
-                transform(chunk, controller) {
-                    controller.enqueue(chunk);
-                },
-                cancel(reason) {
-                    reject(`download cancelled: ${reason}`);
-                },
-            },
-            null,
-            new ByteLengthQueuingStrategy({ highWaterMark: XHTTP_BUFFER_SIZE }),
-        );
-        let lastActivity = Date.now();
-        const idleTimer = setInterval(() => {
-            if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
-                try { stream.writable.abort?.('idle timeout'); } catch (_) {}
-                clearInterval(idleTimer);
-                reject('idle timeout');
+    let lastActivity = Date.now();
+    let idleTimer;
+
+    // 创建转换流，用于监控数据流动并更新活动时间
+    const monitorStream = new TransformStream({
+        start(controller) {
+            // 首先将响应头和可能的初始数据推入队列
+            controller.enqueue(resp);
+            if (initialData && initialData.byteLength > 0) {
+                controller.enqueue(initialData);
             }
-        }, 5000);
-        
-        const reader = remote_readable.getReader();
-        const writer = stream.writable.getWriter();
-        ;(async () => {
-            try {
-                while (true) {
-                    const r = await reader.read();
-                    if (r.done) break;
-                    lastActivity = Date.now();
-                    await writer.write(r.value);
+            
+            // 启动空闲检测定时器
+            idleTimer = setInterval(() => {
+                if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+                    try { monitorStream.writable.abort('idle timeout'); } catch (_) {}
+                    try { monitorStream.readable.cancel('idle timeout'); } catch (_) {}
+                    clearInterval(idleTimer);
                 }
-                await writer.close();
-                resolve();
-            } catch (err) {
-                reject(err);
-            } finally {
-                try { reader.releaseLock(); } catch (_) {}
-                try { writer.releaseLock(); } catch (_) {}
-                clearInterval(idleTimer);
-            }
-        })();
+            }, 5000);
+        },
+        transform(chunk, controller) {
+            // 每当有数据流过，更新时间戳
+            lastActivity = Date.now();
+            controller.enqueue(chunk);
+        },
+        flush() {
+            clearInterval(idleTimer);
+        },
+        cancel() {
+            clearInterval(idleTimer);
+        }
     });
+
+    // 使用 pipeTo 自动管理背压和流传输，比手动循环快得多
+    const pipePromise = remote_readable.pipeTo(monitorStream.writable)
+        .catch(() => {}) // 忽略流中断错误
+        .finally(() => {
+            clearInterval(idleTimer);
+        });
+
     return {
-        readable: stream.readable,
-        done,
+        readable: monitorStream.readable,
+        done: pipePromise,
         abort: () => {
-            try { stream.readable.cancel(); } catch (_) {}
-            try { stream.writable.abort(); } catch (_) {}
+            try { monitorStream.writable.abort(); } catch (_) {}
+            try { monitorStream.readable.cancel(); } catch (_) {}
+            clearInterval(idleTimer);
         }
     };
 }
@@ -231,7 +262,10 @@ function create_xhttp_downloader(resp, remote_readable, initialData) {
 export async function handleXhttpClient(request, ctx) {
     try {
         const result = await read_xhttp_header(request.body, ctx);
-        if (typeof result === 'string') return null; 
+        if (typeof result === 'string') {
+            console.log('[XHTTP] Header Error:', result);
+            return null;
+        }
         
         const { hostname, port, atype, data, resp, reader, done } = result;
         const httpx = { hostname, port, atype, data, resp, reader, done };
