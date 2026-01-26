@@ -1043,7 +1043,7 @@ function parseSocks5Config(address) {
   if (hostname.startsWith("[") && hostname.endsWith("]")) hostname = hostname.slice(1, -1);
   return { username, password, hostname, port };
 }
-async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote, log) {
+async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote, log, isUDP = false) {
   const config = parseSocks5Config(socks5Addr);
   if (!config) throw new Error("Socks5 config missing");
   const { username, password, hostname, port } = config;
@@ -1084,10 +1084,11 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
       const domainBytes = encoder.encode(addressRemote);
       DSTADDR = new Uint8Array([3, domainBytes.length, ...domainBytes]);
   }
-  const socksRequest = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 255]);
+  const cmd = isUDP ? 3 : 1;
+  const socksRequest = new Uint8Array([5, cmd, 0, ...DSTADDR, portRemote >> 8, portRemote & 255]);
   await writer.write(socksRequest);
   const { value: connRes } = await reader.read();
-  if (!connRes || connRes.length < 2 || connRes[0] !== 5 || connRes[1] !== 0) throw new Error(`SOCKS5 connection failed`);
+  if (!connRes || connRes.length < 2 || connRes[0] !== 5 || connRes[1] !== 0) throw new Error(`SOCKS5 connection failed (CMD: ${cmd})`);
   let headLen = 0;
   if (connRes.length >= 4) {
     if (connRes[3] === 1) headLen = 10;
@@ -1101,7 +1102,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
   reader.releaseLock();
   return socket;
 }
-async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null) {
+async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null, isUDP = false) {
   let isTimedOut = false;
   let socket = null;
   const timeoutPromise = new Promise((_, reject) => setTimeout(() => {
@@ -1112,7 +1113,7 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
     let s;
     try {
       if (socksConfig) {
-        s = await socks5Connect(socksConfig, addressType, addressRemote, port, log);
+        s = await socks5Connect(socksConfig, addressType, addressRemote, port, log, isUDP);
       } else {
         s = connect({ hostname: host, port });
       }
@@ -1172,7 +1173,8 @@ async function createUnifiedConnection(ctx, addressRemote, portRemote, addressTy
         log,
         useSocks ? ctx.socks5 : null,
         addressType,
-        addressRemote
+        addressRemote,
+        isUDP
       );
     } catch (err1) {
       log(`[connect] Phase 1 failed: ${err1.message}`);
