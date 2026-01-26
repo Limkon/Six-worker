@@ -5,6 +5,7 @@
  * 2. [Optimize] 重构 parseProxyIP，完美支持 IPv6 (带括号/不带括号) 及端口解析。
  * 3. [Performance] 直连超时优化为 [1500, 4000]。
  * 4. [Fix] WebSocket 发送增加 safeSend 包装。
+ * 5. [Critical Fix] 修复 Socks5 UDP 连接逻辑，透传 isUDP 参数并发送正确的 UDP ASSOCIATE 命令 (0x03)。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -84,18 +85,15 @@ function parseProxyIP(proxyAddr, defaultPort) {
     }
 
     // 情况 2: 包含多个冒号，且不带括号。视为纯 IPv6 地址，无法携带端口。
-    // 例如: 2400:cb00:2048:1::6814:3a76
     const colonCount = (host.match(/:/g) || []).length;
     if (colonCount > 1) {
         return { host, port };
     }
 
     // 情况 3: IPv4 或 域名 (可能带端口)
-    // 例如: 1.2.3.4:8080 或 example.com:443
     const lastColon = host.lastIndexOf(':');
     if (lastColon > 0) {
         const portStr = host.substring(lastColon + 1);
-        // 确保冒号后面是纯数字才认为是端口
         if (/^\d+$/.test(portStr)) {
             port = parseInt(portStr, 10);
             host = host.substring(0, lastColon);
@@ -134,7 +132,8 @@ function parseSocks5Config(address) {
     return { username, password, hostname, port };
 }
 
-async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote, log) {
+// [Fix] 增加 isUDP 参数
+async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote, log, isUDP = false) {
     const config = parseSocks5Config(socks5Addr);
     if (!config) throw new Error('Socks5 config missing');
     const { username, password, hostname, port } = config;
@@ -145,10 +144,12 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     const reader = socket.readable.getReader();
     const encoder = new TextEncoder();
     
+    // Handshake
     await writer.write(new Uint8Array([5, 1, 2])); 
     let { value: res } = await reader.read();
     if (!res || res.length < 2 || res[0] !== 0x05 || res[1] === 0xff) throw new Error('SOCKS5 greeting failed');
     
+    // Auth
     if (res[1] === 0x02) {
         if (!username || !password) throw new Error('SOCKS5 auth required');
         const uBytes = encoder.encode(username);
@@ -159,6 +160,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
         if (!authRes || authRes.length < 2 || authRes[0] !== 0x01 || authRes[1] !== 0x00) throw new Error('SOCKS5 auth failed');
     }
     
+    // Request Construction
     let DSTADDR;
     switch (addressType) {
         case CONSTANTS.ADDRESS_TYPE_IPV4:
@@ -180,11 +182,14 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
              DSTADDR = new Uint8Array([3, domainBytes.length, ...domainBytes]);
     }
     
-    const socksRequest = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]);
+    // [Fix] 如果 isUDP 为 true，发送 0x03 (UDP ASSOCIATE)，否则发送 0x01 (CONNECT)
+    const cmd = isUDP ? 0x03 : 0x01;
+    const socksRequest = new Uint8Array([5, cmd, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]);
+    
     await writer.write(socksRequest);
     const { value: connRes } = await reader.read();
     
-    if (!connRes || connRes.length < 2 || connRes[0] !== 0x05 || connRes[1] !== 0x00) throw new Error(`SOCKS5 connection failed`);
+    if (!connRes || connRes.length < 2 || connRes[0] !== 0x05 || connRes[1] !== 0x00) throw new Error(`SOCKS5 connection failed (CMD: ${cmd})`);
     
     let headLen = 0;
     if (connRes.length >= 4) {
@@ -200,8 +205,8 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     return socket;
 }
 
-// 核心连接函数，包含防止句柄泄漏的逻辑
-async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null) {
+// [Fix] 增加 isUDP 参数并透传
+async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null, isUDP = false) {
     let isTimedOut = false;
     let socket = null;
 
@@ -214,16 +219,14 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
         let s;
         try {
             if (socksConfig) {
-                s = await socks5Connect(socksConfig, addressType, addressRemote, port, log);
+                // [Fix] 传递 isUDP
+                s = await socks5Connect(socksConfig, addressType, addressRemote, port, log, isUDP);
             } else {
                 s = connect({ hostname: host, port: port });
             }
             
-            // 如果超时已触发，必须关闭这个迟到的连接
             if (isTimedOut) {
-                if (s) {
-                    try { s.close(); } catch(e) {}
-                }
+                if (s) { try { s.close(); } catch(e) {} }
                 return null;
             }
             return s;
@@ -253,9 +256,9 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
     }
 }
 
+// [Fix] 接收 isUDP 参数并向下传递
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    // [Fix] 优化：直连超时缩短为 [1.5s, 4s]
     const DIRECT_TIMEOUTS = [1500, 4000]; 
     const PROXY_TIMEOUT = 5000; 
 
@@ -273,11 +276,11 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
                 log, 
                 useSocks ? ctx.socks5 : null, 
                 addressType, 
-                addressRemote
+                addressRemote,
+                isUDP // [Fix] 传递 isUDP
             );
         } catch (err1) {
             log(`[connect] Phase 1 failed: ${err1.message}`);
-            // [Fix] 只有明确的连接拒绝或重置才加入熔断缓存
             if (err1.message.includes('refused') || err1.message.includes('reset') || err1.message.includes('abort')) {
                 log(`[Smart] Adding ${addressRemote} to failure cache (Circuit Breaker)`);
                 addToFailureCache(addressRemote);
@@ -288,17 +291,20 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
 
     // --- Phase 2: ProxyIP ---
-    // [Fix] 使用 getSingleProxyIP 处理数组情况
     let proxyIP = getSingleProxyIP(fallbackAddress || ctx.proxyIP);
     
     if (!proxyIP) {
         const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-        if (defParams.length > 0) proxyIP = defParams[0]; // 默认配置取第一个
+        if (defParams.length > 0) proxyIP = defParams[0];
     }
 
     if (proxyIP) {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(proxyIP, portRemote);
         try {
+            // ProxyIP 连接通常是 TCP 隧道，暂时不支持 UDP 语义透传（取决于 ProxyIP 节点的实现），
+            // 这里我们假设 ProxyIP 节点接受 TCP 连接。如果需要支持 ProxyIP 的 UDP，这里也需要传递 isUDP，
+            // 但目前的架构 ProxyIP 主要是 Cloudflare IP 或其他 HTTP/WS 中转，通常仅支持 TCP。
+            // 因此此处暂不传递 isUDP，保持 TCP 行为，除非有明确的 UDP Proxy 协议。
             return await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, PROXY_TIMEOUT, log);
         } catch (err2) {
             log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
@@ -311,6 +317,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             log(`[connect] Phase 3: Attempting NAT64...`);
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (v6Address) {
+                // NAT64 同样通常是 TCP 映射
                 return await connectWithTimeout(v6Address, portRemote, PROXY_TIMEOUT, log);
             } else {
                 log(`[connect] Phase 3 (NAT64) skipped: DNS resolution failed`);
@@ -327,7 +334,6 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     let hasIncomingData = false;
     let responseHeader = vlessHeader;
 
-    // [Fix] 安全发送函数，防止 send 抛出异常导致崩溃
     const safeSend = (data) => {
         try {
             if (webSocket.readyState === 1) {
@@ -349,11 +355,9 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
             const combined = new Uint8Array(header.length + data.length);
             combined.set(header);
             combined.set(data, header.length);
-            // [Fix] 使用 safeSend
             if (!safeSend(combined)) return; 
             responseHeader = null;
         } else {
-            // [Fix] 使用 safeSend
             if (!safeSend(remoteSocket.initialData)) return;
         }
         remoteSocket.initialData = null;
@@ -373,14 +377,12 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
                     const combined = new Uint8Array(header.length + data.length);
                     combined.set(header);
                     combined.set(data, header.length);
-                    // [Fix] 使用 safeSend 并处理错误
                     if (!safeSend(combined)) {
                         controller.error(new Error('WebSocket send failed'));
                         return;
                     }
                     responseHeader = null;
                 } else {
-                    // [Fix] 使用 safeSend 并处理错误
                     if (!safeSend(chunk)) {
                          controller.error(new Error('WebSocket send failed'));
                          return;
@@ -408,14 +410,12 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     }
 }
 
-// [Fix] 增加写入超时到 10s
 async function safeWrite(writer, chunk) {
     const WRITE_TIMEOUT = 10000; 
     const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Write timeout')), WRITE_TIMEOUT));
     await Promise.race([writer.write(chunk), timeoutPromise]);
 }
 
-// [Fix] 优化 flushBuffer
 async function flushBuffer(writer, buffer, log) {
     if (!buffer || buffer.length === 0) return;
     log(`Flushing ${buffer.length} buffered chunks`);
@@ -444,6 +444,10 @@ async function flushBuffer(writer, buffer, log) {
     }
 }
 
+// ... handleTCPOutBound 保持不变，可以直接引用原文件 ...
+// ... handleUDPOutBound 保持不变，可以直接引用原文件 ...
+// 为了文件完整性，这里重新列出这两个函数，确保它们调用 createUnifiedConnection 时逻辑一致
+
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
     if (isHostBanned(addressRemote, ctx.banHosts)) {
         log(`[Outbound] Host banned: ${addressRemote}`);
@@ -468,6 +472,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 resolution failed');
+            // NAT64 retry 不涉及 isUDP
             const natSocket = await connectWithTimeout(v6Address, portRemote, 5000, log);
             
             const writer = natSocket.writable.getWriter();
@@ -487,7 +492,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         log('[Retry] Retrying ProxyIP...');
         prepareRetry(); 
 
-        // [Fix] 使用 getSingleProxyIP
         let ip = getSingleProxyIP(ctx.proxyIP);
         if (!ip) {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
@@ -523,6 +527,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     try {
+        // TCP 模式，isUDP = false
         const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, null, false);
         const writer = socket.writable.getWriter();
         if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
@@ -555,6 +560,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         remoteSocketWrapper.isConnecting = false;
     };
 
+    // 重试逻辑与 TCP 类似，但通常 UDP 的重试价值较小，这里保持原样以维持一致性
     const nat64Retry = async () => {
         if (!ctx.dns64) { safeCloseWebSocket(webSocket); return; }
         log('[Retry:UDP] Switching to NAT64...');
@@ -581,7 +587,6 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         log('[Retry:UDP] Retrying ProxyIP...');
         prepareRetry(); 
 
-        // [Fix] 使用 getSingleProxyIP
         let ip = getSingleProxyIP(ctx.proxyIP);
         if (!ip) {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
@@ -617,6 +622,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
     };
 
     try {
+        // [Critical] 透传 isUDP: true
         const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, null, true);
         const writer = socket.writable.getWriter();
         if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
