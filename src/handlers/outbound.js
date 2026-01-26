@@ -1,10 +1,10 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 修正说明:
- * 1. [Fix] 修复了 ProxyIP 为数组时导致的类型错误崩溃问题 (ProxyIP Array Bug)。
- * 2. [Feature] 完整保留 SOCKS5、UDP、熔断机制 (Circuit Breaker)、智能重试逻辑。
- * 3. [Performance] 直连超时优化为 [1500, 4000]，提升被墙环境下的切换速度。
- * 4. [Fix] 修复 WebSocket 发送未捕获异常，增加 safeSend 包装。
+ * 1. [Fix] 修复 ProxyIP 为数组时的类型错误。
+ * 2. [Optimize] 重构 parseProxyIP，完美支持 IPv6 (带括号/不带括号) 及端口解析。
+ * 3. [Performance] 直连超时优化为 [1500, 4000]。
+ * 4. [Fix] WebSocket 发送增加 safeSend 包装。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -60,31 +60,48 @@ function getSingleProxyIP(proxyIP) {
     return proxyIP;
 }
 
+// [Optimization] 重构后的 IP 解析函数
 function parseProxyIP(proxyAddr, defaultPort) {
     if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP.split(',')[0].trim(), port: defaultPort };
+    
     let host = proxyAddr;
     let port = defaultPort;
+
+    // 情况 1: 以 '[' 开头，标准 IPv6 格式 [ipv6]:port 或 [ipv6]
     if (host.startsWith('[')) {
-        const bracketEnd = host.lastIndexOf(']');
-        if (bracketEnd === -1) return { host: host, port: defaultPort };
+        const bracketEnd = host.indexOf(']');
         if (bracketEnd > 0) {
-            const remainder = host.substring(bracketEnd + 1);
-            if (remainder.startsWith(':')) {
-                const portStr = remainder.substring(1);
-                if (/^\d+$/.test(portStr)) port = parseInt(portStr, 10);
+            const ipPart = host.substring(1, bracketEnd); // 提取括号内的 IP
+            const portPart = host.substring(bracketEnd + 1);
+            
+            // 检查是否有端口
+            if (portPart.startsWith(':')) {
+                const p = parseInt(portPart.substring(1), 10);
+                if (!isNaN(p)) port = p;
             }
-            host = host.substring(1, bracketEnd);
-            return { host, port };
+            return { host: ipPart, port };
         }
     }
+
+    // 情况 2: 包含多个冒号，且不带括号。视为纯 IPv6 地址，无法携带端口。
+    // 例如: 2400:cb00:2048:1::6814:3a76
+    const colonCount = (host.match(/:/g) || []).length;
+    if (colonCount > 1) {
+        return { host, port };
+    }
+
+    // 情况 3: IPv4 或 域名 (可能带端口)
+    // 例如: 1.2.3.4:8080 或 example.com:443
     const lastColon = host.lastIndexOf(':');
-    if (lastColon > 0 && host.indexOf(':') === lastColon) {
+    if (lastColon > 0) {
         const portStr = host.substring(lastColon + 1);
+        // 确保冒号后面是纯数字才认为是端口
         if (/^\d+$/.test(portStr)) {
             port = parseInt(portStr, 10);
             host = host.substring(0, lastColon);
         }
     }
+
     return { host, port };
 }
 
