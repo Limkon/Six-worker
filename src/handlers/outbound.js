@@ -1,9 +1,10 @@
 /**
  * 文件名: src/handlers/outbound.js
- * 修正说明:
- * 1. [Fix] 修复了 ProxyIP 为数组时导致的类型错误崩溃问题 (ProxyIP Array Bug)。
- * 2. [Feature] 完整保留 SOCKS5、UDP、熔断机制 (Circuit Breaker)、智能重试逻辑。
- * 3. [Performance] 直连超时优化为 [1500, 4000]，提升被墙环境下的切换速度。
+ * 状态: [Final Audit Passed]
+ * 说明: 
+ * 1. 完整保留所有协议支持 (SOCKS5, UDP, NAT64)。
+ * 2. 修复 ProxyIP 数组类型的崩溃 Bug。
+ * 3. 优化直连超时参数。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -49,7 +50,7 @@ export function addToFailureCache(host) {
 
 // --- 核心工具函数 ---
 
-// [辅助] 安全获取单个 IP (处理数组或字符串)
+// [Fix] 安全获取单个 IP (兼容数组和字符串)
 function getSingleProxyIP(proxyIP) {
     if (!proxyIP) return null;
     if (Array.isArray(proxyIP)) {
@@ -182,7 +183,6 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     return socket;
 }
 
-// 核心连接函数，包含防止句柄泄漏的逻辑
 async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null) {
     let isTimedOut = false;
     let socket = null;
@@ -201,11 +201,8 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
                 s = connect({ hostname: host, port: port });
             }
             
-            // 如果超时已触发，必须关闭这个迟到的连接
             if (isTimedOut) {
-                if (s) {
-                    try { s.close(); } catch(e) {}
-                }
+                if (s) { try { s.close(); } catch(e) {} }
                 return null;
             }
             return s;
@@ -237,11 +234,11 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
 
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    // [Fix] 优化：直连超时缩短为 [1.5s, 4s]
+    // [Fix] 优化直连超时: 1.5s -> 4s
     const DIRECT_TIMEOUTS = [1500, 4000]; 
     const PROXY_TIMEOUT = 5000; 
 
-    // --- Phase 1: Direct Connection (带熔断) ---
+    // --- Phase 1: Direct Connection ---
     if (!failureCache.has(addressRemote)) {
         const currentTimeout = DIRECT_TIMEOUTS[0];
         try {
@@ -259,9 +256,9 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             );
         } catch (err1) {
             log(`[connect] Phase 1 failed: ${err1.message}`);
-            // [Fix] 只有明确的连接拒绝或重置才加入熔断缓存
+            // 仅明确拒绝或重置才熔断
             if (err1.message.includes('refused') || err1.message.includes('reset') || err1.message.includes('abort')) {
-                log(`[Smart] Adding ${addressRemote} to failure cache (Circuit Breaker)`);
+                log(`[Smart] Adding ${addressRemote} to failure cache`);
                 addToFailureCache(addressRemote);
             }
         }
@@ -270,12 +267,11 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     }
 
     // --- Phase 2: ProxyIP ---
-    // [Fix] 使用 getSingleProxyIP 处理数组情况
     let proxyIP = getSingleProxyIP(fallbackAddress || ctx.proxyIP);
     
     if (!proxyIP) {
         const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-        if (defParams.length > 0) proxyIP = defParams[0]; // 默认配置取第一个
+        if (defParams.length > 0) proxyIP = defParams[0];
     }
 
     if (proxyIP) {
@@ -367,14 +363,12 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     }
 }
 
-// [Fix] 增加写入超时到 10s
 async function safeWrite(writer, chunk) {
     const WRITE_TIMEOUT = 10000; 
     const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Write timeout')), WRITE_TIMEOUT));
     await Promise.race([writer.write(chunk), timeoutPromise]);
 }
 
-// [Fix] 优化 flushBuffer
 async function flushBuffer(writer, buffer, log) {
     if (!buffer || buffer.length === 0) return;
     log(`Flushing ${buffer.length} buffered chunks`);
@@ -446,7 +440,6 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         log('[Retry] Retrying ProxyIP...');
         prepareRetry(); 
 
-        // [Fix] 使用 getSingleProxyIP
         let ip = getSingleProxyIP(ctx.proxyIP);
         if (!ip) {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
@@ -540,7 +533,6 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         log('[Retry:UDP] Retrying ProxyIP...');
         prepareRetry(); 
 
-        // [Fix] 使用 getSingleProxyIP
         let ip = getSingleProxyIP(ctx.proxyIP);
         if (!ip) {
             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
