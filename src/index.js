@@ -2,9 +2,9 @@
 /**
  * 文件名: src/index.js
  * 修复说明: 
- * 1. [Fix] 移除 XHTTP 的严格路径/Header检查，恢复为 Five-worker 的宽松模式，
- * 只要 enableXhttp 开启且为 POST 请求即尝试处理。
- * 2. 保留原有的 ctx.waitUntil 安全检查修复。
+ * 1. [Refactor] 重构 XHTTP 拦截逻辑，使其结构严格对齐 Five-worker。
+ * 逻辑为：POST请求 + 开启XHTTP + 非管理API + 非登录请求 + 非根路径。
+ * 2. 保留 Six-worker 特有的域名自动发现和 WebDAV 推送逻辑。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -115,36 +115,32 @@ export default {
                 }
             }
 
-            // [Modified] XHTTP 拦截逻辑修正
-            // 不再强制校验 path 或 header，与 Five-worker 保持一致
-            if (request.method === 'POST' && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
-                if (context.enableXhttp) {
-                    // 尝试作为 XHTTP 处理
-                    const r = await handleXhttpClient(request, context);
-                    if (r) {
-                        context.waitUntil(r.closed);
-                        return new Response(r.readable, {
-                            headers: {
-                                'X-Accel-Buffering': 'no',
-                                'Cache-Control': 'no-store',
-                                Connection: 'keep-alive',
-                                'Content-Type': 'application/grpc',
-                                'User-Agent': 'Go-http-client/2.0'
-                            }
-                        });
-                    }
-                    
-                    // 如果开启了 XHTTP 但握手失败（返回 null），且不是管理路由，则认为是错误请求
-                    // 这样可以拦截那些意图登录但被 XHTTP 捕获的请求，或者无效的 XHTTP 请求
-                    if (!isManagementRoute) {
-                        const contentType = request.headers.get('content-type') || '';
-                        if (contentType.includes('application/x-www-form-urlencoded') || contentType.includes('multipart/form-data')) {
-                            return new Response('Error: Detected Form submission on XHTTP path. Missing "?auth=login" param?', { status: 400 });
+            // [Modified] XHTTP 协议拦截 (逻辑与 Five-worker 严格对齐)
+            // 只要满足：POST + 开启XHTTP + 非管理API + 非登录 + 非根路径，即进行拦截尝试
+            if (request.method === 'POST' && context.enableXhttp && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
+                const r = await handleXhttpClient(request, context);
+                if (r) {
+                    context.waitUntil(r.closed);
+                    return new Response(r.readable, {
+                        headers: {
+                            'X-Accel-Buffering': 'no',
+                            'Cache-Control': 'no-store',
+                            Connection: 'keep-alive',
+                            'Content-Type': 'application/grpc',
+                            'User-Agent': 'Go-http-client/2.0'
                         }
-                        return new Response('Internal Server Error (XHTTP Handshake Failed)', { status: 500 });
-                    }
+                    });
                 }
-                // 如果 enableXhttp 为 false，则自然穿透到后续逻辑（虽然通常后续没有针对 POST 的处理除了 404）
+                
+                // 握手失败处理
+                // 如果不是管理路由，则认为是错误请求（可能是误入的表单提交或无效的 XHTTP 包）
+                if (!isManagementRoute) {
+                    const contentType = request.headers.get('content-type') || '';
+                    if (contentType.includes('application/x-www-form-urlencoded') || contentType.includes('multipart/form-data')) {
+                        return new Response('Error: Detected Form submission on XHTTP path. Missing "?auth=login" param?', { status: 400 });
+                    }
+                    return new Response('Internal Server Error (XHTTP Handshake Failed)', { status: 500 });
+                }
             }
 
             // Management Pages
