@@ -7,11 +7,39 @@ import { parseAddressAndPort } from './utils.js';
 const AEAD_METHODS = {
     'aes-256-gcm': { keyLen: 32, saltLen: 32, nonceLen: 12, tagLen: 16 },
     'aes-128-gcm': { keyLen: 16, saltLen: 16, nonceLen: 12, tagLen: 16 },
-    // chacha20-poly1305 在 Cloudflare 某些运行时可能不支持，建议优先用 aes-256-gcm
+    'chacha20-poly1305': { keyLen: 32, saltLen: 32, nonceLen: 12, tagLen: 16 },
 };
 
-// 缓存派生的主密钥 (Master Key)，避免重复 PBKDF2/Hash 计算
+// 缓存派生的主密钥 (Master Key)，避免重复计算
 const masterKeyCache = new Map();
+
+/**
+ * OpenSSL EVP_BytesToKey 实现 (MD5)
+ * 用于将字符串密码转换为符合 Shadowsocks 标准的 Master Key
+ */
+async function evpBytesToKey(password, keyLen) {
+    const passBytes = textEncoder.encode(password);
+    let key = new Uint8Array(0);
+    let prevHash = new Uint8Array(0);
+
+    // 循环计算 MD5 直到密钥长度满足要求
+    while (key.length < keyLen) {
+        const data = new Uint8Array(prevHash.length + passBytes.length);
+        data.set(prevHash, 0);
+        data.set(passBytes, prevHash.length);
+
+        const hashBuffer = await crypto.subtle.digest('MD5', data);
+        const hash = new Uint8Array(hashBuffer);
+        
+        const newKey = new Uint8Array(key.length + hash.length);
+        newKey.set(key, 0);
+        newKey.set(hash, key.length);
+        
+        key = newKey;
+        prevHash = hash;
+    }
+    return key.slice(0, keyLen);
+}
 
 /**
  * HKDF-SHA1 实现 (Shadowsocks 标准)
@@ -25,7 +53,7 @@ async function hkdfSha1(salt, ikm, info, length) {
     infoBuffer[info.length + 1] = 1; // Counter
     
     const prkKey = await crypto.subtle.importKey('raw', prk, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']);
-    // Shadowsocks 只用第一块 (T1)，足够生成 32字节 Subkey
+    // Shadowsocks 只用第一块 (T1)
     const t1 = await crypto.subtle.sign('HMAC', prkKey, infoBuffer.slice(0, info.length + 1));
     return t1.slice(0, length);
 }
@@ -79,34 +107,33 @@ export async function parseShadowsocksHeader(ssBuffer, password, method = 'none'
 
     const salt = buffer.subarray(0, cipher.saltLen);
     
-    // 密钥派生 (HKDF)
-    // 注意: 标准 SS 使用 "ss-subkey" 字符串作为 Info
-    const info = textEncoder.encode('ss-subkey');
-    
-    // 获取 Master Key (这里简化处理，假设 password 已经是 32字节 key 或者通过某种方式预处理过)
-    // 在生产环境中，通常需要对 password 进行 MD5/EVP_BytesToKey 处理得到 MasterKey
-    // 这里为了演示，假设 password 经过处理或直接作为 key 种子
-    // 如果 password 是普通字符串，建议先做一次 SHA-256
+    // 获取 Master Key
     let masterKeyBytes = masterKeyCache.get(password);
     if (!masterKeyBytes) {
-        const passBuf = textEncoder.encode(password);
-        // 使用 SHA-256 将任意长度密码规整为 32 字节 (对于 aes-256-gcm)
-        const hash = await crypto.subtle.digest('SHA-256', passBuf);
-        masterKeyBytes = new Uint8Array(hash);
+        // [修复] 使用 EVP_BytesToKey 生成兼容标准客户端的 Key
+        masterKeyBytes = await evpBytesToKey(password, cipher.keyLen);
         masterKeyCache.set(password, masterKeyBytes);
     }
 
-    // 派生会话子密钥 (Subkey)
+    // 密钥派生 (HKDF)
+    const info = textEncoder.encode('ss-subkey');
     const subKeyBytes = await hkdfSha1(salt, masterKeyBytes, info, cipher.keyLen);
     
     // 导入为 CryptoKey
-    const subKey = await crypto.subtle.importKey(
-        'raw', 
-        subKeyBytes, 
-        { name: 'AES-GCM' }, 
-        false, 
-        ['decrypt']
-    );
+    // 注意: ChaCha20-Poly1305 在原生 Web Crypto 中可能不受支持，这里主要针对 AES-GCM
+    const algoName = method.includes('aes') ? 'AES-GCM' : 'ChaCha20-Poly1305';
+    let subKey;
+    try {
+        subKey = await crypto.subtle.importKey(
+            'raw', 
+            subKeyBytes, 
+            { name: algoName }, 
+            false, 
+            ['decrypt']
+        );
+    } catch (e) {
+        return { hasError: true, message: `Import key failed: ${e.message}` };
+    }
 
     // --- 解密 Chunk 0 (头部长度) ---
     // AEAD 结构: [Encrypted Length (2bytes)] + [Tag (16bytes)]
@@ -116,19 +143,19 @@ export async function parseShadowsocksHeader(ssBuffer, password, method = 'none'
 
     const chunk0Enc = buffer.subarray(cipher.saltLen, offset1);
     
-    // 构造 Nonce (全0, 只有 increment 0)
-    // 每次解密都需要独立的 Nonce，这里是第一个 Payload，Nonce 通常是 0
-    const nonce0 = new Uint8Array(cipher.nonceLen); // filled with 0
+    // Nonce 0 (12 bytes, all zeros)
+    const nonce0 = new Uint8Array(cipher.nonceLen); 
 
     let decryptedLenBytes;
     try {
         decryptedLenBytes = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: nonce0 },
+            { name: algoName, iv: nonce0 },
             subKey,
             chunk0Enc
         );
     } catch (e) {
-        return { hasError: true, message: 'SS Decrypt Chunk 0 failed' };
+        // 解密失败通常意味着密码错误或加密方式不匹配
+        return { hasError: true, message: 'SS Decrypt Chunk 0 failed (Invalid Password?)' };
     }
 
     const payloadLen = new DataView(decryptedLenBytes).getUint16(0, false) & 0x3FFF; // Max 16KB
@@ -141,14 +168,14 @@ export async function parseShadowsocksHeader(ssBuffer, password, method = 'none'
 
     const chunk1Enc = buffer.subarray(offset1, offset2);
     
-    // Nonce 递增
+    // Nonce 1 (Little-Endian increment)
     const nonce1 = new Uint8Array(cipher.nonceLen);
-    nonce1[0] = 1; // increment for next chunk
+    nonce1[0] = 1; 
 
     let decryptedHeader;
     try {
         decryptedHeader = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: nonce1 },
+            { name: algoName, iv: nonce1 },
             subKey,
             chunk1Enc
         );
@@ -159,6 +186,7 @@ export async function parseShadowsocksHeader(ssBuffer, password, method = 'none'
     const headerBuffer = new Uint8Array(decryptedHeader);
     
     // 解析解密后的头部 (ATYP + Addr + Port)
+    // 这里的 headerBuffer 已经是明文数据，结构同 'none' 模式
     const addrType = headerBuffer[0];
     const addressInfo = parseAddressAndPort(headerBuffer, 1, addrType);
     if (addressInfo.hasError) return addressInfo;
@@ -166,27 +194,25 @@ export async function parseShadowsocksHeader(ssBuffer, password, method = 'none'
     const portIndex = addressInfo.dataOffset;
     if (portIndex + 2 > headerBuffer.byteLength) return { hasError: true, message: 'SS Header too short' };
 
-    const port = new DataView(headerBuffer.buffer).getUint16(portIndex, false);
+    const port = new DataView(headerBuffer.buffer, headerBuffer.byteOffset, headerBuffer.byteLength).getUint16(portIndex, false);
     const addressRemote = resolveAddressString(addrType, addressInfo.targetAddrBytes);
 
     // 返回结果
-    // 注意: rawClientData 应该是解密后的剩余数据，或者是原始的剩余加密数据？
-    // 如果 Worker 不做全流解密代理，这里返回 剩余的加密数据 (buffer.subarray(offset2)) 是没有意义的，因为 Outbound 无法处理。
-    // 但为了保持接口一致性，我们返回剩余的 Buffer。
-    // **重要**: 这里的 rawClientData 仍然是加密的。如果下游没有解密能力，连接会失败。
+    // 注意：rawClientData 返回的是剩余的 **加密数据**。
+    // 如果 Worker 不具备全流解密转发能力，这部分数据直接转发给目标服务器是没有意义的。
+    // 但作为协议探测/头部解析，这是正确的返回。
     
     return {
         hasError: false,
         addressRemote,
         addressType: addrType,
         portRemote: port,
-        rawClientData: buffer.subarray(offset2), // 剩余的 Encrypted Chunks
-        isUDP: false, // SS TCP
-        // 可以返回 key/nonce 状态供后续解密使用
+        rawClientData: buffer.subarray(offset2), 
+        isUDP: false, 
         cryptoState: {
             method,
             subKey,
-            nonceValue: 2 // 下一个 nonce 是 2
+            nonceValue: 2 // 下一个 nonce
         }
     };
 }
