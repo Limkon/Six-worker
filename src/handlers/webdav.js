@@ -2,7 +2,7 @@
  * 文件名: src/handlers/webdav.js
  * 审计确认: 
  * 1. [Hardcode] 账号信息已硬编码，无需环境变量。
- * 2. [Default On] 功能默认开启，配合硬编码凭据。
+ * 2. [Default On] 功能默认关闭，配合硬编码凭据。
  * 3. [Auto Domain] 自动使用当前访问域名，解决 scheduled 事件无 Host 问题。
  */
 import { handleSubscription } from '../pages/sub.js';

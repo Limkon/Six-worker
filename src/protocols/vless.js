@@ -1,15 +1,15 @@
 // src/protocols/vless.js
-/**
- * 文件名: src/protocols/vless.js
- * 修改说明:
- * 1. [性能优化] 移除了 expectedUserIDs.map(...) 逻辑。
- * 原因：在 src/config.js 的 initializeContext 中已预处理好小写 ID 列表，此处直接使用 includes 即可。
- * 2. [保留] 维持原有的零拷贝 subarray 视图逻辑和地址解析功能。
- */
 import { CONSTANTS } from '../constants.js';
 import { textDecoder, stringifyUUID } from '../utils/helpers.js';
 
+/**
+ * 解析 VLESS 协议头部
+ * @param {Uint8Array|ArrayBuffer} vlessBuffer 
+ * @param {string[]} expectedUserIDs - 预处理好的小写 UUID 列表
+ */
 export async function processVlessHeader(vlessBuffer, expectedUserIDs) {
+    // 基础长度检查: Version(1) + UUID(16) + OptLen(1) + Cmd(1) + Port(2) + Atyp(1) = 22 bytes minimum
+    // 考虑到后续地址字段，24 字节是一个合理的最小安全长度
     if (vlessBuffer.byteLength < 24) return { hasError: true, message: "Buffer too short" };
     
     // [优化] 避免不必要的 new Uint8Array 包装
@@ -18,24 +18,36 @@ export async function processVlessHeader(vlessBuffer, expectedUserIDs) {
     const version = buffer[0];
     if (version !== 0) return { hasError: true, message: "Invalid VLESS version" };
     
-    // [优化] 使用 subarray 替代 slice，避免内存复制
+    // [优化] 使用 subarray 提取 UUID 字节，避免复制
+    // stringifyUUID 内部负责将 16 字节转换为标准 UUID 字符串
     const uuid = stringifyUUID(buffer.subarray(1, 17));
 
-    // [性能优化] 直接使用预处理好的 expectedUserIDs，避免高频调用 map 和 toLowerCase
+    // [性能优化] 直接使用预处理好的 expectedUserIDs
     if (!expectedUserIDs.includes(uuid)) {
         return { hasError: true, message: "Invalid VLESS user" };
     }
     
     const optLength = buffer[17];
-    const command = buffer[18 + optLength];
+    // Cmd 在 OptLen 之后
+    // Offset: 1(Ver) + 16(UUID) + 1(OptLen) + optLength
+    const commandIndex = 18 + optLength;
     
-    let isUDP = command === 2;
-    if (command !== 1 && command !== 2) return { hasError: true, message: 'Unsupported VLESS command: ' + command};
+    if (commandIndex >= buffer.byteLength) return { hasError: true, message: "Buffer too short for command" };
+    const command = buffer[commandIndex];
     
-    const portIndex = 19 + optLength;
-    if (buffer.byteLength < portIndex + 2) return { hasError: true, message: "Buffer too short" };
+    // [Fix] 允许 CONNECT(1) 和 UDP(2)
+    const isUDP = command === 2;
+    if (command !== 1 && command !== 2) {
+        return { hasError: true, message: 'Unsupported VLESS command: ' + command };
+    }
+    
+    const portIndex = commandIndex + 1;
+    if (buffer.byteLength < portIndex + 2) return { hasError: true, message: "Buffer too short for port" };
 
-    const portRemote = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength).getUint16(portIndex, false);
+    // 解析端口
+    // 确保 DataView 使用正确的 buffer 和 byteOffset
+    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    const portRemote = view.getUint16(portIndex, false);
     
     let addressIndex = portIndex + 2;
     const addressType = buffer[addressIndex];
@@ -44,30 +56,46 @@ export async function processVlessHeader(vlessBuffer, expectedUserIDs) {
     let addressRemote = "";
     let addressLength = 0;
     
-    switch (addressType) {
-        case CONSTANTS.ADDRESS_TYPE_IPV4: 
-            addressLength = 4; 
-            // [优化] subarray
-            addressRemote = buffer.subarray(addressIndex, addressIndex + 4).join('.'); 
-            break;
-        case CONSTANTS.ADDRESS_TYPE_URL: 
-            addressLength = buffer[addressIndex]; 
-            addressIndex++; 
-            // [优化] subarray
-            addressRemote = textDecoder.decode(buffer.subarray(addressIndex, addressIndex + addressLength)); 
-            break;
-        case CONSTANTS.ADDRESS_TYPE_IPV6: 
-            addressLength = 16;
-            const ipv6View = new DataView(buffer.buffer, buffer.byteOffset + addressIndex, 16);
-            const ipv6 = [];
-            for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2, false).toString(16));
-            addressRemote = '[' + ipv6.join(':') + ']';
-            break;
-        default: 
-            return { hasError: true, message: 'Invalid VLESS addressType: ' + addressType };
+    // 解析目标地址
+    try {
+        switch (addressType) {
+            case CONSTANTS.ADDRESS_TYPE_IPV4: 
+                addressLength = 4; 
+                // [优化] 使用 subarray 并 join，避免额外内存分配
+                addressRemote = buffer.subarray(addressIndex, addressIndex + 4).join('.'); 
+                break;
+            case CONSTANTS.ADDRESS_TYPE_URL: 
+                addressLength = buffer[addressIndex]; 
+                addressIndex++; // 跳过长度字节
+                // [优化] 零拷贝解码
+                addressRemote = textDecoder.decode(buffer.subarray(addressIndex, addressIndex + addressLength)); 
+                break;
+            case CONSTANTS.ADDRESS_TYPE_IPV6: 
+                addressLength = 16;
+                // 复用 buffer 创建局部 DataView
+                const ipv6View = new DataView(buffer.buffer, buffer.byteOffset + addressIndex, 16);
+                const ipv6 = [];
+                for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2, false).toString(16));
+                addressRemote = '[' + ipv6.join(':') + ']';
+                break;
+            default: 
+                return { hasError: true, message: 'Invalid VLESS addressType: ' + addressType };
+        }
+    } catch (e) {
+        return { hasError: true, message: 'Address parse failed' };
     }
     
     if (!addressRemote) return { hasError: true, message: "VLESS address is empty" };
     
-    return { hasError: false, addressRemote, addressType, portRemote, isUDP, rawDataIndex: addressIndex + addressLength, cloudflareVersion: new Uint8Array([version]) };
+    const rawDataIndex = addressIndex + addressLength;
+    
+    return { 
+        hasError: false, 
+        addressRemote, 
+        addressType, 
+        portRemote, 
+        isUDP, 
+        rawDataIndex, 
+        cloudflareVersion: new Uint8Array([version]) 
+    };
 }
