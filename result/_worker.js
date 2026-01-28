@@ -3301,8 +3301,9 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
     const proxyUrl2 = new URL(urlStr);
     const path = proxyUrl2.pathname === "/" ? "" : proxyUrl2.pathname;
     const newUrl = proxyUrl2.protocol + "//" + proxyUrl2.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
-    return fetch(new Request(newUrl, request));
+    return await fetch(new Request(newUrl, request));
   } catch (e) {
+    void(0);
     return null;
   }
 }
