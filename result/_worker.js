@@ -3345,8 +3345,10 @@ var index_default = {
         }
       }
       const xhttpPath = context.userID ? `/${context.userID.substring(0, 8).toLowerCase()}` : null;
-      const isXhttpHeader = request.headers.get("Content-Type") === "application/grpc";
-      const isXhttpPath = xhttpPath && path === xhttpPath;
+      const reqContentType = request.headers.get("Content-Type") || "";
+      const isXhttpHeader = reqContentType.includes("application/grpc");
+      const cleanPath = path.endsWith("/") && path.length > 1 ? path.slice(0, -1) : path;
+      const isXhttpPath = xhttpPath && cleanPath === xhttpPath;
       if (request.method === "POST" && !isApiPostPath && url.searchParams.get("auth") !== "login" && path !== "/") {
         if (context.enableXhttp) {
           if (isXhttpPath || isXhttpHeader) {
