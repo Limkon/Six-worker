@@ -513,7 +513,7 @@ var ProtocolManager = class {
         let credentials = null;
         if (handler.name === "vless") {
           credentials = vlessIds;
-        } else if (handler.name === "trojan" || handler.name === "mandala") {
+        } else if (handler.name === "trojan" || handler.name === "mandala" || handler.name === "ss") {
           credentials = password;
         }
         const result = await handler.validator(chunk, credentials);
@@ -1640,7 +1640,14 @@ async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressR
   }
 }
 
-var protocolManager = new ProtocolManager().register("vless", processVlessHeader).register("trojan", parseTrojanHeader).register("mandala", parseMandalaHeader).register("socks5", parseSocks5Header).register("ss", parseShadowsocksHeader);
+var ssProtocolHandler = async (buffer, password) => {
+  const resGcm = await parseShadowsocksHeader(buffer, password, "aes-256-gcm");
+  if (!resGcm.hasError) {
+    return resGcm;
+  }
+  return await parseShadowsocksHeader(buffer, password, "none");
+};
+var protocolManager = new ProtocolManager().register("vless", processVlessHeader).register("trojan", parseTrojanHeader).register("mandala", parseMandalaHeader).register("socks5", parseSocks5Header).register("ss", ssProtocolHandler);
 function concatUint8(a, b) {
   const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
   const res = new Uint8Array(a.length + bArr.length);
