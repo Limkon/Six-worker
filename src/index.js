@@ -2,10 +2,9 @@
 /**
  * 文件名: src/index.js
  * 修复说明: 
- * 1. [Fix] 增加对 ctx.waitUntil 的安全检查，修复 "Cannot read properties of undefined (reading 'bind')" 错误。
- * 2. [Fix] 修复 proxyUrl 函数中端口丢失的问题 (hostname -> host)。
- * 3. [Fix] 修复 XHTTP 路径匹配的大小写敏感问题。
- * 4. [Refactor] 解决 proxyUrl 函数内的变量名遮蔽问题。
+ * 1. [Fix] 修复 XHTTP 路径匹配问题：自动去除请求路径末尾的 '/'，解决 "/8fee08ee/" 匹配不到 "/8fee08ee" 的 404 错误。
+ * 2. [Fix] 修复 XHTTP Content-Type 匹配问题：使用 .includes() 支持 'application/grpc-web' 等变体。
+ * 3. [保留] 包含之前的所有安全修复 (waitUntil, proxyUrl 端口修复等)。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -25,7 +24,6 @@ function safeWaitUntil(ctx, promise) {
     if (ctx && typeof ctx.waitUntil === 'function') {
         ctx.waitUntil(promise);
     } else {
-        // 如果环境不支持 waitUntil，则仅捕获错误防止未处理的 Promise 拒绝，但不阻塞
         Promise.resolve(promise).catch(e => console.error('[Background Task Error]:', e));
     }
 }
@@ -40,13 +38,9 @@ async function handlePasswordSetup(request, env, ctx) {
         
         cleanConfigCache();
 
-        // [新增] 首次设置完成后，触发 WebDAV 推送 (First Deployment)
         try {
             const appCtx = await initializeContext(request, env);
-            // [Fix] 使用安全包装
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
-            
-            // 首次设置强制推送
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
             console.log('[Setup] First time setup completed, WebDAV push triggered.');
         } catch (e) {
@@ -61,11 +55,8 @@ async function handlePasswordSetup(request, env, ctx) {
 async function proxyUrl(urlStr, targetUrlObj, request) {
     if (!urlStr) return null;
     try {
-        // [Refactor] 重命名内部变量，避免与函数名冲突
         const parsedUrl = new URL(urlStr);
         const path = parsedUrl.pathname === '/' ? '' : parsedUrl.pathname;
-        
-        // [Fix] 使用 .host 而不是 .hostname，以保留端口号 (如果存在)
         const newUrl = parsedUrl.protocol + '//' + parsedUrl.host + path + targetUrlObj.pathname + targetUrlObj.search;
         return fetch(new Request(newUrl, request));
     } catch (e) { return null; }
@@ -75,9 +66,6 @@ export default {
     async fetch(request, env, ctx) {
         try {
             const context = await initializeContext(request, env);
-            
-            // [Critical Fix] 修复 TypeError: Cannot read properties of undefined (reading 'bind')
-            // 如果 ctx.waitUntil 不存在，给 context 挂载一个安全的兜底函数
             context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
             const url = new URL(request.url);
@@ -117,26 +105,30 @@ export default {
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
-            // [新增] 域名自动发现与推送触发
+            // 域名自动发现
             if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     lastSavedDomain = hostName; 
-                    // [Fix] 使用 context.waitUntil (已在上方安全封装)
                     context.waitUntil(env.KV.put('SAVED_DOMAIN', hostName));
-                    
-                    // 当域名发生变更(或首次发现)时，尝试触发推送
                     context.waitUntil(executeWebDavPush(env, context, false));
                 }
             }
 
-            // XHTTP
-            // [Fix] 强制转换为小写，确保路径匹配在 UUID 含有大写字母时也能正常工作
+            // ================== XHTTP Logic Start ==================
             const xhttpPath = context.userID ? `/${context.userID.substring(0, 8).toLowerCase()}` : null;
-            const isXhttpHeader = request.headers.get('Content-Type') === 'application/grpc';
-            const isXhttpPath = xhttpPath && path === xhttpPath;
+            
+            // [Fix] Content-Type 模糊匹配 (兼容 application/grpc-web)
+            const reqContentType = request.headers.get('Content-Type') || '';
+            const isXhttpHeader = reqContentType.includes('application/grpc');
+            
+            // [Fix] 路径去尾部斜杠匹配 (兼容 /8fee08ee/ 和 /8fee08ee)
+            // 如果 path 是 /abcd/，转换成 /abcd 进行比对
+            const cleanPath = (path.endsWith('/') && path.length > 1) ? path.slice(0, -1) : path;
+            const isXhttpPath = xhttpPath && cleanPath === xhttpPath;
 
             if (request.method === 'POST' && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
                 if (context.enableXhttp) {
+                    // 只要路径匹配 OR 头信息匹配，就尝试处理
                     if (isXhttpPath || isXhttpHeader) {
                         const r = await handleXhttpClient(request, context);
                         if (r) {
@@ -164,6 +156,7 @@ export default {
                     return new Response('XHTTP protocol is disabled.', { status: 403 });
                 }
             }
+            // ================== XHTTP Logic End ==================
 
             // Management Pages
             if (isManagementRoute) {
@@ -222,7 +215,6 @@ export default {
         }
     },
     
-    // Scheduled Handler
     async scheduled(event, env, ctx) {
         // Scheduled task logic (if any)
     }
