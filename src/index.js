@@ -2,8 +2,8 @@
 /**
  * 文件名: src/index.js
  * 修复说明: 
- * 1. [Fix] 增加对 ctx.waitUntil 的安全检查，修复 "Cannot read properties of undefined (reading 'bind')" 错误。
- * 2. [保留] 之前的所有逻辑（WebDAV 推送、自动发现域名、密码设置等）。
+ * 1. [Fix] 增加对 ctx.waitUntil 的安全检查。
+ * 2. [Fix] 修复 proxyUrl 中 fetch 未使用 await 导致无法捕获异常的问题。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -23,7 +23,6 @@ function safeWaitUntil(ctx, promise) {
     if (ctx && typeof ctx.waitUntil === 'function') {
         ctx.waitUntil(promise);
     } else {
-        // 如果环境不支持 waitUntil，则仅捕获错误防止未处理的 Promise 拒绝，但不阻塞
         Promise.resolve(promise).catch(e => console.error('[Background Task Error]:', e));
     }
 }
@@ -38,13 +37,9 @@ async function handlePasswordSetup(request, env, ctx) {
         
         cleanConfigCache();
 
-        // [新增] 首次设置完成后，触发 WebDAV 推送 (First Deployment)
         try {
             const appCtx = await initializeContext(request, env);
-            // [Fix] 使用安全包装
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
-            
-            // 首次设置强制推送
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
             console.log('[Setup] First time setup completed, WebDAV push triggered.');
         } catch (e) {
@@ -62,8 +57,12 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
         const proxyUrl = new URL(urlStr);
         const path = proxyUrl.pathname === '/' ? '' : proxyUrl.pathname;
         const newUrl = proxyUrl.protocol + '//' + proxyUrl.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
-        return fetch(new Request(newUrl, request));
-    } catch (e) { return null; }
+        // [修复] 必须加 await，否则 fetch 的异步错误（如循环请求）无法被 catch 捕获
+        return await fetch(new Request(newUrl, request));
+    } catch (e) { 
+        console.error(`[ProxyUrl] Failed to proxy to ${urlStr}:`, e);
+        return null; 
+    }
 }
 
 export default {
@@ -71,8 +70,6 @@ export default {
         try {
             const context = await initializeContext(request, env);
             
-            // [Critical Fix] 修复 TypeError: Cannot read properties of undefined (reading 'bind')
-            // 如果 ctx.waitUntil 不存在，给 context 挂载一个安全的兜底函数
             context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
             const url = new URL(request.url);
@@ -112,14 +109,10 @@ export default {
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
-            // [新增] 域名自动发现与推送触发
             if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     lastSavedDomain = hostName; 
-                    // [Fix] 使用 context.waitUntil (已在上方安全封装)
                     context.waitUntil(env.KV.put('SAVED_DOMAIN', hostName));
-                    
-                    // 当域名发生变更(或首次发现)时，尝试触发推送
                     context.waitUntil(executeWebDavPush(env, context, false));
                 }
             }
