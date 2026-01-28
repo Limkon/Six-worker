@@ -3,7 +3,9 @@
  * 文件名: src/index.js
  * 修复说明: 
  * 1. [Fix] 增加对 ctx.waitUntil 的安全检查，修复 "Cannot read properties of undefined (reading 'bind')" 错误。
- * 2. [保留] 之前的所有逻辑（WebDAV 推送、自动发现域名、密码设置等）。
+ * 2. [Fix] 修复 proxyUrl 函数中端口丢失的问题 (hostname -> host)。
+ * 3. [Fix] 修复 XHTTP 路径匹配的大小写敏感问题。
+ * 4. [Refactor] 解决 proxyUrl 函数内的变量名遮蔽问题。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -59,9 +61,12 @@ async function handlePasswordSetup(request, env, ctx) {
 async function proxyUrl(urlStr, targetUrlObj, request) {
     if (!urlStr) return null;
     try {
-        const proxyUrl = new URL(urlStr);
-        const path = proxyUrl.pathname === '/' ? '' : proxyUrl.pathname;
-        const newUrl = proxyUrl.protocol + '//' + proxyUrl.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
+        // [Refactor] 重命名内部变量，避免与函数名冲突
+        const parsedUrl = new URL(urlStr);
+        const path = parsedUrl.pathname === '/' ? '' : parsedUrl.pathname;
+        
+        // [Fix] 使用 .host 而不是 .hostname，以保留端口号 (如果存在)
+        const newUrl = parsedUrl.protocol + '//' + parsedUrl.host + path + targetUrlObj.pathname + targetUrlObj.search;
         return fetch(new Request(newUrl, request));
     } catch (e) { return null; }
 }
@@ -125,7 +130,8 @@ export default {
             }
 
             // XHTTP
-            const xhttpPath = context.userID ? `/${context.userID.substring(0, 8)}` : null;
+            // [Fix] 强制转换为小写，确保路径匹配在 UUID 含有大写字母时也能正常工作
+            const xhttpPath = context.userID ? `/${context.userID.substring(0, 8).toLowerCase()}` : null;
             const isXhttpHeader = request.headers.get('Content-Type') === 'application/grpc';
             const isXhttpPath = xhttpPath && path === xhttpPath;
 
