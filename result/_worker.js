@@ -3310,7 +3310,15 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
     const proxyUrl2 = new URL(urlStr);
     const path = proxyUrl2.pathname === "/" ? "" : proxyUrl2.pathname;
     const newUrl = proxyUrl2.protocol + "//" + proxyUrl2.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
-    return fetch(new Request(newUrl, request));
+    const newHeaders = new Headers(request.headers);
+    newHeaders.delete("Host");
+    newHeaders.delete("Referer");
+    return fetch(new Request(newUrl, {
+      method: request.method,
+      headers: newHeaders,
+      body: request.body,
+      redirect: "follow"
+    }));
   } catch (e) {
     return null;
   }
@@ -3353,28 +3361,26 @@ var index_default = {
           context.waitUntil(executeWebDavPush(env, context, false));
         }
       }
-      if (request.method === "POST" && !isApiPostPath && url.searchParams.get("auth") !== "login" && path !== "/") {
-        if (context.enableXhttp) {
-          const r = await handleXhttpClient(request, context);
-          if (r) {
-            context.waitUntil(r.closed);
-            return new Response(r.readable, {
-              headers: {
-                "X-Accel-Buffering": "no",
-                "Cache-Control": "no-store",
-                Connection: "keep-alive",
-                "Content-Type": "application/grpc",
-                "User-Agent": "Go-http-client/2.0"
-              }
-            });
-          }
-          if (!isManagementRoute) {
-            const contentType = request.headers.get("content-type") || "";
-            if (contentType.includes("application/x-www-form-urlencoded") || contentType.includes("multipart/form-data")) {
-              return new Response('Error: Detected Form submission on XHTTP path. Missing "?auth=login" param?', { status: 400 });
+      if (request.method === "POST" && context.enableXhttp && !isApiPostPath && url.searchParams.get("auth") !== "login" && path !== "/") {
+        const r = await handleXhttpClient(request, context);
+        if (r) {
+          context.waitUntil(r.closed);
+          return new Response(r.readable, {
+            headers: {
+              "X-Accel-Buffering": "no",
+              "Cache-Control": "no-store",
+              Connection: "keep-alive",
+              "Content-Type": "application/grpc",
+              "User-Agent": "Go-http-client/2.0"
             }
-            return new Response("Internal Server Error (XHTTP Handshake Failed)", { status: 500 });
+          });
+        }
+        if (!isManagementRoute) {
+          const contentType = request.headers.get("content-type") || "";
+          if (contentType.includes("application/x-www-form-urlencoded") || contentType.includes("multipart/form-data")) {
+            return new Response('Error: Detected Form submission on XHTTP path. Missing "?auth=login" param?', { status: 400 });
           }
+          return new Response("Internal Server Error (XHTTP Handshake Failed)", { status: 500 });
         }
       }
       if (isManagementRoute) {
