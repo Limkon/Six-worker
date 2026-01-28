@@ -16,14 +16,15 @@ export class ProtocolManager {
 
         for (const handler of this.handlers) {
             try {
-                // [修改部分] 增加 mandala 的凭据分发逻辑
+                // [修改部分] 增加 ss 的凭据分发逻辑
                 let credentials = null;
                 if (handler.name === 'vless') {
                     credentials = vlessIds;
-                } else if (handler.name === 'trojan' || handler.name === 'mandala') { // <--- 增加 mandala
+                } else if (handler.name === 'trojan' || handler.name === 'mandala' || handler.name === 'ss') { // <--- [Fix] 增加 ss
                     credentials = password;
                 }
 
+                // 调用验证器 (chunk, password)
                 const result = await handler.validator(chunk, credentials);
                 
                 if (!result.hasError) {
