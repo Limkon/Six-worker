@@ -2,8 +2,9 @@
 /**
  * 文件名: src/index.js
  * 修复说明: 
- * 1. [Fix] 增加对 ctx.waitUntil 的安全检查。
- * 2. [Fix] 修复 proxyUrl 中 fetch 未使用 await 导致无法捕获异常的问题。
+ * 1. [Fix] 修正 XHTTP 路径匹配逻辑，由 '===' 改为 'startsWith'，兼容客户端追加的 UUID/StreamID 后缀。
+ * 2. [Feature] 允许在 Subscription 路径上处理 XHTTP POST 请求，解决路径不匹配导致的 404 问题。
+ * 3. [Fix] 优化 XHTTP 失败时的错误码，由 500 改为 400。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -18,7 +19,6 @@ import { getPasswordSetupHtml, getLoginHtml } from './templates/auth.js';
 
 let lastSavedDomain = '';
 
-// [辅助函数] 安全执行 waitUntil，防止 crash
 function safeWaitUntil(ctx, promise) {
     if (ctx && typeof ctx.waitUntil === 'function') {
         ctx.waitUntil(promise);
@@ -57,19 +57,14 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
         const proxyUrl = new URL(urlStr);
         const path = proxyUrl.pathname === '/' ? '' : proxyUrl.pathname;
         const newUrl = proxyUrl.protocol + '//' + proxyUrl.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
-        // [修复] 必须加 await，否则 fetch 的异步错误（如循环请求）无法被 catch 捕获
         return await fetch(new Request(newUrl, request));
-    } catch (e) { 
-        console.error(`[ProxyUrl] Failed to proxy to ${urlStr}:`, e);
-        return null; 
-    }
+    } catch (e) { return null; }
 }
 
 export default {
     async fetch(request, env, ctx) {
         try {
             const context = await initializeContext(request, env);
-            
             context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
             const url = new URL(request.url);
@@ -92,7 +87,7 @@ export default {
                 return await handlePasswordSetup(request, env, ctx);
             }
 
-            // Route ID
+            // Route ID & Paths
             const superPassword = CONSTANTS.SUPER_PASSWORD;
             const dynamicID = context.dynamicUUID.toLowerCase();
             const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
@@ -117,10 +112,14 @@ export default {
                 }
             }
 
-            // XHTTP
+            // --- XHTTP Logic (Fixed) ---
             const xhttpPath = context.userID ? `/${context.userID.substring(0, 8)}` : null;
             const isXhttpHeader = request.headers.get('Content-Type') === 'application/grpc';
-            const isXhttpPath = xhttpPath && path === xhttpPath;
+            
+            // [Fix] 关键修正：
+            // 1. 使用 startsWith 允许路径后缀 (如 /uuid/0)
+            // 2. 允许 isSubRoute + POST 也是 XHTTP 请求 (日志显示你的请求路径匹配的是 hash)
+            const isXhttpPath = (xhttpPath && path.startsWith(xhttpPath)) || (isSubRoute && request.method === 'POST');
 
             if (request.method === 'POST' && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
                 if (context.enableXhttp) {
@@ -138,7 +137,8 @@ export default {
                                 }
                             });
                         }
-                        return new Response('Internal Server Error', { status: 500 });
+                        // [Fix] 协议握手失败返回 400 而不是 500
+                        return new Response('Invalid XHTTP Protocol or Header', { status: 400 });
                     }
                     
                     if (!isManagementRoute) {
@@ -209,8 +209,6 @@ export default {
         }
     },
     
-    // Scheduled Handler
     async scheduled(event, env, ctx) {
-        // Scheduled task logic (if any)
     }
 };
