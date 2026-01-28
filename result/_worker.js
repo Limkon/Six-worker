@@ -984,10 +984,16 @@ async function resolveToIPv6(domain, dnsServer) {
       return null;
     }
   }
-  if (!prefix.endsWith(":")) prefix += ":";
-  const synthesizedIP = prefix + ipv4;
-  dnsCache.set(cacheKey, { ip: synthesizedIP, expires: Date.now() + 6e4 });
-  return synthesizedIP;
+  const parts = ipv4.split(".").map(Number);
+  if (parts.length === 4) {
+    if (!prefix.endsWith(":")) prefix += ":";
+    const part1 = (parts[0] << 8 | parts[1]).toString(16).padStart(4, "0");
+    const part2 = (parts[2] << 8 | parts[3]).toString(16).padStart(4, "0");
+    const synthesizedIP = `${prefix}${part1}:${part2}`;
+    dnsCache.set(cacheKey, { ip: synthesizedIP, expires: Date.now() + 6e4 });
+    return synthesizedIP;
+  }
+  return null;
 }
 
 var CACHE_TTL = 10 * 60 * 1e3;
@@ -1588,6 +1594,10 @@ async function handleWebSocketRequest(request, ctx) {
         return;
       }
       headerBuffer = concatUint8(headerBuffer, chunkArr);
+      if (headerBuffer.length > MAX_HEADER_BUFFER) {
+        clearTimeout(timeoutTimer);
+        throw new Error(`Header buffer limit exceeded (${headerBuffer.length} > ${MAX_HEADER_BUFFER})`);
+      }
       if (socks5State < 2) {
         const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
         if (error) {
