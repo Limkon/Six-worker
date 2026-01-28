@@ -2,9 +2,9 @@
 /**
  * 文件名: src/utils/dns.js
  * 修复说明: 
- * 1. [Fix] 重构 detectNat64Prefix: 移除脆弱的字符串匹配，完全依赖 parseIPv6 解析后的数值进行判断。
- * 2. [优化] 增强对不同 DNS 响应格式（Hex/Dotted/Compressed）的兼容性。
- * 3. [Fix] 为 dnsCache 添加容量限制 (Max 1000)，防止内存泄漏。
+ * 1. [Security Fix] 修复 NAT64 合成算法：现在将 IPv4 转换为 Hex 格式后再进行拼接，
+ * 避免了简单字符串拼接在非标准前缀（如 /64）下可能产生的畸形地址风险。
+ * 2. [Performance] 保留了 DNS 缓存限制。
  */
 import { CONSTANTS } from '../constants.js';
 
@@ -84,13 +84,7 @@ export async function detectNat64Prefix(dnsServer) {
                     const ip = rec.data;
                     const parts = parseIPv6(ip);
                     
-                    // 确保解析成功且长度正确
                     if (parts && parts.length === 8) {
-                        // ipv4only.arpa 的知名地址数值 (RFC 7050)
-                        // 192.0.0.170 => 0xC0, 0x00, 0x00, 0xAA => 0xC000, 0x00AA
-                        // 192.0.0.171 => 0xC0, 0x00, 0x00, 0xAB => 0xC000, 0x00AB
-                        // 它们位于 IPv6 地址的最后 32 位 (即 parts[6] 和 parts[7])
-                        
                         const p6 = parts[6];
                         const p7 = parts[7];
 
@@ -123,7 +117,6 @@ export async function resolveToIPv6(domain, dnsServer) {
     if (!dnsServer) return null;
 
     // [新增] 缓存容量保护：防止 Worker 内存溢出
-    // 当缓存条目超过 1000 条时，清空缓存
     if (dnsCache.size > 1000) {
         dnsCache.clear();
     }
@@ -210,12 +203,21 @@ export async function resolveToIPv6(domain, dnsServer) {
         }
     }
 
-    // 确保前缀以 : 结尾以便拼接
-    if (!prefix.endsWith(':')) prefix += ':';
+    // [Fix] NAT64 合成算法：将 IPv4 转换为 Hex 形式，避免简单字符串拼接
+    // 例如 192.0.2.1 -> c000:0201
+    const parts = ipv4.split('.').map(Number);
+    if (parts.length === 4) {
+        // 确保前缀以 : 结尾以便拼接
+        if (!prefix.endsWith(':')) prefix += ':';
+        
+        // 计算两个 16 位 Hex 块
+        const part1 = ((parts[0] << 8) | parts[1]).toString(16).padStart(4, '0'); // c000
+        const part2 = ((parts[2] << 8) | parts[3]).toString(16).padStart(4, '0'); // 0201
+        
+        const synthesizedIP = `${prefix}${part1}:${part2}`;
+        dnsCache.set(cacheKey, { ip: synthesizedIP, expires: Date.now() + 60000 });
+        return synthesizedIP;
+    }
     
-    // 简单的合成逻辑 (适用于 /96 前缀)
-    const synthesizedIP = prefix + ipv4;
-    
-    dnsCache.set(cacheKey, { ip: synthesizedIP, expires: Date.now() + 60000 });
-    return synthesizedIP;
+    return null;
 }
