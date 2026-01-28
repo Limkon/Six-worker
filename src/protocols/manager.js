@@ -16,12 +16,11 @@ export class ProtocolManager {
 
         for (const handler of this.handlers) {
             try {
+                // [修改部分] 增加 mandala 的凭据分发逻辑
                 let credentials = null;
                 if (handler.name === 'vless') {
                     credentials = vlessIds;
-                } else if (handler.name === 'trojan' || handler.name === 'mandala' || handler.name === 'ss') { 
-                    // [Critical Fix] 必须在这里加上 || handler.name === 'ss'
-                    // 否则 Shadowsocks 拿不到密码，必然验证失败
+                } else if (handler.name === 'trojan' || handler.name === 'mandala') { // <--- 增加 mandala
                     credentials = password;
                 }
 
