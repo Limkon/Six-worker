@@ -2,8 +2,9 @@
 /**
  * 文件名: src/index.js
  * 修复说明: 
- * 1. [Fix] 增加对 ctx.waitUntil 的安全检查，修复 "Cannot read properties of undefined (reading 'bind')" 错误。
- * 2. [保留] 之前的所有逻辑（WebDAV 推送、自动发现域名、密码设置等）。
+ * 1. [Fix] 移除 XHTTP 的严格路径/Header检查，恢复为 Five-worker 的宽松模式，
+ * 只要 enableXhttp 开启且为 POST 请求即尝试处理。
+ * 2. 保留原有的 ctx.waitUntil 安全检查修复。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -18,12 +19,10 @@ import { getPasswordSetupHtml, getLoginHtml } from './templates/auth.js';
 
 let lastSavedDomain = '';
 
-// [辅助函数] 安全执行 waitUntil，防止 crash
 function safeWaitUntil(ctx, promise) {
     if (ctx && typeof ctx.waitUntil === 'function') {
         ctx.waitUntil(promise);
     } else {
-        // 如果环境不支持 waitUntil，则仅捕获错误防止未处理的 Promise 拒绝，但不阻塞
         Promise.resolve(promise).catch(e => console.error('[Background Task Error]:', e));
     }
 }
@@ -38,13 +37,10 @@ async function handlePasswordSetup(request, env, ctx) {
         
         cleanConfigCache();
 
-        // [新增] 首次设置完成后，触发 WebDAV 推送 (First Deployment)
         try {
             const appCtx = await initializeContext(request, env);
-            // [Fix] 使用安全包装
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
             
-            // 首次设置强制推送
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
             console.log('[Setup] First time setup completed, WebDAV push triggered.');
         } catch (e) {
@@ -71,8 +67,6 @@ export default {
         try {
             const context = await initializeContext(request, env);
             
-            // [Critical Fix] 修复 TypeError: Cannot read properties of undefined (reading 'bind')
-            // 如果 ctx.waitUntil 不存在，给 context 挂载一个安全的兜底函数
             context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
             const url = new URL(request.url);
@@ -112,51 +106,45 @@ export default {
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
-            // [新增] 域名自动发现与推送触发
+            // 域名自动发现
             if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     lastSavedDomain = hostName; 
-                    // [Fix] 使用 context.waitUntil (已在上方安全封装)
                     context.waitUntil(env.KV.put('SAVED_DOMAIN', hostName));
-                    
-                    // 当域名发生变更(或首次发现)时，尝试触发推送
                     context.waitUntil(executeWebDavPush(env, context, false));
                 }
             }
 
-            // XHTTP
-            const xhttpPath = context.userID ? `/${context.userID.substring(0, 8)}` : null;
-            const isXhttpHeader = request.headers.get('Content-Type') === 'application/grpc';
-            const isXhttpPath = xhttpPath && path === xhttpPath;
-
+            // [Modified] XHTTP 拦截逻辑修正
+            // 不再强制校验 path 或 header，与 Five-worker 保持一致
             if (request.method === 'POST' && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
                 if (context.enableXhttp) {
-                    if (isXhttpPath || isXhttpHeader) {
-                        const r = await handleXhttpClient(request, context);
-                        if (r) {
-                            context.waitUntil(r.closed);
-                            return new Response(r.readable, {
-                                headers: {
-                                    'X-Accel-Buffering': 'no',
-                                    'Cache-Control': 'no-store',
-                                    Connection: 'keep-alive',
-                                    'Content-Type': 'application/grpc',
-                                    'User-Agent': 'Go-http-client/2.0'
-                                }
-                            });
-                        }
-                        return new Response('Internal Server Error', { status: 500 });
+                    // 尝试作为 XHTTP 处理
+                    const r = await handleXhttpClient(request, context);
+                    if (r) {
+                        context.waitUntil(r.closed);
+                        return new Response(r.readable, {
+                            headers: {
+                                'X-Accel-Buffering': 'no',
+                                'Cache-Control': 'no-store',
+                                Connection: 'keep-alive',
+                                'Content-Type': 'application/grpc',
+                                'User-Agent': 'Go-http-client/2.0'
+                            }
+                        });
                     }
                     
+                    // 如果开启了 XHTTP 但握手失败（返回 null），且不是管理路由，则认为是错误请求
+                    // 这样可以拦截那些意图登录但被 XHTTP 捕获的请求，或者无效的 XHTTP 请求
                     if (!isManagementRoute) {
                         const contentType = request.headers.get('content-type') || '';
                         if (contentType.includes('application/x-www-form-urlencoded') || contentType.includes('multipart/form-data')) {
-                            return new Response('Error: Detected Form submission on non-auth path.', { status: 400 });
+                            return new Response('Error: Detected Form submission on XHTTP path. Missing "?auth=login" param?', { status: 400 });
                         }
+                        return new Response('Internal Server Error (XHTTP Handshake Failed)', { status: 500 });
                     }
-                } else if (isXhttpPath || isXhttpHeader) {
-                    return new Response('XHTTP protocol is disabled.', { status: 403 });
                 }
+                // 如果 enableXhttp 为 false，则自然穿透到后续逻辑（虽然通常后续没有针对 POST 的处理除了 404）
             }
 
             // Management Pages
@@ -216,8 +204,6 @@ export default {
         }
     },
     
-    // Scheduled Handler
     async scheduled(event, env, ctx) {
-        // Scheduled task logic (if any)
     }
 };
