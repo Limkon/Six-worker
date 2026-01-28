@@ -537,101 +537,131 @@ async function processVlessHeader(vlessBuffer, expectedUserIDs) {
     return { hasError: true, message: "Invalid VLESS user" };
   }
   const optLength = buffer[17];
-  const command = buffer[18 + optLength];
-  let isUDP = command === 2;
-  if (command !== 1 && command !== 2) return { hasError: true, message: "Unsupported VLESS command: " + command };
-  const portIndex = 19 + optLength;
-  if (buffer.byteLength < portIndex + 2) return { hasError: true, message: "Buffer too short" };
-  const portRemote = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength).getUint16(portIndex, false);
+  const commandIndex = 18 + optLength;
+  if (commandIndex >= buffer.byteLength) return { hasError: true, message: "Buffer too short for command" };
+  const command = buffer[commandIndex];
+  const isUDP = command === 2;
+  if (command !== 1 && command !== 2) {
+    return { hasError: true, message: "Unsupported VLESS command: " + command };
+  }
+  const portIndex = commandIndex + 1;
+  if (buffer.byteLength < portIndex + 2) return { hasError: true, message: "Buffer too short for port" };
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  const portRemote = view.getUint16(portIndex, false);
   let addressIndex = portIndex + 2;
   const addressType = buffer[addressIndex];
   addressIndex++;
   let addressRemote = "";
   let addressLength = 0;
-  switch (addressType) {
-    case CONSTANTS.ADDRESS_TYPE_IPV4:
-      addressLength = 4;
-      addressRemote = buffer.subarray(addressIndex, addressIndex + 4).join(".");
-      break;
-    case CONSTANTS.ADDRESS_TYPE_URL:
-      addressLength = buffer[addressIndex];
-      addressIndex++;
-      addressRemote = textDecoder.decode(buffer.subarray(addressIndex, addressIndex + addressLength));
-      break;
-    case CONSTANTS.ADDRESS_TYPE_IPV6:
-      addressLength = 16;
-      const ipv6View = new DataView(buffer.buffer, buffer.byteOffset + addressIndex, 16);
-      const ipv6 = [];
-      for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2, false).toString(16));
-      addressRemote = "[" + ipv6.join(":") + "]";
-      break;
-    default:
-      return { hasError: true, message: "Invalid VLESS addressType: " + addressType };
+  try {
+    switch (addressType) {
+      case CONSTANTS.ADDRESS_TYPE_IPV4:
+        addressLength = 4;
+        addressRemote = buffer.subarray(addressIndex, addressIndex + 4).join(".");
+        break;
+      case CONSTANTS.ADDRESS_TYPE_URL:
+        addressLength = buffer[addressIndex];
+        addressIndex++;
+        addressRemote = textDecoder.decode(buffer.subarray(addressIndex, addressIndex + addressLength));
+        break;
+      case CONSTANTS.ADDRESS_TYPE_IPV6:
+        addressLength = 16;
+        const ipv6View = new DataView(buffer.buffer, buffer.byteOffset + addressIndex, 16);
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2, false).toString(16));
+        addressRemote = "[" + ipv6.join(":") + "]";
+        break;
+      default:
+        return { hasError: true, message: "Invalid VLESS addressType: " + addressType };
+    }
+  } catch (e) {
+    return { hasError: true, message: "Address parse failed" };
   }
   if (!addressRemote) return { hasError: true, message: "VLESS address is empty" };
-  return { hasError: false, addressRemote, addressType, portRemote, isUDP, rawDataIndex: addressIndex + addressLength, cloudflareVersion: new Uint8Array([version]) };
+  const rawDataIndex = addressIndex + addressLength;
+  return {
+    hasError: false,
+    addressRemote,
+    addressType,
+    portRemote,
+    isUDP,
+    rawDataIndex,
+    cloudflareVersion: new Uint8Array([version])
+  };
 }
 
 var trojanHashCache =   new Map();
 var MAX_CACHE_SIZE = 100;
+function constantTimeEqual(a, b) {
+  if (a.byteLength !== b.byteLength) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.byteLength; i++) {
+    mismatch |= a[i] ^ b[i];
+  }
+  return mismatch === 0;
+}
 async function parseTrojanHeader(trojanBuffer, password) {
   if (trojanBuffer.byteLength < 58) return { hasError: true, message: "Trojan buffer too short." };
   const buffer = trojanBuffer instanceof Uint8Array ? trojanBuffer : new Uint8Array(trojanBuffer);
-  const trojanView = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  let expectedHash = trojanHashCache.get(password);
-  if (expectedHash) {
+  let expectedHashBytes = trojanHashCache.get(password);
+  if (expectedHashBytes) {
     trojanHashCache.delete(password);
-    trojanHashCache.set(password, expectedHash);
+    trojanHashCache.set(password, expectedHashBytes);
   } else {
-    expectedHash = sha224Hash(String(password));
+    const hashHex = sha224Hash(String(password));
+    expectedHashBytes = textEncoder.encode(hashHex);
     if (trojanHashCache.size >= MAX_CACHE_SIZE) {
       const oldestKey = trojanHashCache.keys().next().value;
       trojanHashCache.delete(oldestKey);
     }
-    trojanHashCache.set(password, expectedHash);
+    trojanHashCache.set(password, expectedHashBytes);
   }
-  let receivedHash;
-  try {
-    receivedHash = textDecoder.decode(buffer.subarray(0, 56));
-  } catch (e) {
-    return { hasError: true, message: "Failed to decode client hash." };
+  const receivedHashBytes = buffer.subarray(0, 56);
+  if (!constantTimeEqual(receivedHashBytes, expectedHashBytes)) {
+    return { hasError: true, message: "Invalid Trojan password." };
   }
-  if (receivedHash !== expectedHash) return { hasError: true, message: "Invalid Trojan password." };
-  if (trojanView.getUint16(56) !== 3338) return { hasError: true, message: "Invalid Trojan header" };
+  if (buffer[56] !== 13 || buffer[57] !== 10) {
+    return { hasError: true, message: "Invalid Trojan header (Missing CRLF)" };
+  }
   const requestData = buffer.subarray(58);
   if (requestData.byteLength < 4) return { hasError: true, message: "Trojan request too short." };
   const requestView = new DataView(requestData.buffer, requestData.byteOffset, requestData.byteLength);
-  const command = requestView.getUint8(0);
+  const command = requestData[0];
   const isUDP = command === 3;
   if (command !== 1 && !isUDP) {
     return { hasError: true, message: "Unsupported Trojan cmd: " + command };
   }
-  const atyp = requestView.getUint8(1);
+  const atyp = requestData[1];
   let host, port, addressEndIndex = 0;
-  switch (atyp) {
-    case CONSTANTS.ADDRESS_TYPE_IPV4:
-      addressEndIndex = 2 + 4;
-      host = requestData.subarray(2, addressEndIndex).join(".");
-      break;
-    case CONSTANTS.ATYP_TROJAN_DOMAIN:
-      const domainLen = requestView.getUint8(2);
-      addressEndIndex = 3 + domainLen;
-      host = textDecoder.decode(requestData.subarray(3, addressEndIndex));
-      break;
-    case CONSTANTS.ATYP_TROJAN_IPV6:
-      addressEndIndex = 2 + 16;
-      const ipv6 = [];
-      for (let i = 0; i < 8; i++) ipv6.push(requestView.getUint16(2 + i * 2, false).toString(16));
-      host = "[" + ipv6.join(":") + "]";
-      break;
-    default:
-      return { hasError: true, message: "Invalid Trojan ATYP: " + atyp };
+  try {
+    switch (atyp) {
+      case CONSTANTS.ADDRESS_TYPE_IPV4:
+        addressEndIndex = 2 + 4;
+        host = requestData.subarray(2, addressEndIndex).join(".");
+        break;
+      case CONSTANTS.ATYP_TROJAN_DOMAIN:
+        const domainLen = requestData[2];
+        addressEndIndex = 3 + domainLen;
+        host = textDecoder.decode(requestData.subarray(3, addressEndIndex));
+        break;
+      case CONSTANTS.ATYP_TROJAN_IPV6:
+        addressEndIndex = 2 + 16;
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) ipv6.push(requestView.getUint16(2 + i * 2, false).toString(16));
+        host = "[" + ipv6.join(":") + "]";
+        break;
+      default:
+        return { hasError: true, message: "Invalid Trojan ATYP: " + atyp };
+    }
+  } catch (e) {
+    return { hasError: true, message: "Address decode failed" };
   }
   if (addressEndIndex + 2 > requestData.byteLength) return { hasError: true, message: "Buffer too short for port" };
   port = requestView.getUint16(addressEndIndex, false);
   const payloadStartIndex = addressEndIndex + 2;
-  if (requestData.byteLength < payloadStartIndex + 2 || requestView.getUint16(payloadStartIndex) !== 3338) {
-    return { hasError: true, message: "Trojan missing CRLF" };
+  if (requestData.byteLength < payloadStartIndex + 2) return { hasError: true, message: "Trojan missing payload CRLF" };
+  if (requestData[payloadStartIndex] !== 13 || requestData[payloadStartIndex + 1] !== 10) {
+    return { hasError: true, message: "Trojan missing payload CRLF" };
   }
   const rawClientData = requestData.subarray(payloadStartIndex + 2);
   return {
@@ -669,35 +699,40 @@ var parseAddressAndPort = (buffer, offset, addrType) => {
 
 var passwordHashCache =   new Map();
 var MAX_CACHE_SIZE2 = 100;
+function constantTimeEqual2(a, b) {
+  if (a.byteLength !== b.byteLength) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.byteLength; i++) {
+    mismatch |= a[i] ^ b[i];
+  }
+  return mismatch === 0;
+}
 async function parseMandalaHeader(mandalaBuffer, password) {
   if (mandalaBuffer.byteLength < 67) {
     return { hasError: true, message: "Mandala buffer too short" };
   }
   const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
   const salt = buffer.subarray(0, 4);
-  const decrypted = new Uint8Array(buffer.length - 4);
-  for (let i = 0; i < decrypted.length; i++) {
+  const decrypted = new Uint8Array(buffer.byteLength - 4);
+  const len = decrypted.length;
+  for (let i = 0; i < len; i++) {
     decrypted[i] = buffer[i + 4] ^ salt[i & 3];
   }
-  let expectedHash = passwordHashCache.get(password);
-  if (expectedHash) {
+  let expectedHashBytes = passwordHashCache.get(password);
+  if (expectedHashBytes) {
     passwordHashCache.delete(password);
-    passwordHashCache.set(password, expectedHash);
+    passwordHashCache.set(password, expectedHashBytes);
   } else {
-    expectedHash = sha224Hash(String(password));
+    const hashHex = sha224Hash(String(password));
+    expectedHashBytes = textEncoder.encode(hashHex);
     if (passwordHashCache.size >= MAX_CACHE_SIZE2) {
       const oldestKey = passwordHashCache.keys().next().value;
       passwordHashCache.delete(oldestKey);
     }
-    passwordHashCache.set(password, expectedHash);
+    passwordHashCache.set(password, expectedHashBytes);
   }
-  let receivedHash;
-  try {
-    receivedHash = textDecoder.decode(decrypted.subarray(0, 56));
-  } catch (e) {
-    return { hasError: true, message: "Mandala hash decode failed" };
-  }
-  if (receivedHash !== expectedHash) {
+  const receivedHashBytes = decrypted.subarray(0, 56);
+  if (!constantTimeEqual2(receivedHashBytes, expectedHashBytes)) {
     return { hasError: true, message: "Invalid Mandala Auth" };
   }
   const padLen = decrypted[56];
@@ -710,32 +745,39 @@ async function parseMandalaHeader(mandalaBuffer, password) {
   }
   cursor++;
   const atyp = decrypted[cursor];
-  const addrResult = parseAddressAndPort(decrypted.buffer, cursor + 1, atyp);
+  const addrResult = parseAddressAndPort(decrypted, cursor + 1, atyp);
   if (addrResult.hasError) return addrResult;
   const dataOffset = addrResult.dataOffset;
   if (dataOffset + 2 > decrypted.byteLength) return { hasError: true, message: "Buffer short for port" };
   const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
   const port = view.getUint16(dataOffset, false);
   const headerEnd = dataOffset + 2;
+  if (headerEnd + 2 > decrypted.byteLength) {
+    return { hasError: true, message: "Missing CRLF data" };
+  }
   if (decrypted[headerEnd] !== 13 || decrypted[headerEnd + 1] !== 10) {
     return { hasError: true, message: "Missing CRLF" };
   }
   let addressRemote = "";
-  switch (atyp) {
-    case CONSTANTS.ADDRESS_TYPE_IPV4:
-      addressRemote = addrResult.targetAddrBytes.join(".");
-      break;
-    case CONSTANTS.ATYP_SS_DOMAIN:
-      addressRemote = textDecoder.decode(addrResult.targetAddrBytes);
-      break;
-    case CONSTANTS.ATYP_SS_IPV6:
-      const ipv6 = [];
-      const v6View = new DataView(addrResult.targetAddrBytes.buffer, addrResult.targetAddrBytes.byteOffset, addrResult.targetAddrBytes.byteLength);
-      for (let i = 0; i < 8; i++) ipv6.push(v6View.getUint16(i * 2, false).toString(16));
-      addressRemote = "[" + ipv6.join(":") + "]";
-      break;
-    default:
-      return { hasError: true, message: "Unknown ATYP" };
+  try {
+    switch (atyp) {
+      case CONSTANTS.ADDRESS_TYPE_IPV4:
+        addressRemote = addrResult.targetAddrBytes.join(".");
+        break;
+      case CONSTANTS.ATYP_SS_DOMAIN:
+        addressRemote = textDecoder.decode(addrResult.targetAddrBytes);
+        break;
+      case CONSTANTS.ATYP_SS_IPV6:
+        const ipv6 = [];
+        const v6View = new DataView(addrResult.targetAddrBytes.buffer, addrResult.targetAddrBytes.byteOffset, addrResult.targetAddrBytes.byteLength);
+        for (let i = 0; i < 8; i++) ipv6.push(v6View.getUint16(i * 2, false).toString(16));
+        addressRemote = "[" + ipv6.join(":") + "]";
+        break;
+      default:
+        return { hasError: true, message: "Unknown ATYP" };
+    }
+  } catch (e) {
+    return { hasError: true, message: "Address decode failed" };
   }
   return {
     hasError: false,
@@ -797,42 +839,134 @@ async function parseSocks5Header(socksBuffer, offset = 0) {
   };
 }
 
-async function parseShadowsocksHeader(ssBuffer) {
+var AEAD_METHODS = {
+  "aes-256-gcm": { keyLen: 32, saltLen: 32, nonceLen: 12, tagLen: 16 },
+  "aes-128-gcm": { keyLen: 16, saltLen: 16, nonceLen: 12, tagLen: 16 }
+};
+var masterKeyCache =   new Map();
+async function hkdfSha1(salt, ikm, info, length) {
+  const key = await crypto.subtle.importKey("raw", ikm, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const prk = await crypto.subtle.sign("HMAC", key, salt);
+  const infoBuffer = new Uint8Array(info.length + 1 + 1);
+  infoBuffer.set(info, 0);
+  infoBuffer[info.length + 1] = 1;
+  const prkKey = await crypto.subtle.importKey("raw", prk, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const t1 = await crypto.subtle.sign("HMAC", prkKey, infoBuffer.slice(0, info.length + 1));
+  return t1.slice(0, length);
+}
+async function parseShadowsocksHeader(ssBuffer, password, method = "none") {
   const buffer = ssBuffer instanceof Uint8Array ? ssBuffer : new Uint8Array(ssBuffer);
-  if (buffer.byteLength < 4) return { hasError: true, message: "SS buffer too short" };
-  const addrType = buffer[0];
-  let offset = 1;
-  const addressInfo = parseAddressAndPort(buffer, offset, addrType);
-  if (addressInfo.hasError) return addressInfo;
-  if (addressInfo.dataOffset + 2 > buffer.byteLength) return { hasError: true, message: "SS buffer too short for port" };
-  const dataView = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  const port = dataView.getUint16(addressInfo.dataOffset, false);
-  let addressRemote = "";
-  switch (addrType) {
-    case CONSTANTS.ATYP_SS_IPV4:
-      addressRemote = addressInfo.targetAddrBytes.join(".");
-      break;
-    case CONSTANTS.ATYP_SS_DOMAIN:
-      addressRemote = textDecoder.decode(addressInfo.targetAddrBytes);
-      break;
-    case CONSTANTS.ATYP_SS_IPV6:
-      const ipv6 = [];
-      const addrBytesView = new DataView(addressInfo.targetAddrBytes.buffer, addressInfo.targetAddrBytes.byteOffset, addressInfo.targetAddrBytes.byteLength);
-      for (let i = 0; i < 8; i++) ipv6.push(addrBytesView.getUint16(i * 2, false).toString(16));
-      addressRemote = "[" + ipv6.join(":") + "]";
-      break;
-    default:
-      return { hasError: true, message: "Invalid SS ATYP: " + addrType };
+  if (method === "none" || !method) {
+    if (buffer.byteLength < 4) return { hasError: true, message: "SS buffer too short" };
+    const addrType2 = buffer[0];
+    const addressInfo2 = parseAddressAndPort(buffer, 1, addrType2);
+    if (addressInfo2.hasError) return addressInfo2;
+    if (addressInfo2.dataOffset + 2 > buffer.byteLength) return { hasError: true, message: "SS buffer too short for port" };
+    const dataView = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    const port2 = dataView.getUint16(addressInfo2.dataOffset, false);
+    const addressRemote2 = resolveAddressString(addrType2, addressInfo2.targetAddrBytes);
+    return {
+      hasError: false,
+      addressRemote: addressRemote2,
+      addressType: addrType2,
+      portRemote: port2,
+      rawClientData: buffer.subarray(addressInfo2.dataOffset + 2),
+      isUDP: false,
+      rawDataIndex: 0
+    };
   }
+  const cipher = AEAD_METHODS[method];
+  if (!cipher) {
+    return { hasError: true, message: `Unsupported cipher: ${method}` };
+  }
+  if (buffer.byteLength < cipher.saltLen) {
+    return { hasError: true, message: "SS buffer too short for Salt" };
+  }
+  const salt = buffer.subarray(0, cipher.saltLen);
+  const info = textEncoder.encode("ss-subkey");
+  let masterKeyBytes = masterKeyCache.get(password);
+  if (!masterKeyBytes) {
+    const passBuf = textEncoder.encode(password);
+    const hash = await crypto.subtle.digest("SHA-256", passBuf);
+    masterKeyBytes = new Uint8Array(hash);
+    masterKeyCache.set(password, masterKeyBytes);
+  }
+  const subKeyBytes = await hkdfSha1(salt, masterKeyBytes, info, cipher.keyLen);
+  const subKey = await crypto.subtle.importKey(
+    "raw",
+    subKeyBytes,
+    { name: "AES-GCM" },
+    false,
+    ["decrypt"]
+  );
+  const chunk0Len = 2 + cipher.tagLen;
+  const offset1 = cipher.saltLen + chunk0Len;
+  if (buffer.byteLength < offset1) return { hasError: true, message: "SS buffer too short for Chunk 0" };
+  const chunk0Enc = buffer.subarray(cipher.saltLen, offset1);
+  const nonce0 = new Uint8Array(cipher.nonceLen);
+  let decryptedLenBytes;
+  try {
+    decryptedLenBytes = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: nonce0 },
+      subKey,
+      chunk0Enc
+    );
+  } catch (e) {
+    return { hasError: true, message: "SS Decrypt Chunk 0 failed" };
+  }
+  const payloadLen = new DataView(decryptedLenBytes).getUint16(0, false) & 16383;
+  const chunk1TotalLen = payloadLen + cipher.tagLen;
+  const offset2 = offset1 + chunk1TotalLen;
+  if (buffer.byteLength < offset2) return { hasError: true, message: "SS buffer too short for Header Payload" };
+  const chunk1Enc = buffer.subarray(offset1, offset2);
+  const nonce1 = new Uint8Array(cipher.nonceLen);
+  nonce1[0] = 1;
+  let decryptedHeader;
+  try {
+    decryptedHeader = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: nonce1 },
+      subKey,
+      chunk1Enc
+    );
+  } catch (e) {
+    return { hasError: true, message: "SS Decrypt Header Payload failed" };
+  }
+  const headerBuffer = new Uint8Array(decryptedHeader);
+  const addrType = headerBuffer[0];
+  const addressInfo = parseAddressAndPort(headerBuffer, 1, addrType);
+  if (addressInfo.hasError) return addressInfo;
+  const portIndex = addressInfo.dataOffset;
+  if (portIndex + 2 > headerBuffer.byteLength) return { hasError: true, message: "SS Header too short" };
+  const port = new DataView(headerBuffer.buffer).getUint16(portIndex, false);
+  const addressRemote = resolveAddressString(addrType, addressInfo.targetAddrBytes);
   return {
     hasError: false,
     addressRemote,
     addressType: addrType,
     portRemote: port,
-    rawClientData: buffer.subarray(addressInfo.dataOffset + 2),
+    rawClientData: buffer.subarray(offset2),
     isUDP: false,
-    rawDataIndex: 0
+    cryptoState: {
+      method,
+      subKey,
+      nonceValue: 2
+    }
   };
+}
+function resolveAddressString(addrType, targetAddrBytes) {
+  switch (addrType) {
+    case CONSTANTS.ATYP_SS_IPV4:
+      return targetAddrBytes.join(".");
+    case CONSTANTS.ATYP_SS_DOMAIN:
+      return textDecoder.decode(targetAddrBytes);
+    case CONSTANTS.ATYP_SS_IPV6:
+      const ipv6 = [];
+      const v6View = new DataView(targetAddrBytes.buffer, targetAddrBytes.byteOffset, targetAddrBytes.byteLength);
+      for (let i = 0; i < 8; i++) ipv6.push(v6View.getUint16(i * 2, false).toString(16));
+      return "[" + ipv6.join(":") + "]";
+    default:
+      return "";
+  }
 }
 
 import { connect } from "cloudflare:sockets";
