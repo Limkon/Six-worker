@@ -841,9 +841,28 @@ async function parseSocks5Header(socksBuffer, offset = 0) {
 
 var AEAD_METHODS = {
   "aes-256-gcm": { keyLen: 32, saltLen: 32, nonceLen: 12, tagLen: 16 },
-  "aes-128-gcm": { keyLen: 16, saltLen: 16, nonceLen: 12, tagLen: 16 }
+  "aes-128-gcm": { keyLen: 16, saltLen: 16, nonceLen: 12, tagLen: 16 },
+  "chacha20-poly1305": { keyLen: 32, saltLen: 32, nonceLen: 12, tagLen: 16 }
 };
 var masterKeyCache =   new Map();
+async function evpBytesToKey(password, keyLen) {
+  const passBytes = textEncoder.encode(password);
+  let key = new Uint8Array(0);
+  let prevHash = new Uint8Array(0);
+  while (key.length < keyLen) {
+    const data = new Uint8Array(prevHash.length + passBytes.length);
+    data.set(prevHash, 0);
+    data.set(passBytes, prevHash.length);
+    const hashBuffer = await crypto.subtle.digest("MD5", data);
+    const hash = new Uint8Array(hashBuffer);
+    const newKey = new Uint8Array(key.length + hash.length);
+    newKey.set(key, 0);
+    newKey.set(hash, key.length);
+    key = newKey;
+    prevHash = hash;
+  }
+  return key.slice(0, keyLen);
+}
 async function hkdfSha1(salt, ikm, info, length) {
   const key = await crypto.subtle.importKey("raw", ikm, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
   const prk = await crypto.subtle.sign("HMAC", key, salt);
@@ -883,22 +902,26 @@ async function parseShadowsocksHeader(ssBuffer, password, method = "none") {
     return { hasError: true, message: "SS buffer too short for Salt" };
   }
   const salt = buffer.subarray(0, cipher.saltLen);
-  const info = textEncoder.encode("ss-subkey");
   let masterKeyBytes = masterKeyCache.get(password);
   if (!masterKeyBytes) {
-    const passBuf = textEncoder.encode(password);
-    const hash = await crypto.subtle.digest("SHA-256", passBuf);
-    masterKeyBytes = new Uint8Array(hash);
+    masterKeyBytes = await evpBytesToKey(password, cipher.keyLen);
     masterKeyCache.set(password, masterKeyBytes);
   }
+  const info = textEncoder.encode("ss-subkey");
   const subKeyBytes = await hkdfSha1(salt, masterKeyBytes, info, cipher.keyLen);
-  const subKey = await crypto.subtle.importKey(
-    "raw",
-    subKeyBytes,
-    { name: "AES-GCM" },
-    false,
-    ["decrypt"]
-  );
+  const algoName = method.includes("aes") ? "AES-GCM" : "ChaCha20-Poly1305";
+  let subKey;
+  try {
+    subKey = await crypto.subtle.importKey(
+      "raw",
+      subKeyBytes,
+      { name: algoName },
+      false,
+      ["decrypt"]
+    );
+  } catch (e) {
+    return { hasError: true, message: `Import key failed: ${e.message}` };
+  }
   const chunk0Len = 2 + cipher.tagLen;
   const offset1 = cipher.saltLen + chunk0Len;
   if (buffer.byteLength < offset1) return { hasError: true, message: "SS buffer too short for Chunk 0" };
@@ -907,12 +930,12 @@ async function parseShadowsocksHeader(ssBuffer, password, method = "none") {
   let decryptedLenBytes;
   try {
     decryptedLenBytes = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: nonce0 },
+      { name: algoName, iv: nonce0 },
       subKey,
       chunk0Enc
     );
   } catch (e) {
-    return { hasError: true, message: "SS Decrypt Chunk 0 failed" };
+    return { hasError: true, message: "SS Decrypt Chunk 0 failed (Invalid Password?)" };
   }
   const payloadLen = new DataView(decryptedLenBytes).getUint16(0, false) & 16383;
   const chunk1TotalLen = payloadLen + cipher.tagLen;
@@ -924,7 +947,7 @@ async function parseShadowsocksHeader(ssBuffer, password, method = "none") {
   let decryptedHeader;
   try {
     decryptedHeader = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: nonce1 },
+      { name: algoName, iv: nonce1 },
       subKey,
       chunk1Enc
     );
@@ -937,7 +960,7 @@ async function parseShadowsocksHeader(ssBuffer, password, method = "none") {
   if (addressInfo.hasError) return addressInfo;
   const portIndex = addressInfo.dataOffset;
   if (portIndex + 2 > headerBuffer.byteLength) return { hasError: true, message: "SS Header too short" };
-  const port = new DataView(headerBuffer.buffer).getUint16(portIndex, false);
+  const port = new DataView(headerBuffer.buffer, headerBuffer.byteOffset, headerBuffer.byteLength).getUint16(portIndex, false);
   const addressRemote = resolveAddressString(addrType, addressInfo.targetAddrBytes);
   return {
     hasError: false,
