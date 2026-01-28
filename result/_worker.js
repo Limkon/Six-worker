@@ -267,19 +267,10 @@ var proxyIPRemoteCache = {
   data: [],
   expires: 0
 };
-function cleanConfigCache(updatedKeys) {
-  if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes("REMOTE_CONFIG_URL")) {
-    configCache = {};
-    remoteConfigCache = { data: {}, lastFetch: 0 };
-    proxyIPRemoteCache = { data: [], expires: 0 };
-    return;
-  }
-  for (const key of updatedKeys) {
-    delete configCache[key];
-  }
-  if (updatedKeys.includes("PROXYIP")) {
-    proxyIPRemoteCache = { data: [], expires: 0 };
-  }
+function cleanConfigCache() {
+  configCache = {};
+  remoteConfigCache = { data: {}, lastFetch: 0 };
+  proxyIPRemoteCache = { data: [], expires: 0 };
 }
 async function loadRemoteConfig(env, forceReload = false) {
   const remoteConfigUrl = await env.KV.get("REMOTE_CONFIG_URL");
@@ -435,11 +426,10 @@ async function initializeContext(request, env) {
   }
   ctx.expectedUserIDs = [ctx.userID, ctx.userIDLow].filter(Boolean).map((id) => id.toLowerCase());
   const rawProxyIP = proxyIPStr || CONSTANTS.DEFAULT_PROXY_IP;
-  let rawList = [];
   if (rawProxyIP) {
     if (rawProxyIP.startsWith("http")) {
       if (Date.now() < proxyIPRemoteCache.expires) {
-        rawList = proxyIPRemoteCache.data;
+        ctx.proxyIPList = proxyIPRemoteCache.data;
       } else {
         try {
           const controller = new AbortController();
@@ -451,7 +441,7 @@ async function initializeContext(request, env) {
           if (response.ok) {
             const text = await response.text();
             const list = await cleanList(text);
-            rawList = list;
+            ctx.proxyIPList = list;
             proxyIPRemoteCache.data = list;
             proxyIPRemoteCache.expires = Date.now() + 6e5;
           } else {
@@ -460,22 +450,15 @@ async function initializeContext(request, env) {
         } catch (e) {
           void(0);
           const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
-          rawList = defParams;
+          ctx.proxyIPList = defParams;
           proxyIPRemoteCache.data = defParams;
           proxyIPRemoteCache.expires = Date.now() + 6e4;
         }
       }
     } else {
-      rawList = rawProxyIP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+      ctx.proxyIPList = rawProxyIP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
     }
-  }
-  if (rawList && rawList.length > 0) {
-    const selectedIP = rawList[Math.floor(Math.random() * rawList.length)];
-    ctx.proxyIP = selectedIP;
-    ctx.proxyIPList = [selectedIP];
-  } else {
-    ctx.proxyIP = "";
-    ctx.proxyIPList = [];
+    ctx.proxyIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)] || "";
   }
   ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
   if (banStr) ctx.banHosts = await cleanList(banStr);
@@ -487,11 +470,7 @@ async function initializeContext(request, env) {
     return protocol;
   });
   ctx.enableXhttp = !ctx.disabledProtocols.includes("xhttp");
-  if (url.searchParams.has("proxyip")) {
-    const manualIP = url.searchParams.get("proxyip");
-    ctx.proxyIP = manualIP;
-    ctx.proxyIPList = [manualIP];
-  }
+  if (url.searchParams.has("proxyip")) ctx.proxyIP = url.searchParams.get("proxyip");
   if (url.searchParams.has("socks5")) ctx.socks5 = url.searchParams.get("socks5");
   return ctx;
 }
@@ -537,131 +516,101 @@ async function processVlessHeader(vlessBuffer, expectedUserIDs) {
     return { hasError: true, message: "Invalid VLESS user" };
   }
   const optLength = buffer[17];
-  const commandIndex = 18 + optLength;
-  if (commandIndex >= buffer.byteLength) return { hasError: true, message: "Buffer too short for command" };
-  const command = buffer[commandIndex];
-  const isUDP = command === 2;
-  if (command !== 1 && command !== 2) {
-    return { hasError: true, message: "Unsupported VLESS command: " + command };
-  }
-  const portIndex = commandIndex + 1;
-  if (buffer.byteLength < portIndex + 2) return { hasError: true, message: "Buffer too short for port" };
-  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  const portRemote = view.getUint16(portIndex, false);
+  const command = buffer[18 + optLength];
+  let isUDP = command === 2;
+  if (command !== 1 && command !== 2) return { hasError: true, message: "Unsupported VLESS command: " + command };
+  const portIndex = 19 + optLength;
+  if (buffer.byteLength < portIndex + 2) return { hasError: true, message: "Buffer too short" };
+  const portRemote = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength).getUint16(portIndex, false);
   let addressIndex = portIndex + 2;
   const addressType = buffer[addressIndex];
   addressIndex++;
   let addressRemote = "";
   let addressLength = 0;
-  try {
-    switch (addressType) {
-      case CONSTANTS.ADDRESS_TYPE_IPV4:
-        addressLength = 4;
-        addressRemote = buffer.subarray(addressIndex, addressIndex + 4).join(".");
-        break;
-      case CONSTANTS.ADDRESS_TYPE_URL:
-        addressLength = buffer[addressIndex];
-        addressIndex++;
-        addressRemote = textDecoder.decode(buffer.subarray(addressIndex, addressIndex + addressLength));
-        break;
-      case CONSTANTS.ADDRESS_TYPE_IPV6:
-        addressLength = 16;
-        const ipv6View = new DataView(buffer.buffer, buffer.byteOffset + addressIndex, 16);
-        const ipv6 = [];
-        for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2, false).toString(16));
-        addressRemote = "[" + ipv6.join(":") + "]";
-        break;
-      default:
-        return { hasError: true, message: "Invalid VLESS addressType: " + addressType };
-    }
-  } catch (e) {
-    return { hasError: true, message: "Address parse failed" };
+  switch (addressType) {
+    case CONSTANTS.ADDRESS_TYPE_IPV4:
+      addressLength = 4;
+      addressRemote = buffer.subarray(addressIndex, addressIndex + 4).join(".");
+      break;
+    case CONSTANTS.ADDRESS_TYPE_URL:
+      addressLength = buffer[addressIndex];
+      addressIndex++;
+      addressRemote = textDecoder.decode(buffer.subarray(addressIndex, addressIndex + addressLength));
+      break;
+    case CONSTANTS.ADDRESS_TYPE_IPV6:
+      addressLength = 16;
+      const ipv6View = new DataView(buffer.buffer, buffer.byteOffset + addressIndex, 16);
+      const ipv6 = [];
+      for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2, false).toString(16));
+      addressRemote = "[" + ipv6.join(":") + "]";
+      break;
+    default:
+      return { hasError: true, message: "Invalid VLESS addressType: " + addressType };
   }
   if (!addressRemote) return { hasError: true, message: "VLESS address is empty" };
-  const rawDataIndex = addressIndex + addressLength;
-  return {
-    hasError: false,
-    addressRemote,
-    addressType,
-    portRemote,
-    isUDP,
-    rawDataIndex,
-    cloudflareVersion: new Uint8Array([version])
-  };
+  return { hasError: false, addressRemote, addressType, portRemote, isUDP, rawDataIndex: addressIndex + addressLength, cloudflareVersion: new Uint8Array([version]) };
 }
 
 var trojanHashCache =   new Map();
 var MAX_CACHE_SIZE = 100;
-function constantTimeEqual(a, b) {
-  if (a.byteLength !== b.byteLength) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.byteLength; i++) {
-    mismatch |= a[i] ^ b[i];
-  }
-  return mismatch === 0;
-}
 async function parseTrojanHeader(trojanBuffer, password) {
   if (trojanBuffer.byteLength < 58) return { hasError: true, message: "Trojan buffer too short." };
   const buffer = trojanBuffer instanceof Uint8Array ? trojanBuffer : new Uint8Array(trojanBuffer);
-  let expectedHashBytes = trojanHashCache.get(password);
-  if (expectedHashBytes) {
+  const trojanView = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  let expectedHash = trojanHashCache.get(password);
+  if (expectedHash) {
     trojanHashCache.delete(password);
-    trojanHashCache.set(password, expectedHashBytes);
+    trojanHashCache.set(password, expectedHash);
   } else {
-    const hashHex = sha224Hash(String(password));
-    expectedHashBytes = textEncoder.encode(hashHex);
+    expectedHash = sha224Hash(String(password));
     if (trojanHashCache.size >= MAX_CACHE_SIZE) {
       const oldestKey = trojanHashCache.keys().next().value;
       trojanHashCache.delete(oldestKey);
     }
-    trojanHashCache.set(password, expectedHashBytes);
+    trojanHashCache.set(password, expectedHash);
   }
-  const receivedHashBytes = buffer.subarray(0, 56);
-  if (!constantTimeEqual(receivedHashBytes, expectedHashBytes)) {
-    return { hasError: true, message: "Invalid Trojan password." };
+  let receivedHash;
+  try {
+    receivedHash = textDecoder.decode(buffer.subarray(0, 56));
+  } catch (e) {
+    return { hasError: true, message: "Failed to decode client hash." };
   }
-  if (buffer[56] !== 13 || buffer[57] !== 10) {
-    return { hasError: true, message: "Invalid Trojan header (Missing CRLF)" };
-  }
+  if (receivedHash !== expectedHash) return { hasError: true, message: "Invalid Trojan password." };
+  if (trojanView.getUint16(56) !== 3338) return { hasError: true, message: "Invalid Trojan header" };
   const requestData = buffer.subarray(58);
   if (requestData.byteLength < 4) return { hasError: true, message: "Trojan request too short." };
   const requestView = new DataView(requestData.buffer, requestData.byteOffset, requestData.byteLength);
-  const command = requestData[0];
+  const command = requestView.getUint8(0);
   const isUDP = command === 3;
   if (command !== 1 && !isUDP) {
     return { hasError: true, message: "Unsupported Trojan cmd: " + command };
   }
-  const atyp = requestData[1];
+  const atyp = requestView.getUint8(1);
   let host, port, addressEndIndex = 0;
-  try {
-    switch (atyp) {
-      case CONSTANTS.ADDRESS_TYPE_IPV4:
-        addressEndIndex = 2 + 4;
-        host = requestData.subarray(2, addressEndIndex).join(".");
-        break;
-      case CONSTANTS.ATYP_TROJAN_DOMAIN:
-        const domainLen = requestData[2];
-        addressEndIndex = 3 + domainLen;
-        host = textDecoder.decode(requestData.subarray(3, addressEndIndex));
-        break;
-      case CONSTANTS.ATYP_TROJAN_IPV6:
-        addressEndIndex = 2 + 16;
-        const ipv6 = [];
-        for (let i = 0; i < 8; i++) ipv6.push(requestView.getUint16(2 + i * 2, false).toString(16));
-        host = "[" + ipv6.join(":") + "]";
-        break;
-      default:
-        return { hasError: true, message: "Invalid Trojan ATYP: " + atyp };
-    }
-  } catch (e) {
-    return { hasError: true, message: "Address decode failed" };
+  switch (atyp) {
+    case CONSTANTS.ADDRESS_TYPE_IPV4:
+      addressEndIndex = 2 + 4;
+      host = requestData.subarray(2, addressEndIndex).join(".");
+      break;
+    case CONSTANTS.ATYP_TROJAN_DOMAIN:
+      const domainLen = requestView.getUint8(2);
+      addressEndIndex = 3 + domainLen;
+      host = textDecoder.decode(requestData.subarray(3, addressEndIndex));
+      break;
+    case CONSTANTS.ATYP_TROJAN_IPV6:
+      addressEndIndex = 2 + 16;
+      const ipv6 = [];
+      for (let i = 0; i < 8; i++) ipv6.push(requestView.getUint16(2 + i * 2, false).toString(16));
+      host = "[" + ipv6.join(":") + "]";
+      break;
+    default:
+      return { hasError: true, message: "Invalid Trojan ATYP: " + atyp };
   }
   if (addressEndIndex + 2 > requestData.byteLength) return { hasError: true, message: "Buffer too short for port" };
   port = requestView.getUint16(addressEndIndex, false);
   const payloadStartIndex = addressEndIndex + 2;
-  if (requestData.byteLength < payloadStartIndex + 2) return { hasError: true, message: "Trojan missing payload CRLF" };
-  if (requestData[payloadStartIndex] !== 13 || requestData[payloadStartIndex + 1] !== 10) {
-    return { hasError: true, message: "Trojan missing payload CRLF" };
+  if (requestData.byteLength < payloadStartIndex + 2 || requestView.getUint16(payloadStartIndex) !== 3338) {
+    return { hasError: true, message: "Trojan missing CRLF" };
   }
   const rawClientData = requestData.subarray(payloadStartIndex + 2);
   return {
@@ -699,40 +648,35 @@ var parseAddressAndPort = (buffer, offset, addrType) => {
 
 var passwordHashCache =   new Map();
 var MAX_CACHE_SIZE2 = 100;
-function constantTimeEqual2(a, b) {
-  if (a.byteLength !== b.byteLength) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.byteLength; i++) {
-    mismatch |= a[i] ^ b[i];
-  }
-  return mismatch === 0;
-}
 async function parseMandalaHeader(mandalaBuffer, password) {
   if (mandalaBuffer.byteLength < 67) {
     return { hasError: true, message: "Mandala buffer too short" };
   }
   const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
   const salt = buffer.subarray(0, 4);
-  const decrypted = new Uint8Array(buffer.byteLength - 4);
-  const len = decrypted.length;
-  for (let i = 0; i < len; i++) {
+  const decrypted = new Uint8Array(buffer.length - 4);
+  for (let i = 0; i < decrypted.length; i++) {
     decrypted[i] = buffer[i + 4] ^ salt[i & 3];
   }
-  let expectedHashBytes = passwordHashCache.get(password);
-  if (expectedHashBytes) {
+  let expectedHash = passwordHashCache.get(password);
+  if (expectedHash) {
     passwordHashCache.delete(password);
-    passwordHashCache.set(password, expectedHashBytes);
+    passwordHashCache.set(password, expectedHash);
   } else {
-    const hashHex = sha224Hash(String(password));
-    expectedHashBytes = textEncoder.encode(hashHex);
+    expectedHash = sha224Hash(String(password));
     if (passwordHashCache.size >= MAX_CACHE_SIZE2) {
       const oldestKey = passwordHashCache.keys().next().value;
       passwordHashCache.delete(oldestKey);
     }
-    passwordHashCache.set(password, expectedHashBytes);
+    passwordHashCache.set(password, expectedHash);
   }
-  const receivedHashBytes = decrypted.subarray(0, 56);
-  if (!constantTimeEqual2(receivedHashBytes, expectedHashBytes)) {
+  let receivedHash;
+  try {
+    receivedHash = textDecoder.decode(decrypted.subarray(0, 56));
+  } catch (e) {
+    return { hasError: true, message: "Mandala hash decode failed" };
+  }
+  if (receivedHash !== expectedHash) {
     return { hasError: true, message: "Invalid Mandala Auth" };
   }
   const padLen = decrypted[56];
@@ -745,39 +689,32 @@ async function parseMandalaHeader(mandalaBuffer, password) {
   }
   cursor++;
   const atyp = decrypted[cursor];
-  const addrResult = parseAddressAndPort(decrypted, cursor + 1, atyp);
+  const addrResult = parseAddressAndPort(decrypted.buffer, cursor + 1, atyp);
   if (addrResult.hasError) return addrResult;
   const dataOffset = addrResult.dataOffset;
   if (dataOffset + 2 > decrypted.byteLength) return { hasError: true, message: "Buffer short for port" };
   const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
   const port = view.getUint16(dataOffset, false);
   const headerEnd = dataOffset + 2;
-  if (headerEnd + 2 > decrypted.byteLength) {
-    return { hasError: true, message: "Missing CRLF data" };
-  }
   if (decrypted[headerEnd] !== 13 || decrypted[headerEnd + 1] !== 10) {
     return { hasError: true, message: "Missing CRLF" };
   }
   let addressRemote = "";
-  try {
-    switch (atyp) {
-      case CONSTANTS.ADDRESS_TYPE_IPV4:
-        addressRemote = addrResult.targetAddrBytes.join(".");
-        break;
-      case CONSTANTS.ATYP_SS_DOMAIN:
-        addressRemote = textDecoder.decode(addrResult.targetAddrBytes);
-        break;
-      case CONSTANTS.ATYP_SS_IPV6:
-        const ipv6 = [];
-        const v6View = new DataView(addrResult.targetAddrBytes.buffer, addrResult.targetAddrBytes.byteOffset, addrResult.targetAddrBytes.byteLength);
-        for (let i = 0; i < 8; i++) ipv6.push(v6View.getUint16(i * 2, false).toString(16));
-        addressRemote = "[" + ipv6.join(":") + "]";
-        break;
-      default:
-        return { hasError: true, message: "Unknown ATYP" };
-    }
-  } catch (e) {
-    return { hasError: true, message: "Address decode failed" };
+  switch (atyp) {
+    case CONSTANTS.ADDRESS_TYPE_IPV4:
+      addressRemote = addrResult.targetAddrBytes.join(".");
+      break;
+    case CONSTANTS.ATYP_SS_DOMAIN:
+      addressRemote = textDecoder.decode(addrResult.targetAddrBytes);
+      break;
+    case CONSTANTS.ATYP_SS_IPV6:
+      const ipv6 = [];
+      const v6View = new DataView(addrResult.targetAddrBytes.buffer, addrResult.targetAddrBytes.byteOffset, addrResult.targetAddrBytes.byteLength);
+      for (let i = 0; i < 8; i++) ipv6.push(v6View.getUint16(i * 2, false).toString(16));
+      addressRemote = "[" + ipv6.join(":") + "]";
+      break;
+    default:
+      return { hasError: true, message: "Unknown ATYP" };
   }
   return {
     hasError: false,
@@ -912,8 +849,7 @@ function parseIPv6(ip) {
 }
 async function resolveToIPv6(domain, dnsServer) {
   if (!dnsServer) return null;
-  if (dnsCache.size > 1e3) {
-    dnsCache.clear();
+  if (dnsServer === "auto") {
   }
   const cacheKey = `${domain}|${dnsServer}`;
   const cached = dnsCache.get(cacheKey);
@@ -1020,36 +956,25 @@ var failureCache = new DirectFailureCache();
 function addToFailureCache(host) {
   if (host) failureCache.add(host);
 }
-function getSingleProxyIP(proxyIP) {
-  if (!proxyIP) return null;
-  if (Array.isArray(proxyIP)) {
-    if (proxyIP.length === 0) return null;
-    return proxyIP[Math.floor(Math.random() * proxyIP.length)];
-  }
-  return proxyIP;
-}
 function parseProxyIP(proxyAddr, defaultPort) {
   if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP.split(",")[0].trim(), port: defaultPort };
   let host = proxyAddr;
   let port = defaultPort;
   if (host.startsWith("[")) {
-    const bracketEnd = host.indexOf("]");
+    const bracketEnd = host.lastIndexOf("]");
+    if (bracketEnd === -1) return { host, port: defaultPort };
     if (bracketEnd > 0) {
-      const ipPart = host.substring(1, bracketEnd);
-      const portPart = host.substring(bracketEnd + 1);
-      if (portPart.startsWith(":")) {
-        const p = parseInt(portPart.substring(1), 10);
-        if (!isNaN(p)) port = p;
+      const remainder = host.substring(bracketEnd + 1);
+      if (remainder.startsWith(":")) {
+        const portStr = remainder.substring(1);
+        if (/^\d+$/.test(portStr)) port = parseInt(portStr, 10);
       }
-      return { host: ipPart, port };
+      host = host.substring(1, bracketEnd);
+      return { host, port };
     }
   }
-  const colonCount = (host.match(/:/g) || []).length;
-  if (colonCount > 1) {
-    return { host, port };
-  }
   const lastColon = host.lastIndexOf(":");
-  if (lastColon > 0) {
+  if (lastColon > 0 && host.indexOf(":") === lastColon) {
     const portStr = host.substring(lastColon + 1);
     if (/^\d+$/.test(portStr)) {
       port = parseInt(portStr, 10);
@@ -1085,7 +1010,7 @@ function parseSocks5Config(address) {
   if (hostname.startsWith("[") && hostname.endsWith("]")) hostname = hostname.slice(1, -1);
   return { username, password, hostname, port };
 }
-async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote, log, isUDP = false) {
+async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote, log) {
   const config = parseSocks5Config(socks5Addr);
   if (!config) throw new Error("Socks5 config missing");
   const { username, password, hostname, port } = config;
@@ -1126,11 +1051,10 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
       const domainBytes = encoder.encode(addressRemote);
       DSTADDR = new Uint8Array([3, domainBytes.length, ...domainBytes]);
   }
-  const cmd = isUDP ? 3 : 1;
-  const socksRequest = new Uint8Array([5, cmd, 0, ...DSTADDR, portRemote >> 8, portRemote & 255]);
+  const socksRequest = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 255]);
   await writer.write(socksRequest);
   const { value: connRes } = await reader.read();
-  if (!connRes || connRes.length < 2 || connRes[0] !== 5 || connRes[1] !== 0) throw new Error(`SOCKS5 connection failed (CMD: ${cmd})`);
+  if (!connRes || connRes.length < 2 || connRes[0] !== 5 || connRes[1] !== 0) throw new Error(`SOCKS5 connection failed`);
   let headLen = 0;
   if (connRes.length >= 4) {
     if (connRes[3] === 1) headLen = 10;
@@ -1144,7 +1068,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
   reader.releaseLock();
   return socket;
 }
-async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null, isUDP = false) {
+async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null) {
   let isTimedOut = false;
   let socket = null;
   const timeoutPromise = new Promise((_, reject) => setTimeout(() => {
@@ -1155,7 +1079,7 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
     let s;
     try {
       if (socksConfig) {
-        s = await socks5Connect(socksConfig, addressType, addressRemote, port, log, isUDP);
+        s = await socks5Connect(socksConfig, addressType, addressRemote, port, log);
       } else {
         s = connect({ hostname: host, port });
       }
@@ -1201,7 +1125,7 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
 }
 async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
   const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-  const DIRECT_TIMEOUTS = [1500, 4e3];
+  const DIRECT_TIMEOUTS = [4e3, 5e3];
   const PROXY_TIMEOUT = 5e3;
   if (!failureCache.has(addressRemote)) {
     const currentTimeout = DIRECT_TIMEOUTS[0];
@@ -1215,8 +1139,7 @@ async function createUnifiedConnection(ctx, addressRemote, portRemote, addressTy
         log,
         useSocks ? ctx.socks5 : null,
         addressType,
-        addressRemote,
-        isUDP
+        addressRemote
       );
     } catch (err1) {
       log(`[connect] Phase 1 failed: ${err1.message}`);
@@ -1228,13 +1151,16 @@ async function createUnifiedConnection(ctx, addressRemote, portRemote, addressTy
   } else {
     log(`[Smart] Skipping Phase 1 (Direct) for cached failed host: ${addressRemote}`);
   }
-  let proxyIP = getSingleProxyIP(fallbackAddress || ctx.proxyIP);
-  if (!proxyIP) {
+  let proxyAttempts = [];
+  if (fallbackAddress) proxyAttempts.push(fallbackAddress);
+  else if (ctx.proxyIP) proxyAttempts.push(ctx.proxyIP);
+  else {
     const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
-    if (defParams.length > 0) proxyIP = defParams[0];
+    if (defParams.length > 0) proxyAttempts.push(defParams[0]);
   }
-  if (proxyIP) {
-    const { host: proxyHost, port: proxyPort } = parseProxyIP(proxyIP, portRemote);
+  proxyAttempts = [...new Set(proxyAttempts)].filter(Boolean);
+  for (const ip of proxyAttempts) {
+    const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
     try {
       return await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, PROXY_TIMEOUT, log);
     } catch (err2) {
@@ -1259,17 +1185,6 @@ async function createUnifiedConnection(ctx, addressRemote, portRemote, addressTy
 async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallback, log) {
   let hasIncomingData = false;
   let responseHeader = vlessHeader;
-  const safeSend = (data) => {
-    try {
-      if (webSocket.readyState === 1) {
-        webSocket.send(data);
-        return true;
-      }
-    } catch (error) {
-      log(`[WS] Send Error: ${error.message}`);
-    }
-    return false;
-  };
   if (remoteSocket.initialData && remoteSocket.initialData.byteLength > 0) {
     hasIncomingData = true;
     log(`[Socks5] Flushing ${remoteSocket.initialData.byteLength} bytes of early data`);
@@ -1279,10 +1194,10 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallb
       const combined = new Uint8Array(header.length + data.length);
       combined.set(header);
       combined.set(data, header.length);
-      if (!safeSend(combined)) return;
+      webSocket.send(combined);
       responseHeader = null;
     } else {
-      if (!safeSend(remoteSocket.initialData)) return;
+      webSocket.send(remoteSocket.initialData);
     }
     remoteSocket.initialData = null;
   }
@@ -1300,16 +1215,10 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallb
           const combined = new Uint8Array(header.length + data.length);
           combined.set(header);
           combined.set(data, header.length);
-          if (!safeSend(combined)) {
-            controller.error(new Error("WebSocket send failed"));
-            return;
-          }
+          webSocket.send(combined);
           responseHeader = null;
         } else {
-          if (!safeSend(chunk)) {
-            controller.error(new Error("WebSocket send failed"));
-            return;
-          }
+          webSocket.send(chunk);
         }
       },
       close() {
@@ -1400,14 +1309,16 @@ async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressR
     }
   };
   const proxyIPRetry = async () => {
-    log("[Retry] Retrying ProxyIP...");
+    log("[Retry] Switching to ProxyIP...");
     prepareRetry();
-    let ip = getSingleProxyIP(ctx.proxyIP);
-    if (!ip) {
+    let attempts = [];
+    if (ctx.proxyIP) attempts.push(ctx.proxyIP);
+    else {
       const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
-      if (defParams.length > 0) ip = defParams[0];
+      if (defParams.length > 0) attempts.push(defParams[0]);
     }
-    if (ip) {
+    attempts = [...new Set(attempts)].filter(Boolean);
+    for (const ip of attempts) {
       try {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
         log(`[Retry] Attempting ProxyIP: ${proxyHost}`);
@@ -1482,14 +1393,16 @@ async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressR
     }
   };
   const proxyIPRetry = async () => {
-    log("[Retry:UDP] Retrying ProxyIP...");
+    log("[Retry:UDP] Switching to ProxyIP...");
     prepareRetry();
-    let ip = getSingleProxyIP(ctx.proxyIP);
-    if (!ip) {
+    let attempts = [];
+    if (ctx.proxyIP) attempts.push(ctx.proxyIP);
+    else {
       const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
-      if (defParams.length > 0) ip = defParams[0];
+      if (defParams.length > 0) attempts.push(defParams[0]);
     }
-    if (ip) {
+    attempts = [...new Set(attempts)].filter(Boolean);
+    for (const ip of attempts) {
       try {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
         log(`[Retry:UDP] Attempting ProxyIP: ${proxyHost}`);
@@ -1779,7 +1692,6 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 
 var XHTTP_BUFFER_SIZE = 128 * 1024;
 function parse_uuid_xhttp(uuid_str) {
-  if (!uuid_str) return [];
   uuid_str = uuid_str.replaceAll("-", "");
   const r = [];
   for (let index = 0; index < 16; index++) {
@@ -1789,11 +1701,13 @@ function parse_uuid_xhttp(uuid_str) {
 }
 function validate_uuid_xhttp(id, uuid_str) {
   const uuid_arr = parse_uuid_xhttp(uuid_str);
-  if (uuid_arr.length !== 16) return false;
   for (let index = 0; index < 16; index++) {
     if (id[index] !== uuid_arr[index]) return false;
   }
   return true;
+}
+function get_xhttp_buffer(size) {
+  return new Uint8Array(new ArrayBuffer(size || XHTTP_BUFFER_SIZE));
 }
 function concat_typed_arrays(first, ...args) {
   let len = first.length;
@@ -1807,26 +1721,14 @@ function concat_typed_arrays(first, ...args) {
   }
   return r;
 }
-async function read_at_least(reader, minBytes, initialBuffer) {
-  let currentBuffer = initialBuffer || new Uint8Array(0);
-  while (currentBuffer.length < minBytes) {
-    const needed = minBytes - currentBuffer.length;
-    const bufferSize = Math.max(needed, 4096);
-    const { value, done } = await reader.read(new Uint8Array(bufferSize));
-    if (done) {
-      return { value: currentBuffer, done: true };
-    }
-    if (value) {
-      currentBuffer = concat_typed_arrays(currentBuffer, value);
-    }
-  }
-  return { value: currentBuffer, done: false };
-}
 async function read_xhttp_header(readable, ctx) {
-  const reader = readable.getReader();
+  const reader = readable.getReader({ mode: "byob" });
   try {
-    let { value: cache, done } = await read_at_least(reader, 18);
-    if (cache.length < 18) return "header too short";
+    let r = await reader.readAtLeast(1 + 16 + 1, get_xhttp_buffer());
+    let rlen = 0;
+    let idx = 0;
+    let cache = r.value;
+    rlen += r.value.length;
     const version = cache[0];
     const id = cache.subarray(1, 1 + 16);
     if (!validate_uuid_xhttp(id, ctx.userID)) {
@@ -1835,52 +1737,47 @@ async function read_xhttp_header(readable, ctx) {
       }
     }
     const pb_len = cache[1 + 16];
-    const min_len_until_atyp = 1 + 16 + 1 + pb_len + 1 + 2 + 1;
-    if (cache.length < min_len_until_atyp) {
-      const r = await read_at_least(reader, min_len_until_atyp, cache);
-      cache = r.value;
-      if (cache.length < min_len_until_atyp) return "header too short for metadata";
+    const addr_plus1 = 1 + 16 + 1 + pb_len + 1 + 2 + 1;
+    if (addr_plus1 + 1 > rlen) {
+      if (r.done) return "header too short";
+      idx = addr_plus1 + 1 - rlen;
+      r = await reader.readAtLeast(idx, get_xhttp_buffer());
+      rlen += r.value.length;
+      cache = concat_typed_arrays(cache, r.value);
     }
     const cmd = cache[1 + 16 + 1 + pb_len];
     if (cmd !== 1) return "unsupported command: " + cmd;
-    const addr_start_idx = 1 + 16 + 1 + pb_len + 1;
-    const port = (cache[addr_start_idx] << 8) + cache[addr_start_idx + 1];
-    const atype = cache[addr_start_idx + 2];
-    const addr_body_idx = addr_start_idx + 3;
+    const port = (cache[addr_plus1 - 1 - 2] << 8) + cache[addr_plus1 - 1 - 1];
+    const atype = cache[addr_plus1 - 1];
     let header_len = -1;
     if (atype === CONSTANTS.ADDRESS_TYPE_IPV4) {
-      header_len = addr_body_idx + 4;
+      header_len = addr_plus1 + 4;
     } else if (atype === CONSTANTS.ADDRESS_TYPE_IPV6) {
-      header_len = addr_body_idx + 16;
+      header_len = addr_plus1 + 16;
     } else if (atype === CONSTANTS.ADDRESS_TYPE_URL) {
-      if (cache.length < addr_body_idx + 1) {
-        const r = await read_at_least(reader, addr_body_idx + 1, cache);
-        cache = r.value;
-        if (cache.length < addr_body_idx + 1) return "header too short for domain len";
-      }
-      const domain_len = cache[addr_body_idx];
-      header_len = addr_body_idx + 1 + domain_len;
-    } else {
-      return "read address type failed: " + atype;
+      header_len = addr_plus1 + 1 + cache[addr_plus1];
     }
-    if (cache.length < header_len) {
-      const r = await read_at_least(reader, header_len, cache);
-      cache = r.value;
-      if (cache.length < header_len) return "header too short for full address";
+    if (header_len < 0) return "read address type failed";
+    idx = header_len - rlen;
+    if (idx > 0) {
+      if (r.done) return "read address failed";
+      r = await reader.readAtLeast(idx, get_xhttp_buffer());
+      rlen += r.value.length;
+      cache = concat_typed_arrays(cache, r.value);
     }
     let hostname = "";
-    const addr_val_idx = addr_body_idx;
+    idx = addr_plus1;
     switch (atype) {
       case CONSTANTS.ADDRESS_TYPE_IPV4:
-        hostname = cache.subarray(addr_val_idx, addr_val_idx + 4).join(".");
+        hostname = cache.subarray(idx, idx + 4).join(".");
         break;
       case CONSTANTS.ADDRESS_TYPE_URL:
         hostname = new TextDecoder().decode(
-          cache.subarray(addr_val_idx + 1, addr_val_idx + 1 + cache[addr_val_idx])
+          cache.subarray(idx + 1, idx + 1 + cache[idx])
         );
         break;
       case CONSTANTS.ADDRESS_TYPE_IPV6:
-        hostname = cache.subarray(addr_val_idx, addr_val_idx + 16).reduce(
+        hostname = cache.subarray(idx, idx + 16).reduce(
           (s, b2, i2, a) => i2 % 2 ? s.concat(((a[i2 - 1] << 8) + b2).toString(16)) : s,
           []
         ).join(":");
@@ -1895,7 +1792,7 @@ async function read_xhttp_header(readable, ctx) {
       data,
       resp: new Uint8Array([version, 0]),
       reader,
-      done: done && data.length === 0
+      done: r.done
     };
   } catch (error) {
     try {
@@ -1910,13 +1807,13 @@ async function upload_to_remote_xhttp(writer, httpx) {
     if (httpx.data && httpx.data.length > 0) {
       await writer.write(httpx.data);
     }
-    if (httpx.done) return;
-    while (true) {
-      const { value, done } = await httpx.reader.read();
-      if (done) break;
-      if (value && value.length > 0) {
-        await writer.write(value);
+    while (!httpx.done) {
+      const r = await httpx.reader.read(get_xhttp_buffer());
+      if (r.done) break;
+      if (r.value && r.value.length > 0) {
+        await writer.write(r.value);
       }
+      httpx.done = r.done;
     }
   } catch (error) {
     throw error;
@@ -1924,66 +1821,84 @@ async function upload_to_remote_xhttp(writer, httpx) {
 }
 function create_xhttp_downloader(resp, remote_readable, initialData) {
   const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45e3;
-  let lastActivity = Date.now();
-  let idleTimer;
-  const monitorStream = new TransformStream({
-    start(controller) {
-      controller.enqueue(resp);
-      if (initialData && initialData.byteLength > 0) {
-        controller.enqueue(initialData);
-      }
-      idleTimer = setInterval(() => {
-        if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
-          try {
-            monitorStream.writable.abort("idle timeout");
-          } catch (_) {
+  let stream;
+  const done = new Promise((resolve, reject) => {
+    stream = new TransformStream(
+      {
+        start(controller) {
+          controller.enqueue(resp);
+          if (initialData && initialData.byteLength > 0) {
+            controller.enqueue(initialData);
           }
-          try {
-            monitorStream.readable.cancel("idle timeout");
-          } catch (_) {
-          }
-          clearInterval(idleTimer);
+        },
+        transform(chunk, controller) {
+          controller.enqueue(chunk);
+        },
+        cancel(reason) {
+          reject(`download cancelled: ${reason}`);
         }
-      }, 5e3);
-    },
-    transform(chunk, controller) {
-      lastActivity = Date.now();
-      controller.enqueue(chunk);
-    },
-    flush() {
-      clearInterval(idleTimer);
-    },
-    cancel() {
-      clearInterval(idleTimer);
-    }
-  });
-  const pipePromise = remote_readable.pipeTo(monitorStream.writable).catch(() => {
-  }).finally(() => {
-    clearInterval(idleTimer);
+      },
+      null,
+      new ByteLengthQueuingStrategy({ highWaterMark: XHTTP_BUFFER_SIZE })
+    );
+    let lastActivity = Date.now();
+    const idleTimer = setInterval(() => {
+      if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+        try {
+          stream.writable.abort?.("idle timeout");
+        } catch (_) {
+        }
+        clearInterval(idleTimer);
+        reject("idle timeout");
+      }
+    }, 5e3);
+    const reader = remote_readable.getReader();
+    const writer = stream.writable.getWriter();
+    ;
+    (async () => {
+      try {
+        while (true) {
+          const r = await reader.read();
+          if (r.done) break;
+          lastActivity = Date.now();
+          await writer.write(r.value);
+        }
+        await writer.close();
+        resolve();
+      } catch (err) {
+        reject(err);
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch (_) {
+        }
+        try {
+          writer.releaseLock();
+        } catch (_) {
+        }
+        clearInterval(idleTimer);
+      }
+    })();
   });
   return {
-    readable: monitorStream.readable,
-    done: pipePromise,
+    readable: stream.readable,
+    done,
     abort: () => {
       try {
-        monitorStream.writable.abort();
+        stream.readable.cancel();
       } catch (_) {
       }
       try {
-        monitorStream.readable.cancel();
+        stream.writable.abort();
       } catch (_) {
       }
-      clearInterval(idleTimer);
     }
   };
 }
 async function handleXhttpClient(request, ctx) {
   try {
     const result = await read_xhttp_header(request.body, ctx);
-    if (typeof result === "string") {
-      void(0);
-      return null;
-    }
+    if (typeof result === "string") return null;
     const { hostname, port, atype, data, resp, reader, done } = result;
     const httpx = { hostname, port, atype, data, resp, reader, done };
     if (isHostBanned(hostname, ctx.banHosts)) {
@@ -3051,9 +2966,9 @@ hr{margin:1rem 0;color:inherit;border:0;border-top:1px solid;opacity:.25}
 .mb-2{margin-bottom:.5rem!important} .mt-4{margin-top:1.5rem!important} .mb-4{margin-bottom:1.5rem!important}
 .text-danger{color:#dc3545!important}
 .input-group{position:relative;display:flex;flex-wrap:nowrap;width:100%}
-.form-control{display:block;width:100%;padding:.2rem .5rem;font-size:1rem;font-weight:400;line-height:1.5;color:#212529;background-color:#fff;background-clip:padding-box;border:1px solid #ced4da;border-radius:.375rem;transition:border-color .15s ease-in-out,box-shadow .15s ease-in-out;min-width:100px}
+.form-control{display:block;width:100%;padding:.375rem .75rem;font-size:1rem;font-weight:400;line-height:1.5;color:#212529;background-color:#fff;background-clip:padding-box;border:1px solid #ced4da;border-radius:.375rem;transition:border-color .15s ease-in-out,box-shadow .15s ease-in-out;min-width:100px}
 .form-control[readonly]{background-color:#e9ecef;opacity:1}
-.btn{display:inline-block;font-weight:400;line-height:1.5;color:#212529;text-align:center;text-decoration:none;vertical-align:middle;cursor:pointer;user-select:none;background-color:transparent;border:1px solid transparent;padding:.2rem .5rem;font-size:1rem;border-radius:.375rem;transition:color .15s ease-in-out,background-color .15s ease-in-out,border-color .15s ease-in-out,box-shadow .15s ease-in-out}
+.btn{display:inline-block;font-weight:400;line-height:1.5;color:#212529;text-align:center;text-decoration:none;vertical-align:middle;cursor:pointer;user-select:none;background-color:transparent;border:1px solid transparent;padding:.375rem .75rem;font-size:1rem;border-radius:.375rem;transition:color .15s ease-in-out,background-color .15s ease-in-out,border-color .15s ease-in-out,box-shadow .15s ease-in-out}
 .btn-primary{color:#fff;background-color:#0d6efd;border-color:#0d6efd} .btn-primary:hover{background-color:#0b5ed7;border-color:#0a58ca}
 .btn-secondary{color:#fff;background-color:#6c757d;border-color:#6c757d;border-top-left-radius:0;border-bottom-left-radius:0} .btn-secondary:hover{background-color:#5c636a;border-color:#565e64}
 .btn-info{color:#000;background-color:#0dcaf0;border-color:#0dcaf0} .btn-info:hover{background-color:#31d2f2;border-color:#25cff2}
@@ -3268,13 +3183,6 @@ function getLoginHtml() {
 }
 
 var lastSavedDomain = "";
-function safeWaitUntil(ctx, promise) {
-  if (ctx && typeof ctx.waitUntil === "function") {
-    ctx.waitUntil(promise);
-  } else {
-    Promise.resolve(promise).catch((e) => void(0));
-  }
-}
 async function handlePasswordSetup(request, env, ctx) {
   if (request.method === "POST") {
     const formData = await request.formData();
@@ -3285,8 +3193,8 @@ async function handlePasswordSetup(request, env, ctx) {
     cleanConfigCache();
     try {
       const appCtx = await initializeContext(request, env);
-      appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
-      safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
+      appCtx.waitUntil = ctx.waitUntil.bind(ctx);
+      ctx.waitUntil(executeWebDavPush(env, appCtx, true));
       void(0);
     } catch (e) {
       void(0);
@@ -3301,7 +3209,7 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
     const proxyUrl2 = new URL(urlStr);
     const path = proxyUrl2.pathname === "/" ? "" : proxyUrl2.pathname;
     const newUrl = proxyUrl2.protocol + "//" + proxyUrl2.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
-    return await fetch(new Request(newUrl, request));
+    return fetch(new Request(newUrl, request));
   } catch (e) {
     return null;
   }
@@ -3310,7 +3218,7 @@ var index_default = {
   async fetch(request, env, ctx) {
     try {
       const context = await initializeContext(request, env);
-      context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
+      context.waitUntil = ctx.waitUntil.bind(ctx);
       const url = new URL(request.url);
       const path = url.pathname.toLowerCase();
       const hostName = request.headers.get("Host");
@@ -3340,19 +3248,19 @@ var index_default = {
       if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes(".")) {
         if (hostName !== lastSavedDomain) {
           lastSavedDomain = hostName;
-          context.waitUntil(env.KV.put("SAVED_DOMAIN", hostName));
-          context.waitUntil(executeWebDavPush(env, context, false));
+          ctx.waitUntil(env.KV.put("SAVED_DOMAIN", hostName));
+          ctx.waitUntil(executeWebDavPush(env, context, false));
         }
       }
       const xhttpPath = context.userID ? `/${context.userID.substring(0, 8)}` : null;
       const isXhttpHeader = request.headers.get("Content-Type") === "application/grpc";
-      const isXhttpPath = xhttpPath && path.startsWith(xhttpPath) || isSubRoute && request.method === "POST";
+      const isXhttpPath = xhttpPath && path === xhttpPath;
       if (request.method === "POST" && !isApiPostPath && url.searchParams.get("auth") !== "login" && path !== "/") {
         if (context.enableXhttp) {
           if (isXhttpPath || isXhttpHeader) {
             const r = await handleXhttpClient(request, context);
             if (r) {
-              context.waitUntil(r.closed);
+              ctx.waitUntil(r.closed);
               return new Response(r.readable, {
                 headers: {
                   "X-Accel-Buffering": "no",
@@ -3363,7 +3271,7 @@ var index_default = {
                 }
               });
             }
-            return new Response("Invalid XHTTP Protocol or Header", { status: 400 });
+            return new Response("Internal Server Error", { status: 500 });
           }
           if (!isManagementRoute) {
             const contentType = request.headers.get("content-type") || "";
