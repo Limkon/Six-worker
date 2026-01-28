@@ -3298,9 +3298,9 @@ async function handlePasswordSetup(request, env, ctx) {
 async function proxyUrl(urlStr, targetUrlObj, request) {
   if (!urlStr) return null;
   try {
-    const proxyUrl2 = new URL(urlStr);
-    const path = proxyUrl2.pathname === "/" ? "" : proxyUrl2.pathname;
-    const newUrl = proxyUrl2.protocol + "//" + proxyUrl2.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
+    const parsedUrl = new URL(urlStr);
+    const path = parsedUrl.pathname === "/" ? "" : parsedUrl.pathname;
+    const newUrl = parsedUrl.protocol + "//" + parsedUrl.host + path + targetUrlObj.pathname + targetUrlObj.search;
     return fetch(new Request(newUrl, request));
   } catch (e) {
     return null;
@@ -3344,7 +3344,7 @@ var index_default = {
           context.waitUntil(executeWebDavPush(env, context, false));
         }
       }
-      const xhttpPath = context.userID ? `/${context.userID.substring(0, 8)}` : null;
+      const xhttpPath = context.userID ? `/${context.userID.substring(0, 8).toLowerCase()}` : null;
       const isXhttpHeader = request.headers.get("Content-Type") === "application/grpc";
       const isXhttpPath = xhttpPath && path === xhttpPath;
       if (request.method === "POST" && !isApiPostPath && url.searchParams.get("auth") !== "login" && path !== "/") {
