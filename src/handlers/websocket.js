@@ -1,10 +1,9 @@
 // src/handlers/websocket.js
 /**
  * 文件名: src/handlers/websocket.js
- * 审计确认: 
- * 1. [Logic] 逻辑完整，无 UDP 拦截。
- * 2. [Feature] Socks5 UDP Associate 握手正常放行。
- * 3. [Structure] TCP/UDP 分流调用正确。
+ * 修复说明:
+ * 1. [Security Fix] 在 headerBuffer 累积时增加实时限额检查，超过 MAX_HEADER_BUFFER 立即抛出错误并断开连接。
+ * 防止恶意客户端发送大量垃圾数据导致 Worker 内存溢出 (OOM)。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -93,6 +92,12 @@ export async function handleWebSocketRequest(request, ctx) {
 
             headerBuffer = concatUint8(headerBuffer, chunkArr);
 
+            // [Security Fix] 实时检查 Buffer 大小，超过限制立即熔断
+            if (headerBuffer.length > MAX_HEADER_BUFFER) {
+                clearTimeout(timeoutTimer);
+                throw new Error(`Header buffer limit exceeded (${headerBuffer.length} > ${MAX_HEADER_BUFFER})`);
+            }
+
             if (socks5State < 2) {
                 const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
                 if (error) {
@@ -160,9 +165,11 @@ export async function handleWebSocketRequest(request, ctx) {
                 }
 
             } catch (e) {
+                // 如果检测失败且 Buffer 还很小，可能是数据包分片，允许继续等待后续数据
                 if (headerBuffer && headerBuffer.length < 512 && headerBuffer.length < MAX_HEADER_BUFFER) {
                     return; 
                 }
+                // 否则（检测失败且 Buffer 较大，或者其他错误），关闭连接
                 clearTimeout(timeoutTimer);
                 log(`Detection failed: ${e.message}`);
                 safeCloseWebSocket(webSocket);
