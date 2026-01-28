@@ -864,13 +864,13 @@ async function evpBytesToKey(password, keyLen) {
   return key.slice(0, keyLen);
 }
 async function hkdfSha1(salt, ikm, info, length) {
-  const key = await crypto.subtle.importKey("raw", ikm, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
-  const prk = await crypto.subtle.sign("HMAC", key, salt);
-  const infoBuffer = new Uint8Array(info.length + 1 + 1);
+  const key = await crypto.subtle.importKey("raw", salt, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const prk = await crypto.subtle.sign("HMAC", key, ikm);
+  const infoBuffer = new Uint8Array(info.length + 1);
   infoBuffer.set(info, 0);
-  infoBuffer[info.length + 1] = 1;
+  infoBuffer[info.length] = 1;
   const prkKey = await crypto.subtle.importKey("raw", prk, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
-  const t1 = await crypto.subtle.sign("HMAC", prkKey, infoBuffer.slice(0, info.length + 1));
+  const t1 = await crypto.subtle.sign("HMAC", prkKey, infoBuffer);
   return t1.slice(0, length);
 }
 async function parseShadowsocksHeader(ssBuffer, password, method = "none") {
@@ -890,8 +890,7 @@ async function parseShadowsocksHeader(ssBuffer, password, method = "none") {
       addressType: addrType2,
       portRemote: port2,
       rawClientData: buffer.subarray(addressInfo2.dataOffset + 2),
-      isUDP: false,
-      rawDataIndex: 0
+      isUDP: false
     };
   }
   const cipher = AEAD_METHODS[method];
@@ -935,7 +934,7 @@ async function parseShadowsocksHeader(ssBuffer, password, method = "none") {
       chunk0Enc
     );
   } catch (e) {
-    return { hasError: true, message: "SS Decrypt Chunk 0 failed (Invalid Password?)" };
+    return { hasError: true, message: "SS Decrypt Chunk 0 failed (Bad Password?)" };
   }
   const payloadLen = new DataView(decryptedLenBytes).getUint16(0, false) & 16383;
   const chunk1TotalLen = payloadLen + cipher.tagLen;
@@ -959,7 +958,6 @@ async function parseShadowsocksHeader(ssBuffer, password, method = "none") {
   const addressInfo = parseAddressAndPort(headerBuffer, 1, addrType);
   if (addressInfo.hasError) return addressInfo;
   const portIndex = addressInfo.dataOffset;
-  if (portIndex + 2 > headerBuffer.byteLength) return { hasError: true, message: "SS Header too short" };
   const port = new DataView(headerBuffer.buffer, headerBuffer.byteOffset, headerBuffer.byteLength).getUint16(portIndex, false);
   const addressRemote = resolveAddressString(addrType, addressInfo.targetAddrBytes);
   return {
