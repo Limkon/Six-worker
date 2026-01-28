@@ -2,8 +2,8 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [修复] 严格执行“单一连接只使用一个ProxyIP”策略。
- * 2. [优化] cleanConfigCache 支持按需更新变更的键值，避免全量清空缓存。
+ * 1. [修复] 为 ProxyIP 的 fetch 请求添加 AbortSignal 超时控制，防止远程源无响应导致 Worker 挂起。
+ * 2. [优化] 增加 ProxyIP 获取失败时的负面缓存机制，避免频繁重试。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -14,6 +14,7 @@ let configCache = {};
 // 远程配置缓存
 let remoteConfigCache = {
     data: {},
+    // lastFetch 字段不再需要用于过期判断，但保留用于调试或记录
     lastFetch: 0
 };
 
@@ -23,33 +24,21 @@ let proxyIPRemoteCache = {
     expires: 0
 };
 
-/**
- * 清理配置缓存
- * @param {Array<string>} [updatedKeys] - 可选，仅清理指定的键名。如果不传或包含全局影响的键，则全量清空。
- */
-export function cleanConfigCache(updatedKeys) {
-    // 如果变更了远程配置地址，或者没有提供具体的键列表，则执行全量清空（这是最安全的操作）
-    if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes('REMOTE_CONFIG_URL')) {
-        configCache = {};
-        remoteConfigCache = { data: {}, lastFetch: 0 };
-        proxyIPRemoteCache = { data: [], expires: 0 };
-        return;
-    }
-
-    // 执行增量清理：仅删除变更的键
-    for (const key of updatedKeys) {
-        delete configCache[key];
-    }
-
-    // 特殊处理：如果 PROXYIP 变更，需要同时重置 IP 列表缓存
-    if (updatedKeys.includes('PROXYIP')) {
-        proxyIPRemoteCache = { data: [], expires: 0 };
-    }
+export function cleanConfigCache() {
+    configCache = {};
+    remoteConfigCache = { data: {}, lastFetch: 0 };
+    proxyIPRemoteCache = { data: [], expires: 0 };
 }
 
+/**
+ * 加载远程配置
+ * @param {Object} env 环境对象
+ * @param {boolean} forceReload 是否强制刷新（忽略缓存）
+ */
 export async function loadRemoteConfig(env, forceReload = false) {
     const remoteConfigUrl = await env.KV.get('REMOTE_CONFIG_URL');
     
+    // [修改] 永久缓存逻辑：
     // 如果不是强制刷新(forceReload为false)，且缓存中有数据，直接返回缓存。
     if (!forceReload && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
         return remoteConfigCache.data;
@@ -57,7 +46,7 @@ export async function loadRemoteConfig(env, forceReload = false) {
     
     if (remoteConfigUrl) {
         try {
-            // 添加超时控制 (5秒)
+            // [修复] 添加超时控制 (5秒)
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
             
@@ -138,12 +127,13 @@ export async function getConfig(env, key, defaultValue = undefined) {
 }
 
 export async function initializeContext(request, env) {
-    // 解析 URL 以检查 flush 参数
+    // [新增] 解析 URL 以检查 flush 参数
     const url = new URL(request ? request.url : 'http://localhost');
     const forceReload = url.searchParams.has('flush'); // 只要 URL 包含 ?flush 即可触发
 
     const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0');
     if (enableRemote === '1') {
+        // [修改] 传入 forceReload 参数
         await loadRemoteConfig(env, forceReload);
     }
 
@@ -232,15 +222,13 @@ export async function initializeContext(request, env) {
 
     const rawProxyIP = proxyIPStr || CONSTANTS.DEFAULT_PROXY_IP;
     
-    // [逻辑修正] ProxyIP 获取逻辑
-    let rawList = [];
     if (rawProxyIP) { 
         if (rawProxyIP.startsWith('http')) {
              if (Date.now() < proxyIPRemoteCache.expires) {
-                 rawList = proxyIPRemoteCache.data;
+                 ctx.proxyIPList = proxyIPRemoteCache.data;
              } else {
                  try {
-                     // 添加超时控制 (5秒)
+                     // [修复] 添加超时控制 (5秒)
                      const controller = new AbortController();
                      const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -253,7 +241,7 @@ export async function initializeContext(request, env) {
                      if (response.ok) {
                          const text = await response.text();
                          const list = await cleanList(text); 
-                         rawList = list;
+                         ctx.proxyIPList = list;
                          proxyIPRemoteCache.data = list;
                          proxyIPRemoteCache.expires = Date.now() + 600000; // 成功缓存 10 分钟
                      } else {
@@ -262,27 +250,16 @@ export async function initializeContext(request, env) {
                  } catch (e) {
                      console.error('Failed to fetch remote ProxyIP:', e);
                      const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-                     rawList = defParams;
-                     // 失败时缓存默认值 1 分钟，避免频繁重试
+                     ctx.proxyIPList = defParams;
+                     // [优化] 失败时缓存默认值 1 分钟，避免频繁重试
                      proxyIPRemoteCache.data = defParams;
                      proxyIPRemoteCache.expires = Date.now() + 60000; 
                  }
              }
         } else {
-             rawList = rawProxyIP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+             ctx.proxyIPList = rawProxyIP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
         }
-    }
-
-    // [关键修复] 严格执行“单一ProxyIP”原则
-    // 从列表中随机选择 1 个，并在整个请求生命周期中只使用这一个
-    if (rawList && rawList.length > 0) {
-        const selectedIP = rawList[Math.floor(Math.random() * rawList.length)];
-        ctx.proxyIP = selectedIP;
-        // 锁定列表仅包含这一个 IP，防止 Outbound 模块意外使用其他 IP
-        ctx.proxyIPList = [selectedIP]; 
-    } else {
-        ctx.proxyIP = '';
-        ctx.proxyIPList = [];
+        ctx.proxyIP = ctx.proxyIPList[Math.floor(Math.random() * ctx.proxyIPList.length)] || ''; 
     }
 
     ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
@@ -299,11 +276,7 @@ export async function initializeContext(request, env) {
 
     ctx.enableXhttp = !ctx.disabledProtocols.includes('xhttp');
 
-    if (url.searchParams.has('proxyip')) {
-        const manualIP = url.searchParams.get('proxyip');
-        ctx.proxyIP = manualIP;
-        ctx.proxyIPList = [manualIP]; // 手动指定时同样锁定
-    }
+    if (url.searchParams.has('proxyip')) ctx.proxyIP = url.searchParams.get('proxyip');
     if (url.searchParams.has('socks5')) ctx.socks5 = url.searchParams.get('socks5');
     
     return ctx;

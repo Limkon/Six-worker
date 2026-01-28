@@ -1,10 +1,8 @@
-// src/index.js
 /**
  * 文件名: src/index.js
- * 修复说明: 
- * 1. [Fix] 修正 XHTTP 路径匹配逻辑，由 '===' 改为 'startsWith'，兼容客户端追加的 UUID/StreamID 后缀。
- * 2. [Feature] 允许在 Subscription 路径上处理 XHTTP POST 请求，解决路径不匹配导致的 404 问题。
- * 3. [Fix] 优化 XHTTP 失败时的错误码，由 500 改为 400。
+ * 说明: 
+ * 1. [新增] 在首次密码设置和域名自动发现时，主动触发 WebDAV 推送。
+ * 2. [保留] 内存缓存优化域名 KV 写入。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -19,14 +17,6 @@ import { getPasswordSetupHtml, getLoginHtml } from './templates/auth.js';
 
 let lastSavedDomain = '';
 
-function safeWaitUntil(ctx, promise) {
-    if (ctx && typeof ctx.waitUntil === 'function') {
-        ctx.waitUntil(promise);
-    } else {
-        Promise.resolve(promise).catch(e => console.error('[Background Task Error]:', e));
-    }
-}
-
 async function handlePasswordSetup(request, env, ctx) {
     if (request.method === 'POST') {
         const formData = await request.formData();
@@ -37,10 +27,12 @@ async function handlePasswordSetup(request, env, ctx) {
         
         cleanConfigCache();
 
+        // [新增] 首次设置完成后，触发 WebDAV 推送 (First Deployment)
         try {
             const appCtx = await initializeContext(request, env);
-            appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
-            safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
+            appCtx.waitUntil = ctx.waitUntil.bind(ctx);
+            // 首次设置强制推送
+            ctx.waitUntil(executeWebDavPush(env, appCtx, true));
             console.log('[Setup] First time setup completed, WebDAV push triggered.');
         } catch (e) {
             console.error('[Setup] Failed to trigger WebDAV push:', e);
@@ -57,7 +49,7 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
         const proxyUrl = new URL(urlStr);
         const path = proxyUrl.pathname === '/' ? '' : proxyUrl.pathname;
         const newUrl = proxyUrl.protocol + '//' + proxyUrl.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
-        return await fetch(new Request(newUrl, request));
+        return fetch(new Request(newUrl, request));
     } catch (e) { return null; }
 }
 
@@ -65,7 +57,7 @@ export default {
     async fetch(request, env, ctx) {
         try {
             const context = await initializeContext(request, env);
-            context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
+            context.waitUntil = ctx.waitUntil.bind(ctx);
 
             const url = new URL(request.url);
             const path = url.pathname.toLowerCase();
@@ -87,7 +79,7 @@ export default {
                 return await handlePasswordSetup(request, env, ctx);
             }
 
-            // Route ID & Paths
+            // Route ID
             const superPassword = CONSTANTS.SUPER_PASSWORD;
             const dynamicID = context.dynamicUUID.toLowerCase();
             const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
@@ -104,29 +96,29 @@ export default {
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
+            // [新增] 域名自动发现与推送触发
             if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     lastSavedDomain = hostName; 
-                    context.waitUntil(env.KV.put('SAVED_DOMAIN', hostName));
-                    context.waitUntil(executeWebDavPush(env, context, false));
+                    ctx.waitUntil(env.KV.put('SAVED_DOMAIN', hostName));
+                    
+                    // 当域名发生变更(或首次发现)时，尝试触发推送
+                    // 这里 force=false，意味着只有 WebDAV 开关打开时才会推
+                    ctx.waitUntil(executeWebDavPush(env, context, false));
                 }
             }
 
-            // --- XHTTP Logic (Fixed) ---
+            // XHTTP
             const xhttpPath = context.userID ? `/${context.userID.substring(0, 8)}` : null;
             const isXhttpHeader = request.headers.get('Content-Type') === 'application/grpc';
-            
-            // [Fix] 关键修正：
-            // 1. 使用 startsWith 允许路径后缀 (如 /uuid/0)
-            // 2. 允许 isSubRoute + POST 也是 XHTTP 请求 (日志显示你的请求路径匹配的是 hash)
-            const isXhttpPath = (xhttpPath && path.startsWith(xhttpPath)) || (isSubRoute && request.method === 'POST');
+            const isXhttpPath = xhttpPath && path === xhttpPath;
 
             if (request.method === 'POST' && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
                 if (context.enableXhttp) {
                     if (isXhttpPath || isXhttpHeader) {
                         const r = await handleXhttpClient(request, context);
                         if (r) {
-                            context.waitUntil(r.closed);
+                            ctx.waitUntil(r.closed);
                             return new Response(r.readable, {
                                 headers: {
                                     'X-Accel-Buffering': 'no',
@@ -137,8 +129,7 @@ export default {
                                 }
                             });
                         }
-                        // [Fix] 协议握手失败返回 400 而不是 500
-                        return new Response('Invalid XHTTP Protocol or Header', { status: 400 });
+                        return new Response('Internal Server Error', { status: 500 });
                     }
                     
                     if (!isManagementRoute) {
@@ -209,6 +200,8 @@ export default {
         }
     },
     
+    // Scheduled Handler (保留但不再依赖 Cron)
     async scheduled(event, env, ctx) {
+        // Cron trigger disabled by logic updates.
     }
 };
