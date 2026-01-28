@@ -1,10 +1,12 @@
 // src/index.js
 /**
  * 文件名: src/index.js
- * 修复说明: 
- * 1. [Refactor] 重构 XHTTP 拦截逻辑，使其结构严格对齐 Five-worker。
- * 逻辑为：POST请求 + 开启XHTTP + 非管理API + 非登录请求 + 非根路径。
- * 2. 保留 Six-worker 特有的域名自动发现和 WebDAV 推送逻辑。
+ * 审计与修复说明:
+ * 1. [Critical Fix] 修复 proxyUrl 中的 Host 头传递 bug。
+ * 旧代码直接复制请求头会导致目标服务器因 Host 不匹配而拒绝访问(403/404)。
+ * 修复方案：显式删除 Host 头，由 fetch 自动生成。
+ * 2. [Refactor] 扁平化 XHTTP 拦截逻辑，与 Five-worker 保持代码结构一致。
+ * 3. [Optimization] 保留 Six-worker 特有的域名自动发现与 WebDAV 推送功能。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -58,8 +60,23 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
         const proxyUrl = new URL(urlStr);
         const path = proxyUrl.pathname === '/' ? '' : proxyUrl.pathname;
         const newUrl = proxyUrl.protocol + '//' + proxyUrl.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
-        return fetch(new Request(newUrl, request));
-    } catch (e) { return null; }
+
+        // [Fix] 重建 Headers 对象并删除 Host 头
+        // 这是一个关键修复：如果不删除 Host，反代到不同域名的请求通常会被目标服务器拒绝 (403/404)
+        const newHeaders = new Headers(request.headers);
+        newHeaders.delete('Host');
+        newHeaders.delete('Referer'); // 可选：为了隐私也可以移除 Referer
+
+        return fetch(new Request(newUrl, {
+            method: request.method,
+            headers: newHeaders,
+            body: request.body,
+            redirect: 'follow'
+        }));
+    } catch (e) { 
+        // 捕获 DNS 解析失败或其他网络错误，静默失败以回落到默认页面
+        return null; 
+    }
 }
 
 export default {
@@ -73,14 +90,14 @@ export default {
             const path = url.pathname.toLowerCase();
             const hostName = request.headers.get('Host');
 
-            // WebSocket
+            // 1. WebSocket 处理 (最高优先级)
             const upgradeHeader = request.headers.get('Upgrade');
             if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
                 if (!context.userID) return new Response('UUID not set', { status: 401 });
                 return await handleWebSocketRequest(request, context);
             }
 
-            // Password Setup
+            // 2. 初始密码设置
             const rawUUID = await getConfig(env, 'UUID');
             const rawKey = await getConfig(env, 'KEY');
             const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
@@ -89,7 +106,7 @@ export default {
                 return await handlePasswordSetup(request, env, ctx);
             }
 
-            // Route ID
+            // 3. 路由路径计算
             const superPassword = CONSTANTS.SUPER_PASSWORD;
             const dynamicID = context.dynamicUUID.toLowerCase();
             const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
@@ -106,7 +123,7 @@ export default {
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
-            // 域名自动发现
+            // 4. 域名自动发现 (Six-worker 特性)
             if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     lastSavedDomain = hostName; 
@@ -115,8 +132,9 @@ export default {
                 }
             }
 
-            // [Modified] XHTTP 协议拦截 (逻辑与 Five-worker 严格对齐)
-            // 只要满足：POST + 开启XHTTP + 非管理API + 非登录 + 非根路径，即进行拦截尝试
+            // 5. XHTTP 协议拦截
+            // 逻辑说明：POST 请求 + 开启 XHTTP + 非 API + 非登录 + 非根路径
+            // 注意：根路径('/')被排除，因此不会影响 proxyUrl 的 POST 请求（如果有）
             if (request.method === 'POST' && context.enableXhttp && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
                 const r = await handleXhttpClient(request, context);
                 if (r) {
@@ -143,7 +161,7 @@ export default {
                 }
             }
 
-            // Management Pages
+            // 6. 管理页面鉴权
             if (isManagementRoute) {
                 if (!path.startsWith('/' + superPassword)) {
                     if (context.adminPass) {
@@ -173,13 +191,13 @@ export default {
                 return new Response(html, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
             }
 
-            // Subscriptions
+            // 7. 订阅处理
             if (isSubRoute) {
                 const response = await handleSubscription(request, env, context, subPath, hostName);
                 if (response) return response;
             }
 
-            // Root Path
+            // 8. 根路径与回落 (反代逻辑)
             if (path === '/') {
                 const url302 = await getConfig(env, 'URL302');
                 if (url302) return Response.redirect(url302, 302);
