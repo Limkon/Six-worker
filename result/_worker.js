@@ -3303,7 +3303,6 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
     const newUrl = proxyUrl2.protocol + "//" + proxyUrl2.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
     return await fetch(new Request(newUrl, request));
   } catch (e) {
-    void(0);
     return null;
   }
 }
@@ -3347,7 +3346,7 @@ var index_default = {
       }
       const xhttpPath = context.userID ? `/${context.userID.substring(0, 8)}` : null;
       const isXhttpHeader = request.headers.get("Content-Type") === "application/grpc";
-      const isXhttpPath = xhttpPath && path === xhttpPath;
+      const isXhttpPath = xhttpPath && path.startsWith(xhttpPath) || isSubRoute && request.method === "POST";
       if (request.method === "POST" && !isApiPostPath && url.searchParams.get("auth") !== "login" && path !== "/") {
         if (context.enableXhttp) {
           if (isXhttpPath || isXhttpHeader) {
@@ -3364,7 +3363,7 @@ var index_default = {
                 }
               });
             }
-            return new Response("Internal Server Error", { status: 500 });
+            return new Response("Invalid XHTTP Protocol or Header", { status: 400 });
           }
           if (!isManagementRoute) {
             const contentType = request.headers.get("content-type") || "";
