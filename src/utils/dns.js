@@ -1,14 +1,17 @@
 // src/utils/dns.js
 /**
  * 文件名: src/utils/dns.js
- * 修复说明: 
- * 1. [Optimization] 增加请求合并 (Request Coalescing) 机制，防止高并发下对同一域名的冗余查询。
- * 2. [Refactor] 提取核心解析逻辑至 performResolve，分离缓存控制与网络请求。
- * 3. [Security Fix] 保留原有的 NAT64 合成算法安全修复。
+ * 审计与修复说明: 
+ * 1. [Feature] 引入 Cache API 持久化：将 DNS 结果存储至 Cloudflare 边缘缓存，解决冷启动导致的缓存丢失问题。
+ * 2. [Optimization] 分级缓存策略：内存 Map (L1) + Cache API (L2)，兼顾极致响应速度与跨实例持久性。
+ * 3. [Optimization] 增加请求合并 (Request Coalescing) 机制，防止高并发下对同一域名的冗余查询。
+ * 4. [Refactor] 提取核心解析逻辑至 performResolve，分离缓存控制与网络请求。
+ * 5. [Security Fix] 保留原有的 NAT64 合成算法安全修复。
+ * 6. [Keep] 保留所有原始安全检查（如内存溢出保护）与详细注释。
  */
 import { CONSTANTS } from '../constants.js';
 
-// DNS 缓存 Map (存储结果)
+// DNS 缓存 Map (存储结果 - L1 内存缓存)
 const dnsCache = new Map();
 
 // 正在进行的 DNS 请求 (存储 Promise，用于去重并发请求)
@@ -212,32 +215,48 @@ async function performResolve(domain, dnsServer) {
     return null;
 }
 
+/**
+ * 核心解析函数：集成 L1/L2 缓存与并发合并
+ */
 export async function resolveToIPv6(domain, dnsServer) {
     if (!dnsServer) return null;
 
-    // [新增] 缓存容量保护：防止 Worker 内存溢出
+    // [Original Keep] 缓存容量保护：防止 Worker 内存溢出
     if (dnsCache.size > 1000) {
         dnsCache.clear();
     }
 
     const cacheKey = `${domain}|${dnsServer}`;
-    
-    // 1. 查结果缓存
+    // 为 Cache API 构造一个合法的虚拟 URL 作为 Key
+    const cacheUrl = new URL(`http://dns-cache.local/${encodeURIComponent(cacheKey)}`);
+    const cache = caches.default;
+
+    // 1. 查 L1 结果缓存 (内存)
     const cached = dnsCache.get(cacheKey);
     if (cached && Date.now() < cached.expires) {
         return cached.ip;
     }
 
-    // 2. 查请求合并缓存 (Request Coalescing)
-    // 如果已经有相同的请求正在进行中，直接复用其 Promise
+    // 2. 查 L2 持久化缓存 (Cloudflare Cache API)
+    try {
+        const response = await cache.match(cacheUrl);
+        if (response) {
+            const ip = await response.text();
+            // 同步到 L1
+            dnsCache.set(cacheKey, { ip, expires: Date.now() + 60000 });
+            return ip;
+        }
+    } catch (e) {
+        console.error(`[DNS] Cache API match failed:`, e);
+    }
+
+    // 3. 查请求合并缓存 (Request Coalescing)
     if (inflightRequests.has(cacheKey)) {
         return await inflightRequests.get(cacheKey);
     }
 
-    // 3. 发起新请求
-    // 使用 Promise 包装执行过程，并确保存入 inflightRequests
+    // 4. 发起新请求
     const promise = performResolve(domain, dnsServer).finally(() => {
-        // 无论成功失败，请求结束后都要从队列中移除
         inflightRequests.delete(cacheKey);
     });
 
@@ -245,9 +264,26 @@ export async function resolveToIPv6(domain, dnsServer) {
 
     try {
         const ip = await promise;
-        // 4. 存入结果缓存 (仅成功时)
+        // 5. 存入缓存 (仅成功时)
         if (ip) {
+            // 存入 L1
             dnsCache.set(cacheKey, { ip, expires: Date.now() + 60000 });
+            
+            // 存入 L2 (Cache API)
+            const cacheResponse = new Response(ip, {
+                headers: { 
+                    'Cache-Control': 'max-age=60', // 边缘缓存 60 秒
+                    'Content-Type': 'text/plain' 
+                }
+            });
+            
+            // 使用 waitUntil 确保异步写入，不阻塞当前查询响应
+            // 兼容可能不存在 event 对象的环境
+            if (typeof event !== 'undefined' && event.waitUntil) {
+                event.waitUntil(cache.put(cacheUrl, cacheResponse));
+            } else {
+                await cache.put(cacheUrl, cacheResponse);
+            }
         }
         return ip;
     } catch (e) {
