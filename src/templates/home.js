@@ -6,7 +6,9 @@
  */
 
 // 内联的轻量级 CSS，模拟 Bootstrap 核心样式
-// 修改说明: 将 .form-control 和 .btn 的 padding 从 .375rem .75rem 调整为 .2rem .5rem 以降低高度
+// 修改说明: 
+// 1. 将 .form-control 和 .btn 的 padding 进一步调整为 .1rem .4rem 以极致降低高度
+// 2. 给 .btn 增加 white-space:nowrap 防止文字换行
 const INLINE_CSS = `
 <style>
 :root{--bs-primary:#0d6efd;--bs-secondary:#6c757d;--bs-info:#0dcaf0;--bs-body-bg:#fff;--bs-body-color:#212529}
@@ -18,9 +20,9 @@ hr{margin:1rem 0;color:inherit;border:0;border-top:1px solid;opacity:.25}
 .mb-2{margin-bottom:.5rem!important} .mt-4{margin-top:1.5rem!important} .mb-4{margin-bottom:1.5rem!important}
 .text-danger{color:#dc3545!important}
 .input-group{position:relative;display:flex;flex-wrap:nowrap;width:100%}
-.form-control{display:block;width:100%;padding:.2rem .5rem;font-size:1rem;font-weight:400;line-height:1.5;color:#212529;background-color:#fff;background-clip:padding-box;border:1px solid #ced4da;border-radius:.375rem;transition:border-color .15s ease-in-out,box-shadow .15s ease-in-out;min-width:100px}
+.form-control{display:block;width:100%;padding:.1rem .4rem;font-size:1rem;font-weight:400;line-height:1.5;color:#212529;background-color:#fff;background-clip:padding-box;border:1px solid #ced4da;border-radius:.375rem;transition:border-color .15s ease-in-out,box-shadow .15s ease-in-out;min-width:100px}
 .form-control[readonly]{background-color:#e9ecef;opacity:1}
-.btn{display:inline-block;font-weight:400;line-height:1.5;color:#212529;text-align:center;text-decoration:none;vertical-align:middle;cursor:pointer;user-select:none;background-color:transparent;border:1px solid transparent;padding:.2rem .5rem;font-size:1rem;border-radius:.375rem;transition:color .15s ease-in-out,background-color .15s ease-in-out,border-color .15s ease-in-out,box-shadow .15s ease-in-out}
+.btn{display:inline-block;white-space:nowrap;font-weight:400;line-height:1.5;color:#212529;text-align:center;text-decoration:none;vertical-align:middle;cursor:pointer;user-select:none;background-color:transparent;border:1px solid transparent;padding:.1rem .4rem;font-size:1rem;border-radius:.375rem;transition:color .15s ease-in-out,background-color .15s ease-in-out,border-color .15s ease-in-out,box-shadow .15s ease-in-out}
 .btn-primary{color:#fff;background-color:#0d6efd;border-color:#0d6efd} .btn-primary:hover{background-color:#0b5ed7;border-color:#0a58ca}
 .btn-secondary{color:#fff;background-color:#6c757d;border-color:#6c757d;border-top-left-radius:0;border-bottom-left-radius:0} .btn-secondary:hover{background-color:#5c636a;border-color:#565e64}
 .btn-info{color:#000;background-color:#0dcaf0;border-color:#0dcaf0} .btn-info:hover{background-color:#31d2f2;border-color:#25cff2}
@@ -29,7 +31,8 @@ a.btn{margin-right:5px}
 </style>`;
 
 // 辅助函数：生成复制按钮 HTML
-const copyBtn = (val) => `<div class="input-group mb-2"><input type="text" class="form-control" value="${val}" readonly><button class="btn btn-secondary" onclick="copyToClipboard('${val}')">复制</button></div>`;
+// 修改: 将 btn-secondary 改为 btn-primary (蓝色)
+const copyBtn = (val) => `<div class="input-group mb-2"><input type="text" class="form-control" value="${val}" readonly><button class="btn btn-primary" onclick="copyToClipboard('${val}')">复制</button></div>`;
 
 export function getHomePageHtml(FileName, mixedTitle, isWorkersDev, subs, nodeDetailsHtml, managementPath) {
     return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>节点信息</title>${INLINE_CSS}</head><body><div class="container mt-4 mb-4">` +
