@@ -4,6 +4,8 @@
  * 修改说明:
  * 1. [修复] 严格执行“单一连接只使用一个ProxyIP”策略。
  * 2. [优化] cleanConfigCache 支持按需更新变更的键值，避免全量清空缓存。
+ * 3. [修复] 使用 finally 确保 fetch 超时定时器被正确清理 (避免资源泄露)。
+ * 4. [确认] 行解析逻辑使用 indexOf+substring，已支持带 '=' 的值。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
@@ -61,11 +63,12 @@ export async function loadRemoteConfig(env, forceReload = false) {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
             
+            // [Fix] 使用 finally 确保定时器被清除，防止内存泄露
             const response = await fetch(remoteConfigUrl, {
                 signal: controller.signal
+            }).finally(() => {
+                clearTimeout(timeoutId);
             });
-            
-            clearTimeout(timeoutId); // 请求成功，清除定时器
 
             if (response.ok) {
                 const text = await response.text();
@@ -86,6 +89,8 @@ export async function loadRemoteConfig(env, forceReload = false) {
                         if (!trimmedLine || trimmedLine.startsWith('#') || trimmedLine.startsWith('//')) {
                             return;
                         }
+                        // [Verify] 现有逻辑使用 indexOf + substring，已能正确处理值中包含 '=' 的情况
+                        // 例如 "Key=Value=With=Equals" -> k="Key", v="Value=With=Equals"
                         const eqIndex = trimmedLine.indexOf('=');
                         if (eqIndex > 0) {
                             const k = trimmedLine.substring(0, eqIndex).trim();
@@ -244,11 +249,12 @@ export async function initializeContext(request, env) {
                      const controller = new AbortController();
                      const timeoutId = setTimeout(() => controller.abort(), 5000);
 
+                     // [Fix] 同样应用 finally 修复
                      const response = await fetch(rawProxyIP, {
                         signal: controller.signal
+                     }).finally(() => {
+                         clearTimeout(timeoutId);
                      });
-                     
-                     clearTimeout(timeoutId);
 
                      if (response.ok) {
                          const text = await response.text();
