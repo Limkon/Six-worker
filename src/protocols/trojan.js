@@ -26,14 +26,15 @@ export async function parseTrojanHeader(trojanBuffer, password) {
     // 58 = Hash(56) + CR(1) + LF(1)
     if (trojanBuffer.byteLength < 58) return { hasError: true, message: 'Trojan buffer too short.' };
     
-    // [优化] 避免不必要的包装
+    // [Optimization] 确保 buffer 是 Uint8Array，避免不必要的包装
     const buffer = trojanBuffer instanceof Uint8Array ? trojanBuffer : new Uint8Array(trojanBuffer);
     
     // 1. 验证哈希 (Offset 0-56)
-    // [优化] 直接操作 Bytes，避免将网络数据解码为 String
+    // [Optimization] 直接操作 Bytes，避免将网络数据解码为 String
     let expectedHashBytes = trojanHashCache.get(password);
     
     if (expectedHashBytes) {
+        // LRU 简单实现：刷新访问顺序
         trojanHashCache.delete(password);
         trojanHashCache.set(password, expectedHashBytes);
     } else {
@@ -61,63 +62,79 @@ export async function parseTrojanHeader(trojanBuffer, password) {
     }
     
     // 3. 解析请求 (Cmd + Atyp + Addr + Port + CRLF + Payload)
-    const requestData = buffer.subarray(58);
+    const requestOffset = 58;
+    const requestData = buffer.subarray(requestOffset);
+    
     if (requestData.byteLength < 4) return { hasError: true, message: 'Trojan request too short.' };
     
-    // [优化] 统一 DataView
-    const requestView = new DataView(requestData.buffer, requestData.byteOffset, requestData.byteLength);
-    const command = requestData[0]; // 这是一个字节，直接读取即可，不需要 DataView
+    // [Optimization] 使用 DataView 读取后续字段，注意需要累加 byteOffset
+    const view = new DataView(buffer.buffer, buffer.byteOffset + requestOffset, requestData.byteLength);
     
-    // [Fix] 允许 CONNECT(1) 和 UDP(3)
+    const command = buffer[requestOffset]; // 直接读取字节
     const isUDP = (command === 3);
     
+    // [Fix] 允许 CONNECT(1) 和 UDP(3)
     if (command !== 1 && !isUDP) {
         return { hasError: true, message: 'Unsupported Trojan cmd: ' + command };
     }
     
-    const atyp = requestData[1];
-    let host, port, addressEndIndex = 0;
+    const atyp = buffer[requestOffset + 1];
+    let host = "";
+    let port = 0;
+    let payloadIndex = 0; // 相对于 requestOffset 的偏移
     
     // 解析地址
     try {
         switch (atyp) {
-            case CONSTANTS.ADDRESS_TYPE_IPV4: 
-                addressEndIndex = 2 + 4; 
-                // [优化] subarray join
-                host = requestData.subarray(2, addressEndIndex).join('.'); 
+            case CONSTANTS.ADDRESS_TYPE_IPV4: // 1
+                // 2(Cmd+Atyp) + 4(IPv4) + 2(Port)
+                // [Optimization] 使用 subarray.join，避免创建新数组
+                host = buffer.subarray(requestOffset + 2, requestOffset + 6).join('.'); 
+                port = view.getUint16(6, false); // Offset 6 relative to request start
+                payloadIndex = 8;
                 break;
-            case CONSTANTS.ATYP_TROJAN_DOMAIN: 
-                const domainLen = requestData[2]; 
-                addressEndIndex = 3 + domainLen; 
-                host = textDecoder.decode(requestData.subarray(3, addressEndIndex)); 
+                
+            case CONSTANTS.ATYP_TROJAN_DOMAIN: // 3
+                const domainLen = buffer[requestOffset + 2];
+                // 2(Cmd+Atyp) + 1(Len) + Domain + 2(Port)
+                host = textDecoder.decode(buffer.subarray(requestOffset + 3, requestOffset + 3 + domainLen)); 
+                port = view.getUint16(3 + domainLen, false);
+                payloadIndex = 3 + domainLen + 2;
                 break;
-            case CONSTANTS.ATYP_TROJAN_IPV6: 
-                addressEndIndex = 2 + 16; 
+                
+            case CONSTANTS.ATYP_TROJAN_IPV6: // 4
+                // 2(Cmd+Atyp) + 16(IPv6) + 2(Port)
                 const ipv6 = []; 
-                for (let i = 0; i < 8; i++) ipv6.push(requestView.getUint16(2 + i * 2, false).toString(16));
+                for (let i = 0; i < 8; i++) {
+                    ipv6.push(view.getUint16(2 + i * 2, false).toString(16));
+                }
                 host = '[' + ipv6.join(':') + ']'; 
+                port = view.getUint16(18, false);
+                payloadIndex = 20;
                 break;
-            default: return { hasError: true, message: 'Invalid Trojan ATYP: ' + atyp };
+                
+            default: 
+                return { hasError: true, message: 'Invalid Trojan ATYP: ' + atyp };
         }
     } catch (e) {
         return { hasError: true, message: 'Address decode failed' };
     }
     
-    // 验证端口数据长度
-    if (addressEndIndex + 2 > requestData.byteLength) return { hasError: true, message: 'Buffer too short for port' };
-
-    port = requestView.getUint16(addressEndIndex, false);
-    const payloadStartIndex = addressEndIndex + 2;
-    
     // 验证 Payload 前的 CRLF
-    if (requestData.byteLength < payloadStartIndex + 2) return { hasError: true, message: 'Trojan missing payload CRLF' };
-    if (requestData[payloadStartIndex] !== 0x0D || requestData[payloadStartIndex + 1] !== 0x0A) {
+    // crlfIndex 是 Payload 之前的两个字节
+    const crlfIndex = requestOffset + payloadIndex;
+    
+    if (buffer.byteLength < crlfIndex + 2) {
+        return { hasError: true, message: 'Trojan buffer too short for payload CRLF' };
+    }
+
+    if (buffer[crlfIndex] !== 0x0D || buffer[crlfIndex + 1] !== 0x0A) {
         return { hasError: true, message: 'Trojan missing payload CRLF' };
     }
     
     // 返回 Payload 视图 (对于 UDP，这里通常是 Encapsulated Payload)
-    // [优化] Zero-copy 视图
-    const rawClientData = requestData.subarray(payloadStartIndex + 2);
+    // [Optimization] Zero-copy 视图，直接返回剩余数据的引用
+    const rawClientData = buffer.subarray(crlfIndex + 2);
     
     return { 
         hasError: false, 
