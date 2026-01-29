@@ -1,1 +1,3529 @@
-var t={SUPER_PASSWORD:"771571215.",DEFAULT_PROXY_IP:"soho.perslist.com:443",SUB_HASH_LENGTH:6,IDLE_TIMEOUT_MS:45e3,MAX_CONCURRENT:512,XHTTP_BUFFER_SIZE:131072,ADDRESS_TYPE_IPV4:1,ADDRESS_TYPE_URL:2,ADDRESS_TYPE_IPV6:3,ATYP_TROJAN_DOMAIN:3,ATYP_TROJAN_IPV6:4,ATYP_SS_IPV4:1,ATYP_SS_DOMAIN:3,ATYP_SS_IPV6:4,SOCKS_VERSION:5,SOCKS_CMD_CONNECT:1,HTTP_PORTS:["80","8080","8880","2052","2082","2086","2095"],HTTPS_PORTS:["443","8443","2053","2083","2087","2096"],DEFAULT_GO2SOCKS5:["*ttvnw.net","*tapecontent.net","*cloudatacdn.com","*.loadshare.org"]},e=new TextDecoder,n=new TextEncoder,r=/^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,s=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;function a(t){return r.test(t)}async function o(t){const e=n.encode(t),r=await crypto.subtle.digest("SHA-1",e);return Array.from(new Uint8Array(r)).map(t=>t.toString(16).padStart(2,"0")).join("")}var i=[1116352408,1899447441,3049323471,3921009573,961987163,1508970993,2453635748,2870763221,3624381080,310598401,607225278,1426881987,1925078388,2162078206,2614888103,3248222580,3835390401,4022224774,264347078,604807628,770255983,1249150122,1555081692,1996064986,2554220882,2821834349,2952996808,3210313671,3336571891,3584528711,113926993,338241895,666307205,773529912,1294757372,1396182291,1695183700,1986661051,2177026350,2456956037,2730485921,2820302411,3259730800,3345764771,3516065817,3600352804,4094571909,275423344,430227734,506948616,659060556,883997877,958139571,1322822218,1537002063,1747873779,1955562222,2024104815,2227730452,2361852424,2428436474,2756734187,3204031479,3329325298],c=(t,e)=>(t>>>e|t<<32-e)>>>0;function l(t){return(t=>{let e="";for(let n=0;n<t.length;n++)e+=(t[n]>>>4&15).toString(16),e+=(15&t[n]).toString(16);return e})((t=>{let e=[3238371032,914150663,812702999,4144912697,4290775857,1750603025,1694076839,3204075428];const n=8*t.length;for(t+=String.fromCharCode(128);8*t.length%512!=448;)t+=String.fromCharCode(0);const r=Math.floor(n/4294967296),s=4294967295&n;t+=String.fromCharCode(r>>>24&255,r>>>16&255,r>>>8&255,255&r,s>>>24&255,s>>>16&255,s>>>8&255,255&s);const a=[];for(let e=0;e<t.length;e+=4)a.push(t.charCodeAt(e)<<24|t.charCodeAt(e+1)<<16|t.charCodeAt(e+2)<<8|t.charCodeAt(e+3));const o=new Array(64);for(let t=0;t<a.length;t+=16){for(let e=0;e<16;e++)o[e]=a[t+e];for(let t=16;t<64;t++){const e=c(o[t-15],7)^c(o[t-15],18)^o[t-15]>>>3,n=c(o[t-2],17)^c(o[t-2],19)^o[t-2]>>>10;o[t]=o[t-16]+e+o[t-7]+n>>>0}let[n,r,s,l,d,u,p,h]=e;for(let t=0;t<64;t++){const e=h+(c(d,6)^c(d,11)^c(d,25))+(d&u^~d&p)+i[t]+o[t]>>>0,a=n&r^n&s^r&s;h=p,p=u,u=d,d=l+e>>>0,l=s,s=r,r=n,n=e+((c(n,2)^c(n,13)^c(n,22))+a>>>0)>>>0}e[0]=e[0]+n>>>0,e[1]=e[1]+r>>>0,e[2]=e[2]+s>>>0,e[3]=e[3]+l>>>0,e[4]=e[4]+d>>>0,e[5]=e[5]+u>>>0,e[6]=e[6]+p>>>0,e[7]=e[7]+h>>>0}return e.slice(0,7)})(unescape(encodeURIComponent(t))).flatMap(t=>[t>>>24&255,t>>>16&255,t>>>8&255,255&t]))}async function d(t){if(!t)return[];let e=t.replace(/[\t"'\r\n]+/g,",").replace(/,+/g,",");return e.startsWith(",")&&(e=e.slice(1)),e.endsWith(",")&&(e=e.slice(0,-1)),e.split(",").filter(Boolean)}function u(t){try{1!==t.readyState&&2!==t.readyState||t.close()}catch(t){}}var p=Array.from({length:256},(t,e)=>(e+256).toString(16).slice(1));async function h(t,e,n){const r=new Date(2007,6,7,n,0,0),s=864e5*e;async function a(t){const e=(new TextEncoder).encode(t),n=await crypto.subtle.digest("SHA-256",e),r=Array.from(new Uint8Array(n)).map(t=>t.toString(16).padStart(2,"0")).join("");return`${r.substr(0,8)}-${r.substr(8,4)}-4${r.substr(13,3)}-${(63&parseInt(r.substr(16,2),16)|128).toString(16)}${r.substr(18,2)}-${r.substr(20,12)}`}const o=function(){const t=new Date,e=new Date(t.getTime()+288e5),n=Number(e)-Number(r);return Math.ceil(n/s)}();return[await a(t+o),await a(t+(o-1))]}function f(t,e){return!(!e||0===e.length)&&e.some(e=>{let n=e.replace(/\*/g,".*");return new RegExp(`^${n}$`,"i").test(t)})}var m={},g={data:{},lastFetch:0},b={data:[],expires:0};function w(t){if(!t||!Array.isArray(t)||t.includes("REMOTE_CONFIG_URL"))return m={},g={data:{},lastFetch:0},void(b={data:[],expires:0});for(const e of t)delete m[e];t.includes("PROXYIP")&&(b={data:[],expires:0})}async function y(e,n,r=void 0){if(void 0!==m[n])return m[n];let s;if(e.KV){const t=await e.KV.get(n);null!==t&&(s=t)}!s&&g.data&&g.data[n]&&(s=g.data[n]),!s&&e[n]&&(s=e[n]),s||"UUID"!==n||(s=e.UUID||e.uuid||e.PASSWORD||e.pswd||e.SUPER_PASSWORD||t.SUPER_PASSWORD),s||"KEY"!==n||(s=e.KEY||e.TOKEN);const a=void 0!==s?s:r;return m[n]=a,a}async function S(e,n){const r=new URL(e?e.url:"http://localhost"),s=r.searchParams.has("flush");"1"===await y(n,"REMOTE_CONFIG","0")&&await async function(t,e=!1){const n=await t.KV.get("REMOTE_CONFIG_URL");if(!e&&g.data&&Object.keys(g.data).length>0)return g.data;if(n)try{const t=new AbortController,e=setTimeout(()=>t.abort(),5e3),r=await fetch(n,{signal:t.signal});if(clearTimeout(e),r.ok){const t=await r.text(),e=Date.now();try{const n=JSON.parse(t);g.data=n,g.lastFetch=e,m={}}catch(n){const r=t.split("\n"),s={};r.forEach(t=>{const e=t.trim();if(!e||e.startsWith("#")||e.startsWith("//"))return;const n=e.indexOf("=");if(n>0){const t=e.substring(0,n).trim(),r=e.substring(n+1).trim();t&&r&&(s[t]=r)}}),g.data=s,g.lastFetch=e,m={}}}}catch(t){}return g.data}(n,s);const[o,i,c,l,u,p,f,w,S,P,I]=await Promise.all([y(n,"ADMIN_PASS"),y(n,"UUID"),y(n,"KEY"),y(n,"TIME"),y(n,"UPTIME"),y(n,"PROXYIP"),y(n,"DNS64"),y(n,"SOCKS5"),y(n,"GO2SOCKS5"),y(n,"BAN"),y(n,"DIS","")]),x={userID:"",dynamicUUID:"",userIDLow:"",expectedUserIDs:[],proxyIP:"",proxyIPList:[],dns64:f||"",socks5:w||"",go2socks5:[],banHosts:[],enableXhttp:!1,disabledProtocols:[],httpsPorts:t.HTTPS_PORTS,startTime:Date.now(),adminPass:o};if(i&&(x.userID=i,x.dynamicUUID=i),c||i&&!a(i)){const t=c||i;if(t){const e=Number(l)||0,n=Number(u)||0,r=await h(t,e,n);x.userID=r[0],x.userIDLow=r[1],x.dynamicUUID=t}}if(!x.userID){const e=await y(n,"SUPER_PASSWORD")||t.SUPER_PASSWORD;if(e){const t=Number(l)||0,n=Number(u)||0,r=await h(e,t,n);x.userID=r[0],x.userIDLow=r[1],x.dynamicUUID=e}else{const t=crypto.randomUUID();x.userID=t,x.dynamicUUID=t}}x.expectedUserIDs=[x.userID,x.userIDLow].filter(Boolean).map(t=>t.toLowerCase());const D=p||t.DEFAULT_PROXY_IP;let U=[];if(D)if(D.startsWith("http"))if(Date.now()<b.expires)U=b.data;else try{const t=new AbortController,e=setTimeout(()=>t.abort(),5e3),n=await fetch(D,{signal:t.signal});if(clearTimeout(e),!n.ok)throw new Error(`ProxyIP fetch failed: ${n.status}`);{const t=await n.text(),e=await d(t);U=e,b.data=e,b.expires=Date.now()+6e5}}catch(e){const n=t.DEFAULT_PROXY_IP.split(/[,;\n]/).map(t=>t.trim()).filter(Boolean);U=n,b.data=n,b.expires=Date.now()+6e4}else U=D.split(/[,;\n]/).map(t=>t.trim()).filter(Boolean);if(U&&U.length>0){const t=U[Math.floor(Math.random()*U.length)];x.proxyIP=t,x.proxyIPList=[t]}else x.proxyIP="",x.proxyIPList=[];x.go2socks5=S?await d(S):t.DEFAULT_GO2SOCKS5,P&&(x.banHosts=await d(P));let T=I;if(T&&(T=T.replace(/，/g,",")),x.disabledProtocols=(await d(T)).map(t=>{const e=t.trim().toLowerCase();return"shadowsocks"===e?"ss":e}),x.enableXhttp=!x.disabledProtocols.includes("xhttp"),r.searchParams.has("proxyip")){const t=r.searchParams.get("proxyip");x.proxyIP=t,x.proxyIPList=[t]}return r.searchParams.has("socks5")&&(x.socks5=r.searchParams.get("socks5")),x}var P=new Map,I=(e,n,r)=>{const s=e instanceof Uint8Array?e:new Uint8Array(e);let a;if(r===t.ATYP_SS_DOMAIN){if(n>=s.length)return{hasError:!0,message:"Buffer too short for domain length"};a=s[n],n+=1}else if(r===t.ATYP_SS_IPV4)a=4;else{if(r!==t.ATYP_SS_IPV6)return{hasError:!0,message:"Invalid ATYP: "+r};a=16}const o=n+a;return o>s.length?{hasError:!0,message:"Buffer too short for address"}:{hasError:!1,targetAddrBytes:s.subarray(n,o),dataOffset:o}},x=new Map;import{connect as D}from"cloudflare:sockets";var U=new Map;function T(t){if(!t)return null;if((t=t.replace(/[\[\]]/g,"")).includes(".")){const e=t.lastIndexOf(":"),n=t.substring(e+1),r=t.substring(0,e),s=n.split(".").map(Number);if(4!==s.length)return null;const a=s[0]<<8|s[1],o=s[2]<<8|s[3],i=T(r+":0:0");return i?(i[6]=a,i[7]=o,i):null}const e=t.split(":");let n=[];const r=e.indexOf("");if(-1!==r){const t=e.slice(0,r).filter(t=>""!==t).map(t=>parseInt(t,16)||0),s=e.slice(r+1).filter(t=>""!==t).map(t=>parseInt(t,16)||0),a=new Array(8-t.length-s.length).fill(0);n=[...t,...a,...s]}else n=e.map(t=>parseInt(t,16)||0);return n.slice(0,8)}async function v(t,e){if(!e)return null;U.size>1e3&&U.clear();const n=`${t}|${e}`,r=U.get(n);if(r&&Date.now()<r.expires)return r.ip;let s=!1;try{const t=new URL(e);"http:"!==t.protocol&&"https:"!==t.protocol||(s=!0)}catch(t){}if(s){try{const r=new URL(e);r.searchParams.set("name",t),r.searchParams.set("type","AAAA");const s=await fetch(r.toString(),{method:"GET",headers:{Accept:"application/dns-json"}});if(!s.ok)return null;let a;try{a=await s.json()}catch(t){return null}if(a&&0===a.Status&&Array.isArray(a.Answer))for(const t of a.Answer)if(28===t.type&&t.data){const e=t.data;return U.set(n,{ip:e,expires:Date.now()+6e4}),e}}catch(t){}return null}let a=e.split("/")[0].trim();if(!a.includes(":"))return null;let o=t;if(!/^(\d{1,3}\.){3}\d{1,3}$/.test(t))try{const e=new URL("https://cloudflare-dns.com/dns-query");e.searchParams.set("name",t),e.searchParams.set("type","A");const n=await fetch(e,{headers:{Accept:"application/dns-json"}}),r=await n.json();if(!r||0!==r.Status||!Array.isArray(r.Answer))return null;{const t=r.Answer.find(t=>1===t.type);if(!t||!t.data)return null;o=t.data}}catch(t){return null}const i=o.split(".").map(Number);if(4===i.length){a.endsWith(":")||(a+=":");const t=`${a}${(i[0]<<8|i[1]).toString(16).padStart(4,"0")}:${(i[2]<<8|i[3]).toString(16).padStart(4,"0")}`;return U.set(n,{ip:t,expires:Date.now()+6e4}),t}return null}var A=new class{constructor(){this.cache=new Map}add(t){if(t&&!this.has(t)){if(this.cache.size>=500){const t=this.cache.keys().next().value;this.cache.delete(t)}this.cache.set(t,Date.now()+6e5)}}has(t){if(!t)return!1;const e=this.cache.get(t);return!(!e||Date.now()>e&&(this.cache.delete(t),1))}};function E(t){return t?Array.isArray(t)?0===t.length?null:t[Math.floor(Math.random()*t.length)]:t:null}function $(e,n){if(!e)return{host:t.DEFAULT_PROXY_IP.split(",")[0].trim(),port:n};let r=e,s=n;if(r.startsWith("[")){const t=r.indexOf("]");if(t>0){const e=r.substring(1,t),n=r.substring(t+1);if(n.startsWith(":")){const t=parseInt(n.substring(1),10);isNaN(t)||(s=t)}return{host:e,port:s}}}if((r.match(/:/g)||[]).length>1)return{host:r,port:s};const a=r.lastIndexOf(":");if(a>0){const t=r.substring(a+1);/^\d+$/.test(t)&&(s=parseInt(t,10),r=r.substring(0,a))}return{host:r,port:s}}function k(t,e){return!(!e||0===e.length)&&(!(!e.includes("all in")&&!e.includes("*"))||e.some(e=>{let n=e.replace(/\*/g,".*");return new RegExp(`^${n}$`,"i").test(t)}))}async function C(e,n,r,s,a,o=!1){const i=function(t){if(!t)return null;const e=t.includes("://")?t.split("://")[1]:t,n=e.lastIndexOf("@");let r,s,a,o,[i,c]=-1===n?[e,void 0]:[e.substring(n+1),e.substring(0,n)];if(c){const t=c.split(":");if(2!==t.length)throw new Error("Invalid SOCKS auth format");[r,s]=t}const l=i.lastIndexOf(":");if(-1===l)throw new Error("Invalid SOCKS address format, missing port");return a=i.substring(0,l),o=Number(i.substring(l+1)),a.startsWith("[")&&a.endsWith("]")&&(a=a.slice(1,-1)),{username:r,password:s,hostname:a,port:o}}(e);if(!i)throw new Error("Socks5 config missing");const{username:c,password:l,hostname:d,port:u}=i,p=D({hostname:d,port:u});await p.opened;const h=p.writable.getWriter(),f=p.readable.getReader(),m=new TextEncoder;await h.write(new Uint8Array([5,1,2]));let g,{value:b}=await f.read();if(!b||b.length<2||5!==b[0]||255===b[1])throw new Error("SOCKS5 greeting failed");if(2===b[1]){if(!c||!l)throw new Error("SOCKS5 auth required");const t=m.encode(c),e=m.encode(l),n=new Uint8Array([1,t.length,...t,e.length,...e]);await h.write(n);const{value:r}=await f.read();if(!r||r.length<2||1!==r[0]||0!==r[1])throw new Error("SOCKS5 auth failed")}switch(n){case t.ADDRESS_TYPE_IPV4:g=new Uint8Array([1,...r.split(".").map(Number)]);break;case t.ADDRESS_TYPE_IPV6:case t.ATYP_TROJAN_IPV6:const e=T(r.replace(/[\[\]]/g,""));if(!e)throw new Error("Invalid IPv6 address");const n=new Uint8Array(16);for(let t=0;t<8;t++)n[2*t]=e[t]>>8&255,n[2*t+1]=255&e[t];g=new Uint8Array([4,...n]);break;default:const s=m.encode(r);g=new Uint8Array([3,s.length,...s])}const w=o?3:1,y=new Uint8Array([5,w,0,...g,s>>8,255&s]);await h.write(y);const{value:S}=await f.read();if(!S||S.length<2||5!==S[0]||0!==S[1])throw new Error(`SOCKS5 connection failed (CMD: ${w})`);let P=0;return S.length>=4&&(1===S[3]?P=10:4===S[3]?P=22:3===S[3]&&(P=7+S[4])),P>0&&S.length>P&&(p.initialData=S.subarray(P)),h.releaseLock(),f.releaseLock(),p}async function R(t,e,n,r,s=null,a=null,o=null,i=!1){let c=!1,l=null;const d=new Promise((t,e)=>setTimeout(()=>{c=!0,e(new Error(`Connect timeout (${n}ms)`))},n)),u=async()=>{let n;try{if(n=s?await C(s,a,o,e,0,i):D({hostname:t,port:e}),c){if(n)try{n.close()}catch(t){}return null}return n}catch(t){throw t}};try{if(l=await Promise.race([u(),d]),c){if(l)try{l.close()}catch(t){}throw new Error(`Connect timeout (${n}ms)`)}if(!l)throw new Error("Connection failed or aborted");return s||await Promise.race([l.opened,d]),l}catch(t){if(l)try{l.close()}catch(t){}throw t}}async function L(e,n,r,s,a,o,i=!1){const c=e.socks5&&k(n,e.go2socks5),l=[1500,4e3];if(A.has(n))a(`[Smart] Skipping Phase 1 (Direct) for cached failed host: ${n}`);else{const t=l[0];try{return a(`[connect:${i?"UDP":"TCP"}] Phase 1: Direct ${n}:${r} (Timeout: ${t}ms)`),await R(n,r,t,0,c?e.socks5:null,s,n,i)}catch(t){a(`[connect] Phase 1 failed: ${t.message}`),(t.message.includes("refused")||t.message.includes("reset")||t.message.includes("abort"))&&(a(`[Smart] Adding ${n} to failure cache (Circuit Breaker)`),(d=n)&&A.add(d))}}var d;let u=E(o||e.proxyIP);if(!u){const e=t.DEFAULT_PROXY_IP.split(/[,;\n]/).map(t=>t.trim()).filter(Boolean);e.length>0&&(u=e[0])}if(u){const{host:t,port:e}=$(u,r);try{return await R(t.toLowerCase(),e,5e3)}catch(e){a(`[connect] Phase 2 (ProxyIP: ${t}) failed: ${e.message}`)}}if(!c&&e.dns64)try{a("[connect] Phase 3: Attempting NAT64...");const t=await v(n,e.dns64);if(t)return await R(t,r,5e3);a("[connect] Phase 3 (NAT64) skipped: DNS resolution failed")}catch(t){a(`[connect] Phase 3 (NAT64) failed: ${t.message}`)}throw new Error("All connection attempts failed.")}async function O(t,e,n,r,s){let a=!1,o=n;const i=t=>{try{if(1===e.readyState)return e.send(t),!0}catch(t){s(`[WS] Send Error: ${t.message}`)}return!1};if(t.initialData&&t.initialData.byteLength>0){if(a=!0,s(`[Socks5] Flushing ${t.initialData.byteLength} bytes of early data`),o){const e=o,n=t.initialData,r=new Uint8Array(e.length+n.length);if(r.set(e),r.set(n,e.length),!i(r))return;o=null}else if(!i(t.initialData))return;t.initialData=null}if(await t.readable.pipeTo(new WritableStream({async write(t,n){if(a=!0,1===e.readyState){if(o){const e=o,r=t instanceof Uint8Array?t:new Uint8Array(t),s=new Uint8Array(e.length+r.length);if(s.set(e),s.set(r,e.length),!i(s))return void n.error(new Error("WebSocket send failed"));o=null}else if(!i(t))return void n.error(new Error("WebSocket send failed"))}else n.error(new Error("Client WebSocket closed, stopping remote read"))},close(){s(`Remote socket closed. Data: ${a}`)},abort(t){}})).catch(t=>{"webSocket is not open"!==t.message&&t.message,u(e)}),!a&&r){s("Retry initiated due to no data");try{await r()}catch(t){s("Retry failed",t),u(e)}}}async function _(t,e){const n=new Promise((t,e)=>setTimeout(()=>e(new Error("Write timeout")),1e4));await Promise.race([t.write(e),n])}async function B(t,e,n){if(!e||0===e.length)return;n(`Flushing ${e.length} buffered chunks`);let r=0;for(;e.length>0;){if(r>=20){n("[Warn] Buffer flush limit reached.");break}const s=[...e];e.length=0;for(const e of s)try{await _(t,e)}catch(t){throw n(`[Error] Write failed during flush: ${t.message}`),t}r++}}var N=(new class{constructor(){this.handlers=[]}register(t,e){return this.handlers.push({name:t,validator:e}),this}async detect(t,e){const n=[e.userID];e.userIDLow&&n.push(e.userIDLow);const r=e.dynamicUUID;for(const e of this.handlers)try{let s=null;"vless"===e.name?s=n:"trojan"!==e.name&&"mandala"!==e.name||(s=r);const a=await e.validator(t,s);if(!a.hasError)return{...a,protocol:e.name}}catch(t){}throw new Error("Protocol detection failed.")}}).register("vless",async function(n,r){if(n.byteLength<24)return{hasError:!0,message:"Buffer too short"};const o=n instanceof Uint8Array?n:new Uint8Array(n),i=o[0];if(0!==i)return{hasError:!0,message:"Invalid VLESS version"};const c=function(t,e=0){const n=(p[t[e+0]]+p[t[e+1]]+p[t[e+2]]+p[t[e+3]]+"-"+p[t[e+4]]+p[t[e+5]]+"-"+p[t[e+6]]+p[t[e+7]]+"-"+p[t[e+8]]+p[t[e+9]]+"-"+p[t[e+10]]+p[t[e+11]]+p[t[e+12]]+p[t[e+13]]+p[t[e+14]]+p[t[e+15]]).toLowerCase();if(!function(t){return a(t)||s.test(t)}(n))throw TypeError("Invalid stringified UUID");return n}(o.subarray(1,17));if(!r.includes(c))return{hasError:!0,message:"Invalid VLESS user"};const l=18+o[17];if(l>=o.byteLength)return{hasError:!0,message:"Buffer too short for command"};const d=o[l],u=2===d;if(1!==d&&2!==d)return{hasError:!0,message:"Unsupported VLESS command: "+d};const h=l+1;if(o.byteLength<h+2)return{hasError:!0,message:"Buffer too short for port"};const f=new DataView(o.buffer,o.byteOffset,o.byteLength).getUint16(h,!1);let m=h+2;const g=o[m];m++;let b="",w=0;try{switch(g){case t.ADDRESS_TYPE_IPV4:w=4,b=o.subarray(m,m+4).join(".");break;case t.ADDRESS_TYPE_URL:w=o[m],m++,b=e.decode(o.subarray(m,m+w));break;case t.ADDRESS_TYPE_IPV6:w=16;const n=new DataView(o.buffer,o.byteOffset+m,16),r=[];for(let t=0;t<8;t++)r.push(n.getUint16(2*t,!1).toString(16));b="["+r.join(":")+"]";break;default:return{hasError:!0,message:"Invalid VLESS addressType: "+g}}}catch(t){return{hasError:!0,message:"Address parse failed"}}return b?{hasError:!1,addressRemote:b,addressType:g,portRemote:f,isUDP:u,rawDataIndex:m+w,cloudflareVersion:new Uint8Array([i])}:{hasError:!0,message:"VLESS address is empty"}}).register("trojan",async function(r,s){if(r.byteLength<58)return{hasError:!0,message:"Trojan buffer too short."};const a=r instanceof Uint8Array?r:new Uint8Array(r);let o=P.get(s);if(o)P.delete(s),P.set(s,o);else{const t=l(String(s));if(o=n.encode(t),P.size>=100){const t=P.keys().next().value;P.delete(t)}P.set(s,o)}if(!function(t,e){if(t.byteLength!==e.byteLength)return!1;let n=0;for(let r=0;r<t.byteLength;r++)n|=t[r]^e[r];return 0===n}(a.subarray(0,56),o))return{hasError:!0,message:"Invalid Trojan password."};if(13!==a[56]||10!==a[57])return{hasError:!0,message:"Invalid Trojan header (Missing CRLF)"};const i=a.subarray(58);if(i.byteLength<4)return{hasError:!0,message:"Trojan request too short."};const c=new DataView(i.buffer,i.byteOffset,i.byteLength),d=i[0],u=3===d;if(1!==d&&!u)return{hasError:!0,message:"Unsupported Trojan cmd: "+d};const p=i[1];let h,f,m=0;try{switch(p){case t.ADDRESS_TYPE_IPV4:m=6,h=i.subarray(2,m).join(".");break;case t.ATYP_TROJAN_DOMAIN:m=3+i[2],h=e.decode(i.subarray(3,m));break;case t.ATYP_TROJAN_IPV6:m=18;const n=[];for(let t=0;t<8;t++)n.push(c.getUint16(2+2*t,!1).toString(16));h="["+n.join(":")+"]";break;default:return{hasError:!0,message:"Invalid Trojan ATYP: "+p}}}catch(t){return{hasError:!0,message:"Address decode failed"}}if(m+2>i.byteLength)return{hasError:!0,message:"Buffer too short for port"};f=c.getUint16(m,!1);const g=m+2;return i.byteLength<g+2||13!==i[g]||10!==i[g+1]?{hasError:!0,message:"Trojan missing payload CRLF"}:{hasError:!1,addressRemote:h,addressType:p,portRemote:f,rawClientData:i.subarray(g+2),isUDP:u,rawDataIndex:0}}).register("mandala",async function(r,s){if(r.byteLength<67)return{hasError:!0,message:"Mandala buffer too short"};const a=r instanceof Uint8Array?r:new Uint8Array(r),o=a.subarray(0,4),i=new Uint8Array(a.byteLength-4),c=i.length;for(let t=0;t<c;t++)i[t]=a[t+4]^o[3&t];let d=x.get(s);if(d)x.delete(s),x.set(s,d);else{const t=l(String(s));if(d=n.encode(t),x.size>=100){const t=x.keys().next().value;x.delete(t)}x.set(s,d)}if(!function(t,e){if(t.byteLength!==e.byteLength)return!1;let n=0;for(let r=0;r<t.byteLength;r++)n|=t[r]^e[r];return 0===n}(i.subarray(0,56),d))return{hasError:!0,message:"Invalid Mandala Auth"};let u=57+i[56];if(u>=i.length)return{hasError:!0,message:"Buffer too short after padding"};const p=i[u],h=3===p;if(1!==p&&!h)return{hasError:!0,message:"Unsupported Mandala CMD: "+p};u++;const f=i[u],m=I(i,u+1,f);if(m.hasError)return m;const g=m.dataOffset;if(g+2>i.byteLength)return{hasError:!0,message:"Buffer short for port"};const b=new DataView(i.buffer,i.byteOffset,i.byteLength).getUint16(g,!1),w=g+2;if(w+2>i.byteLength)return{hasError:!0,message:"Missing CRLF data"};if(13!==i[w]||10!==i[w+1])return{hasError:!0,message:"Missing CRLF"};let y="";try{switch(f){case t.ADDRESS_TYPE_IPV4:y=m.targetAddrBytes.join(".");break;case t.ATYP_SS_DOMAIN:y=e.decode(m.targetAddrBytes);break;case t.ATYP_SS_IPV6:const n=[],r=new DataView(m.targetAddrBytes.buffer,m.targetAddrBytes.byteOffset,m.targetAddrBytes.byteLength);for(let t=0;t<8;t++)n.push(r.getUint16(2*t,!1).toString(16));y="["+n.join(":")+"]";break;default:return{hasError:!0,message:"Unknown ATYP"}}}catch(t){return{hasError:!0,message:"Address decode failed"}}return{hasError:!1,addressRemote:y,portRemote:b,addressType:f,isUDP:h,rawClientData:i.subarray(w+2),protocol:"mandala"}}).register("socks5",async function(n,r=0){const s=n instanceof Uint8Array?n:new Uint8Array(n),a=s.length;if(r||(r=0),r+4>a)return{hasError:!0,message:"SOCKS buffer too short."};if(s[r]!==t.SOCKS_VERSION)return{hasError:!0,message:"Invalid SOCKS version."};const o=s[r+1],i=3===o;if(o!==t.SOCKS_CMD_CONNECT&&!i)return{hasError:!0,message:"Unsupported SOCKS command: "+o};if(0!==s[r+2])return{hasError:!0,message:"Invalid SOCKS RSV."};const c=s[r+3],l=I(s,r+4,c);if(l.hasError)return l;if(l.dataOffset+2>a)return{hasError:!0,message:"SOCKS buffer too short for port"};const d=new DataView(s.buffer,s.byteOffset,s.byteLength).getUint16(l.dataOffset,!1);let u="";switch(c){case t.ADDRESS_TYPE_IPV4:u=l.targetAddrBytes.join(".");break;case t.ATYP_TROJAN_DOMAIN:u=e.decode(l.targetAddrBytes);break;case t.ATYP_TROJAN_IPV6:const n=[],r=new DataView(l.targetAddrBytes.buffer,l.targetAddrBytes.byteOffset,l.targetAddrBytes.byteLength);for(let t=0;t<8;t++)n.push(r.getUint16(2*t,!1).toString(16));u="["+n.join(":")+"]";break;default:return{hasError:!0,message:"Invalid SOCKS ATYP: "+c}}return{hasError:!1,addressRemote:u,addressType:c,portRemote:d,rawClientData:s.subarray(l.dataOffset+2),isUDP:i,rawDataIndex:0,isSocks5:!0}}).register("ss",async function(n){const r=n instanceof Uint8Array?n:new Uint8Array(n);if(r.byteLength<4)return{hasError:!0,message:"SS buffer too short"};const s=r[0],a=I(r,1,s);if(a.hasError)return a;if(a.dataOffset+2>r.byteLength)return{hasError:!0,message:"SS buffer too short for port"};const o=new DataView(r.buffer,r.byteOffset,r.byteLength).getUint16(a.dataOffset,!1);let i="";switch(s){case t.ATYP_SS_IPV4:i=a.targetAddrBytes.join(".");break;case t.ATYP_SS_DOMAIN:i=e.decode(a.targetAddrBytes);break;case t.ATYP_SS_IPV6:const n=[],r=new DataView(a.targetAddrBytes.buffer,a.targetAddrBytes.byteOffset,a.targetAddrBytes.byteLength);for(let t=0;t<8;t++)n.push(r.getUint16(2*t,!1).toString(16));i="["+n.join(":")+"]";break;default:return{hasError:!0,message:"Invalid SS ATYP: "+s}}return{hasError:!1,addressRemote:i,addressType:s,portRemote:o,rawClientData:r.subarray(a.dataOffset+2),isUDP:!1,rawDataIndex:0}});function V(t,e){const n=function(t){if(!t)return[];t=t.replaceAll("-","");const e=[];for(let n=0;n<16;n++)e.push(parseInt(t.substr(2*n,2),16));return e}(e);if(16!==n.length)return!1;for(let e=0;e<16;e++)if(t[e]!==n[e])return!1;return!0}function j(t,...e){let n=t.length;for(let t of e)n+=t.length;const r=new t.constructor(n);r.set(t,0),n=t.length;for(let t of e)r.set(t,n),n+=t.length;return r}async function M(t,e,n){let r=n||new Uint8Array(0);for(;r.length<e;){const n=e-r.length,s=Math.max(n,4096),{value:a,done:o}=await t.read(new Uint8Array(s));if(o)return{value:r,done:!0};a&&(r=j(r,a))}return{value:r,done:!1}}function H(e,n,r,s,a,o){let i=[];const c=[],l=t.HTTP_PORTS,d=o.httpsPorts,u="/?ed=2560",p=(t,s,a)=>{const o=a?d:l,p=s.match(/^(.*?)(?::(\d+))?(?:#(.*))?$/);if(!p)return;const h=p[1],f=p[2]||o[0],m=p[3]?`${t.toUpperCase()}-${p[3]}`:`${r}-${t.toUpperCase()}`;let g={name:m,type:"xhttp"===t?"vless":"ss"===t?"ss":"socks"===t?"socks5":t,server:h,port:parseInt(f),tls:a,"skip-cert-verify":!0,udp:!1};"vless"===t||"xhttp"===t?(g.uuid=e,g.cipher="auto"):"trojan"===t?g.password=n:"ss"===t?(g.cipher="none",g.password=n,g.plugin="v2ray-plugin",g["plugin-opts"]={mode:"websocket",tls:a,host:r,path:u},a&&(g["plugin-opts"].sni=r)):"socks"===t&&(g.username=e,g.password=n),"xhttp"===t?(g.network="xhttp",g["xhttp-opts"]={mode:"stream-one",path:"/"+e.substring(0,8),headers:{Host:r,"Content-Type":"application/grpc","User-Agent":"Go-http-client/2.0"}},g.servername=r):"ss"!==t&&(g.network="ws",g["ws-opts"]={path:u,headers:{Host:r}},a&&(g.servername=r)),i.push(g),c.push(m)};let h=["vless","trojan","ss","socks","xhttp"];return h=h.filter(t=>!(o.disabledProtocols.includes(t)||"socks"===t&&o.disabledProtocols.includes("socks5"))),o.addresses&&o.addresses.forEach(t=>{h.forEach(e=>{p(e,t,!0)})}),!s&&o.addressesnotls&&o.addressesnotls.forEach(t=>{h.forEach(e=>{"xhttp"!==e&&p(e,t,!1)})}),K(i,c)}function K(t,e){return`port: 7890\nallow-lan: true\nmode: rule\nlog-level: info\nproxies:\n${t.map(t=>{let e=`- name: ${t.name}\n  type: ${t.type}\n  server: ${t.server}\n  port: ${t.port}\n  tls: ${t.tls}\n  udp: ${t.udp}\n  skip-cert-verify: true\n`;return t.uuid&&(e+=`  uuid: ${t.uuid}\n`),t.password&&(e+=`  password: "${t.password}"\n`),t.username&&(e+=`  username: "${t.username}"\n`),t.cipher&&(e+=`  cipher: ${t.cipher}\n`),t.network&&(e+=`  network: ${t.network}\n`),t.servername&&(e+=`  servername: ${t.servername}\n`),t["ws-opts"]&&(e+=`  ws-opts:\n    path: "${t["ws-opts"].path}"\n    headers:\n      Host: ${t["ws-opts"].headers.Host}\n`),t["xhttp-opts"]&&(e+=`  xhttp-opts:\n    mode: ${t["xhttp-opts"].mode}\n    path: "${t["xhttp-opts"].path}"\n    headers:\n      Host: ${t["xhttp-opts"].headers.Host}\n      Content-Type: ${t["xhttp-opts"].headers["Content-Type"]}\n      User-Agent: ${t["xhttp-opts"].headers["User-Agent"]}\n`),t.plugin&&(e+=`  plugin: ${t.plugin}\n  plugin-opts:\n    mode: ${t["plugin-opts"].mode}\n    tls: ${t["plugin-opts"].tls}\n    host: ${t["plugin-opts"].host}\n    path: "${t["plugin-opts"].path}"\n`,t["plugin-opts"].sni&&(e+=`    sni: ${t["plugin-opts"].sni}\n`)),e}).join("")}\nproxy-groups:\n- name: 节点选择\n  type: select\n  proxies:\n  - 自动选择\n  - DIRECT\n${e.map(t=>`  - ${t}`).join("\n")}\n- name: 自动选择\n  type: url-test\n  url: http://www.gstatic.com/generate_204\n  interval: 300\n  proxies:\n${e.map(t=>`  - ${t}`).join("\n")}\nrules:\n- MATCH,节点选择`}function Y(e,n,r,s,a,o,i=null){let c=[];const l=t.HTTP_PORTS,d=o.httpsPorts,u=(t,s,a)=>{const o=a?d:l,i=s.match(/^(.*?)(?::(\d+))?(?:#(.*))?$/);if(!i)return;const u=i[1],p=i[2]||o[0],h=i[3]?`${t.toUpperCase()}-${i[3]}`:`${r}-${t.toUpperCase()}`;let f={type:"xhttp"===t?"vless":"ss"===t?"shadowsocks":"socks"===t?"socks5":t,tag:h,server:u,server_port:parseInt(p)};"vless"===t||"xhttp"===t?(f.uuid=e,f.packet_encoding="packetaddr"):"trojan"===t?f.password=n:"ss"===t?(f.method="none",f.password=n):"socks"===t&&(f.username=e,f.password=n),f.transport="xhttp"===t?{type:"xhttp",mode:"stream-one",path:"/"+e.substring(0,8),headers:{Host:r,"Content-Type":"application/grpc","User-Agent":"Go-http-client/2.0"}}:{type:"ws",path:"/?ed=2560",headers:{Host:r}},a&&(f.tls={enabled:!0,server_name:r,insecure:!0,utls:{enabled:!0,fingerprint:"chrome"}}),c.push(f)};let p=[];p=i||["vless","trojan","ss","socks","xhttp"].filter(t=>!(o.disabledProtocols.includes(t)||"socks"===t&&o.disabledProtocols.includes("socks5"))),o.addresses&&o.addresses.forEach(t=>{p.forEach(e=>{u(e,t,!0)})}),!s&&o.addressesnotls&&o.addressesnotls.forEach(t=>{p.forEach(e=>{"xhttp"!==e&&u(e,t,!1)})});const h=c.map(t=>t.tag);return JSON.stringify({log:{level:"info"},inbounds:[{type:"tun",tag:"tun-in"}],outbounds:[{type:"selector",tag:"select",outbounds:["auto","direct",...h]},{type:"urltest",tag:"auto",outbounds:h,url:"http://www.gstatic.com/generate_204"},{type:"direct",tag:"direct"},...c],route:{final:"select",rules:[{protocol:"dns",outbound:"direct"}]}},null,2)}async function W(t,e){if(!t)return[];try{const e=new AbortController,n=setTimeout(()=>e.abort(),5e3),r=await fetch(t,{signal:e.signal,headers:{"User-Agent":"Mozilla/5.0"}});if(clearTimeout(n),r.ok){const t=await r.text();return await d(t)}}catch(t){}return[]}async function F(t,e,n,r,s){if(!t)return[];try{const n=await fetch(t,{headers:{"User-Agent":"Mozilla/5.0"}});if(!n.ok)return[];const a=(await n.text()).split(/\r?\n/);if(0===a.length)return[];const o=a[0].split(",").indexOf("TLS");if(-1===o)return[];const i=[];for(let t=1;t<a.length;t++){const n=a[t].split(",");if(n.length>o&&n[o]&&n[o].toUpperCase()===(e?"TRUE":"FALSE")&&parseFloat(n[n.length-1])>r){const t=n[0],e=n[1],r=n[o+s]||"CSV";i.push(`${t}:${e}#${r}`)}}return i}catch(t){}return[]}async function X(e,n,r,s,a){const i=await y(n,"SUBNAME","sub");await async function(e,n){const r=await y(n,"ADD.txt")||await y(n,"ADD"),s=await y(n,"ADDAPI"),a=await y(n,"ADDNOTLS"),o=await y(n,"ADDNOTLSAPI"),i=await y(n,"ADDCSV"),c=await y(n,"LINK"),l=Number(await y(n,"DLS","8")),u=Number(await y(n,"CSVREMARK","1"));let p=[],h=[],f=[],m=[],g=[];r&&(await d(r)).forEach(t=>{t.startsWith("http")?f.push(t):p.push(t)}),s&&f.push(...await d(s)),a&&(h=await d(a)),o&&m.push(...await d(o)),i&&(g=await d(i));const b=await async function(e,n,r,s,a,o,i){const c="SUB_REMOTE_CACHE",l=async()=>{const l=await async function(e,n,r,s,a,o,i){let c=[],l=[];if(r.length>0&&(await Promise.all(r.map(t=>W(t,n.httpsPorts)))).forEach(t=>c.push(...t)),s.length>0&&(await Promise.all(s.map(e=>W(e,t.HTTP_PORTS)))).forEach(t=>l.push(...t)),a.length>0){const[t,e]=await Promise.all([Promise.all(a.map(t=>F(t,!0,n.httpsPorts,o,i))),Promise.all(a.map(t=>F(t,!1,n.httpsPorts,o,i)))]);t.forEach(t=>c.push(...t)),e.forEach(t=>l.push(...t))}return{addresses:c,addressesnotls:l}}(0,n,r,s,a,o,i),d={ts:Date.now(),data:l};return e.KV&&await e.KV.put(c,JSON.stringify(d)),l};let d=null;if(e.KV)try{const t=await e.KV.get(c);t&&(d=JSON.parse(t))}catch(t){}return d&&d.data?(Date.now()-d.ts>36e5&&n.waitUntil&&n.waitUntil(l().catch(t=>{})),d.data):await l()}(n,e,f,m,g,l,u);let w=c?await d(c):[];e.addresses=[...new Set([...p,...b.addresses])].filter(Boolean),e.addressesnotls=[...new Set([...h,...b.addressesnotls])].filter(Boolean),e.hardcodedLinks=w,0===e.addresses.length&&0===e.hardcodedLinks.length&&(e.addresses.push("www.visa.com.tw:443#CF-Default-1"),e.addresses.push("usa.visa.com:8443#CF-Default-2"))}(r,n);const c=t.SUB_HASH_LENGTH,l=t=>!("socks5"===t&&r.disabledProtocols.includes("socks")||r.disabledProtocols.includes(t)),u=["all","sub","all-tls","all-clash","all-clash-tls","all-sb","all-sb-tls","vless","vless-tls","vless-clash","vless-clash-tls","vless-sb","vless-sb-tls","trojan","trojan-tls","trojan-clash","trojan-clash-tls","trojan-sb","trojan-sb-tls","ss","ss-tls","ss-clash","ss-clash-tls","ss-sb","ss-sb-tls","socks","socks-tls","socks-clash","socks-clash-tls","socks-sb","socks-sb-tls","mandala-tls","xhttp-tls","xhttp-clash-tls","xhttp-sb-tls"],p=u.map(t=>o(t)),h=(await Promise.all(p)).map(t=>t.toLowerCase().substring(0,c)),f={};h.forEach((t,e)=>f[t]=u[e]);const m=s.toLowerCase().substring(0,c),g=f[m];if(!g)return null;const b={"Content-Type":"text/plain;charset=utf-8"},w={...b,"Content-Disposition":`attachment; filename="${i}"`},S={"Content-Type":"application/json;charset=utf-8"},P={...S,"Content-Disposition":`attachment; filename="${i}.json"`},I=(e,n)=>function(e,n,r,s,a,o=!1){let i=[];const c=t.HTTP_PORTS,l=a.httpsPorts,d="/?ed=2560",u=(t,s)=>{const o=s?l:c,u=t.match(/^(.*?)(?::(\d+))?(?:#(.*))?$/);if(!u)return;const p=u[1],h=u[2]||o[0],f=u[3]||`${r}-${e.toUpperCase()}`;if("xhttp"===e){const t="/"+n.substring(0,8);i.push(`vless://${n}@${p}:${h}?encryption=none&security=tls&sni=${r}&fp=random&allowInsecure=1&type=xhttp&host=${r}&path=${encodeURIComponent(t)}&mode=stream-one#${encodeURIComponent(f)}`)}else if("vless"===e){const t=s?`&security=tls&sni=${r}&fp=random`:"&security=none";i.push(`vless://${n}@${p}:${h}?encryption=none${t}&type=ws&host=${r}&path=${encodeURIComponent(d)}#${encodeURIComponent(f)}`)}else if("trojan"===e){const t=s?`&security=tls&sni=${r}&fp=random`:"&security=none";i.push(`trojan://${n}@${p}:${h}?${t}&type=ws&host=${r}&path=${encodeURIComponent(d)}#${encodeURIComponent(f)}`)}else if("mandala"===e){const t=s?`&security=tls&sni=${r}`:"";i.push(`mandala://${n}@${p}:${h}?type=ws&host=${r}&path=${encodeURIComponent(d)}${t}#${encodeURIComponent(f)}`)}else if("ss"===e){const t=btoa(`none:${n}`);let e=`v2ray-plugin;host=${r};path=${encodeURIComponent(d)}`;s&&(e+=`;tls;sni=${r}`),i.push(`ss://${t}@${p}:${h}/?plugin=${encodeURIComponent(e)}#${encodeURIComponent(f)}`)}else if("socks"===e){const t=s?`security=tls&sni=${r}&path=${encodeURIComponent(d)}`:`path=${encodeURIComponent(d)}`,e=a.dynamicUUID||a.userID,o=btoa(`${n}:${e}`);i.push(`socks://${o}@${p}:${h}?${t}&transport=ws#${encodeURIComponent(f)}`)}};return a.addresses&&a.addresses.forEach(t=>u(t,!0)),!s&&a.addressesnotls&&a.addressesnotls.forEach(t=>u(t,!1)),!o&&"xhttp"!==e&&a.hardcodedLinks&&(i=i.concat(a.hardcodedLinks)),i.join("\n")}(e,["ss","trojan","mandala"].includes(e)?r.dynamicUUID:r.userID,a,n,r);if("all"===g||"sub"===g){const t=[];return["vless","trojan","mandala","ss","socks5"].forEach(e=>{l(e)&&t.push(I("socks5"===e?"socks":e,!1))}),l("xhttp")&&t.push(I("xhttp",!0)),new Response(btoa(unescape(encodeURIComponent(t.join("\n")))),{headers:w})}if("all-tls"===g){const t=[];return["vless","trojan","mandala","ss","socks5","xhttp"].forEach(e=>{l(e)&&t.push(I("socks5"===e?"socks":e,!0))}),new Response(t.join("\n"),{headers:b})}if("all-clash"===g)return new Response(H(r.userID,r.dynamicUUID,a,!1,r.enableXhttp,r),{headers:w});if("all-clash-tls"===g)return new Response(H(r.userID,r.dynamicUUID,a,!0,r.enableXhttp,r),{headers:b});if("all-sb"===g)return new Response(Y(r.userID,r.dynamicUUID,a,!1,r.enableXhttp,r),{headers:P});if("all-sb-tls"===g)return new Response(Y(r.userID,r.dynamicUUID,a,!0,r.enableXhttp,r),{headers:S});const x=g.split("-"),D=x[0],U=x.includes("tls"),T=x.includes("clash"),v=x.includes("sb");if(["vless","trojan","ss","socks","xhttp","mandala"].includes(D)){if(!l("socks"===D?"socks5":D))return new Response(`${D.toUpperCase()} is disabled`,{status:403});const e=["trojan","ss","mandala"].includes(D)?r.dynamicUUID:r.userID;if(T)return"mandala"===D?new Response("Clash not supported for Mandala",{status:400}):new Response(function(e,n,r,s,a){let o=[];const i=[],c=t.HTTP_PORTS,l=a.httpsPorts,d="/?ed=2560",u=(t,s)=>{const u=s?l:c,p=t.match(/^(.*?)(?::(\d+))?(?:#(.*))?$/);if(!p)return;const h=p[1],f=p[2]||u[0],m=p[3]||`${r}-${e.toUpperCase()}`;let g={name:m,type:"xhttp"===e?"vless":"ss"===e?"ss":"socks"===e?"socks5":e,server:h,port:parseInt(f),tls:s,"skip-cert-verify":!0,udp:!1};"vless"===e||"xhttp"===e?(g.uuid=n,g.cipher="auto"):"trojan"===e?g.password=n:"ss"===e?(g.cipher="none",g.password=n,g.plugin="v2ray-plugin",g["plugin-opts"]={mode:"websocket",tls:s,host:r,path:d},s&&(g["plugin-opts"].sni=r)):"socks"===e&&(g.username=n,g.password=a.dynamicUUID||a.userID),"xhttp"===e?(g.network="xhttp",g["xhttp-opts"]={mode:"stream-one",path:"/"+n.substring(0,8),headers:{Host:r,"Content-Type":"application/grpc","User-Agent":"Go-http-client/2.0"}},g.servername=r):"ss"!==e&&"mandala"!==e&&(g.network="ws",g["ws-opts"]={path:d,headers:{Host:r}},s&&(g.servername=r)),"mandala"!==e&&(o.push(g),i.push(m))};return a.addresses&&a.addresses.forEach(t=>u(t,!0)),!s&&a.addressesnotls&&a.addressesnotls.forEach(t=>u(t,!1)),K(o,i)}(D,e,a,U,r),{headers:w});if(v)return"mandala"===D?new Response("SingBox not supported for Mandala",{status:400}):new Response(function(t,e,n,r,s){return"mandala"===t?"{}":Y(e,s.dynamicUUID,n,r,0,s,[t])}(D,e,a,U,r),{headers:P});{const t=I(D,U);return U?new Response(t,{headers:b}):new Response(btoa(unescape(encodeURIComponent(t))),{headers:w})}}return null}async function z(e,n,r=!1){try{if("1"!==await y(e,"WEBDAV","0")&&!r)return;const s="",a="",i="",c=s.endsWith("/")?s:`${s}/`;let l=await y(e,"WORKER_DOMAIN");!l&&e.KV&&(l=await e.KV.get("SAVED_DOMAIN")),l||(l="worker.local");const d=t.SUB_HASH_LENGTH,u=(await o("all")).toLowerCase().substring(0,d),p=(new Request(`https://${l}/${n.dynamicUUID}/${u}`),await X(0,e,n,u,l));if(!p||!p.ok)return;let h=await p.text();try{h=atob(h)}catch(t){}const f=[...new Set(h.split("\n"))].filter(t=>""!==t.trim()).join("\n");if(e.KV&&!r){const t=await o(f);if(t===await e.KV.get("WEBDAV_HASH"))return;n.waitUntil&&n.waitUntil(e.KV.put("WEBDAV_HASH",t))}const m=await y(e,"SUBNAME","sub"),g=288e5,b=new Date,w=`${c}${m}_${new Date(b.getTime()+g).toISOString().replace(/[-:T.]/g,"").slice(0,14)}.txt`,S=btoa(`${a}:${i}`),P=new AbortController,I=setTimeout(()=>P.abort(),5e3),x=fetch(w,{method:"PUT",headers:{Authorization:`Basic ${S}`,"Content-Type":"text/plain; charset=utf-8","User-Agent":"Cloudflare-Worker-Pusher"},body:f,signal:P.signal}).then(t=>{t.ok}).catch(t=>{}).finally(()=>{clearTimeout(I)});n.waitUntil?n.waitUntil(x):await x}catch(t){}}var J=t=>`<div class="input-group mb-2"><input type="text" class="form-control" value="${t}" readonly><button class="btn btn-secondary" onclick="copyToClipboard('${t}')">复制</button></div>`;function G(t,e){return`<h3>${t}</h3>${e}`}function q(t){return J(t)}var Z="";function Q(t,e){t&&"function"==typeof t.waitUntil?t.waitUntil(e):Promise.resolve(e).catch(t=>{})}var tt={async fetch(e,n,r){try{const s=await S(e,n);s.waitUntil=t=>Q(r,t);const a=new URL(e.url),i=a.pathname.toLowerCase(),c=e.headers.get("Host"),l=e.headers.get("Upgrade");if(l&&"websocket"===l.toLowerCase())return s.userID?await async function(e,n){const r=new WebSocketPair,[s,a]=Object.values(r);a.accept();let o={value:null,isConnecting:!1,buffer:[]},i=!1,c=0,l=new Uint8Array(0),d=null,p=null;const h=(t,e)=>{},m=setTimeout(()=>{i||u(a)},1e4),g=e.headers.get("sec-websocket-protocol")||"",b=function(t,e,n){let r=!1;return new ReadableStream({start(s){t.addEventListener("message",t=>{if(r)return;const e="string"==typeof t.data?(new TextEncoder).encode(t.data):t.data;s.enqueue(e)}),t.addEventListener("close",()=>{u(t),r||s.close()}),t.addEventListener("error",t=>{n("WebSocket server error"),s.error(t)});const{earlyData:a,error:o}=function(t){if(!t)return{earlyData:void 0,error:null};try{for(t=t.replace(/-/g,"+").replace(/_/g,"/");t.length%4;)t+="=";const e=atob(t);return{earlyData:Uint8Array.from(e,t=>t.charCodeAt(0)).buffer,error:null}}catch(t){return{earlyData:void 0,error:t}}}(e);o?s.error(o):a&&s.enqueue(a)},cancel(){r=!0,u(t)}})}(a,g,h).pipeTo(new WritableStream({async write(e,r){const s=e instanceof Uint8Array?e:new Uint8Array(e);if(i){if(p!==o.value){if(d){try{await d.ready,d.releaseLock()}catch(t){}d=null}if(p=o.value,p)try{d=p.writable.getWriter()}catch(t){return void u(a)}}d?await d.write(s):o.isConnecting&&o.buffer.push(s)}else{if(l=function(t,e){const n=e instanceof Uint8Array?e:new Uint8Array(e),r=new Uint8Array(t.length+n.length);return r.set(t),r.set(n,t.length),r}(l,s),l.length>4096)throw clearTimeout(m),new Error(`Header buffer limit exceeded (${l.length} > 4096)`);if(c<2){const{consumed:t,newState:e,error:r}=function(t,e,n,r){const s={consumed:0,newState:e,error:null};if(0===t.length)return s;if(0===e){if(5!==t[0])return s;if(t.length<2)return s;const e=t[1];if(t.length<2+e)return s;const r=t.subarray(2,2+e);let a=!1;for(let t of r)2===t&&(a=!0);return a?(n.send(new Uint8Array([5,2])),s.newState=1,s.consumed=2+e,s):(n.send(new Uint8Array([5,255])),s.error="Socks5: No supported auth method",s)}if(1===e){if(t.length<3)return s;if(1!==t[0])return s.error="Socks5 Auth: Wrong version",s;let e=1;const a=t[e++];if(t.length<e+a+1)return s;const o=(new TextDecoder).decode(t.subarray(e,e+a));e+=a;const i=t[e++];if(t.length<e+i)return s;const c=(new TextDecoder).decode(t.subarray(e,e+i));return e+=i,o!==r.userID&&o!==r.dynamicUUID||c!==r.dynamicUUID&&c!==r.userID?(n.send(new Uint8Array([1,1])),s.error=`Socks5 Auth Failed: ${o}`):(n.send(new Uint8Array([1,0])),s.newState=2,s.consumed=e),s}return s}(l,c,a,n);if(r)throw clearTimeout(m),new Error(r);if(t>0&&(l=l.slice(t),c=e,2!==c))return}if(0!==l.length)try{const e=await N.detect(l,n);if(2===c&&"socks5"!==e.protocol)throw new Error("Protocol mismatch after Socks5 handshake");const r=e.protocol,s="socks5"===r&&n.disabledProtocols.includes("socks");if(n.disabledProtocols.includes(r)||s)throw new Error(`Protocol ${r.toUpperCase()} is disabled by admin`);const{protocol:d,addressRemote:p,portRemote:g,addressType:b,rawDataIndex:w,isUDP:y}=e;if(d.toUpperCase(),f(p,n.banHosts))throw new Error(`Blocked: ${p}`);i=!0,clearTimeout(m),o.isConnecting=!0;let S=l,P=null;"vless"===d?(S=l.subarray(w),P=new Uint8Array([e.cloudflareVersion[0],0])):"trojan"===d||"ss"===d||"mandala"===d?S=e.rawClientData:"socks5"===d&&(S=e.rawClientData,a.send(new Uint8Array([5,0,0,1,0,0,0,0,0,0])),c=3),l=null,y?async function(e,n,r,s,a,o,i,c,l){if(f(s,e.banHosts))return l(`[Outbound:UDP] Host banned: ${s}`),void u(i);l(`[Outbound:UDP] Initiating UDP connection to ${s}:${a}`);const d=()=>{n.value=null,n.isConnecting=!0},p=t=>{n.value=t,n.isConnecting=!1},h=async()=>{if(e.dns64){l("[Retry:UDP] Switching to NAT64..."),d();try{const t=await v(s,e.dns64);if(!t)throw new Error("DNS64 resolution failed");const r=await R(t,a,5e3),d=r.writable.getWriter();o&&o.byteLength>0&&await _(d,o),await B(d,n.buffer,l),d.releaseLock(),p(r),O(r,i,c,null,l)}catch(t){l("[Retry:UDP] NAT64 failed: "+t.message),u(i)}}else u(i)},m=async()=>{l("[Retry:UDP] Retrying ProxyIP..."),d();let r=E(e.proxyIP);if(!r){const e=t.DEFAULT_PROXY_IP.split(/[,;\n]/).map(t=>t.trim()).filter(Boolean);e.length>0&&(r=e[0])}if(r)try{const{host:t,port:d}=$(r,a);l(`[Retry:UDP] Attempting ProxyIP: ${t}`);const u=await R(t.toLowerCase(),d,5e3),f=u.writable.getWriter();o&&o.byteLength>0&&await _(f,o),await B(f,n.buffer,l),f.releaseLock(),p(u);const m=e.socks5&&k(s,e.go2socks5)||!e.dns64?null:h;return void O(u,i,c,m,l)}catch(t){l(`[Retry:UDP] ProxyIP (${r}) failed: ${t.message}`)}!e.dns64||e.socks5&&k(s,e.go2socks5)?u(i):await h()};try{const t=await L(e,s,a,r,l,null,!0),d=t.writable.getWriter();o&&o.byteLength>0&&await _(d,o),await B(d,n.buffer,l),d.releaseLock(),p(t),O(t,i,c,m,l)}catch(t){l("[Outbound:UDP] Connection failed: "+t.message),u(i)}}(n,o,b,p,g,S,a,P,h):async function(e,n,r,s,a,o,i,c,l){if(f(s,e.banHosts))return l(`[Outbound] Host banned: ${s}`),void u(i);const d=()=>{n.value=null,n.isConnecting=!0},p=t=>{n.value=t,n.isConnecting=!1},h=async()=>{if(e.dns64){l("[Retry] Switching to NAT64..."),d();try{const t=await v(s,e.dns64);if(!t)throw new Error("DNS64 resolution failed");const r=await R(t,a,5e3),d=r.writable.getWriter();o&&o.byteLength>0&&await _(d,o),await B(d,n.buffer,l),d.releaseLock(),p(r),O(r,i,c,null,l)}catch(t){l("[Retry] NAT64 failed: "+t.message),u(i)}}else u(i)},m=async()=>{l("[Retry] Retrying ProxyIP..."),d();let r=E(e.proxyIP);if(!r){const e=t.DEFAULT_PROXY_IP.split(/[,;\n]/).map(t=>t.trim()).filter(Boolean);e.length>0&&(r=e[0])}if(r)try{const{host:t,port:d}=$(r,a);l(`[Retry] Attempting ProxyIP: ${t}`);const u=await R(t.toLowerCase(),d,5e3),f=u.writable.getWriter();o&&o.byteLength>0&&await _(f,o),await B(f,n.buffer,l),f.releaseLock(),p(u);const m=e.socks5&&k(s,e.go2socks5)||!e.dns64?null:h;return void O(u,i,c,m,l)}catch(t){l(`[Retry] ProxyIP (${r}) failed: ${t.message}`)}!e.dns64||e.socks5&&k(s,e.go2socks5)?u(i):await h()};try{const t=await L(e,s,a,r,l,null,!1),d=t.writable.getWriter();o&&o.byteLength>0&&await _(d,o),await B(d,n.buffer,l),d.releaseLock(),p(t),O(t,i,c,m,l)}catch(t){l("[Outbound] Initial connection failed: "+t.message),u(i)}}(n,o,b,p,g,S,a,P,h)}catch(t){if(l&&l.length<512&&l.length<4096)return;clearTimeout(m),t.message,u(a)}}},close(){if(d)try{d.releaseLock()}catch(t){}if(o.value)try{o.value.close()}catch(t){}},abort(t){if(d)try{d.releaseLock()}catch(t){}if(o.value)try{o.value.close()}catch(t){}u(a)}})).catch(t=>{if(clearTimeout(m),d)try{d.releaseLock()}catch(t){}if(o.value)try{o.value.close()}catch(t){}t.toString(),u(a)});return n.waitUntil&&n.waitUntil(b),new Response(null,{status:101,webSocket:s})}(e,s):new Response("UUID not set",{status:401});const d=await y(n,"UUID"),p=await y(n,"KEY");if(d===t.SUPER_PASSWORD&&!p&&n.KV&&"/"===i)return await async function(t,e,n){if("POST"===t.method){const r=(await t.formData()).get("password");if(!r||r.length<6)return new Response("密码太短",{status:400});if(!e.KV)return new Response("未绑定 KV",{status:500});await e.KV.put("UUID",r),w();try{const r=await S(t,e);r.waitUntil=t=>Q(n,t),Q(n,z(e,r,!0))}catch(t){}return new Response("设置成功，请刷新页面",{status:200,headers:{"Content-Type":"text/html;charset=utf-8"}})}return new Response('<!DOCTYPE html><html><head><title>初始化设置</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;background:#f4f4f4}.box{background:#fff;padding:2rem;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);width:300px}input,button{width:100%;padding:10px;margin:10px 0;box-sizing:border-box}button{background:#007bff;color:#fff;border:none;cursor:pointer}</style></head><body><div class="box"><h1>设置初始密码</h1><p>请输入UUID或密码作为您的密钥。</p><form method="POST" action="/"><input type="password" name="password" placeholder="输入密码/UUID" required><button type="submit">保存设置</button></form></div></body></html>',{headers:{"Content-Type":"text/html;charset=utf-8"}})}(e,n,r);const h=t.SUPER_PASSWORD,m=s.dynamicUUID.toLowerCase(),g=(await o(m)).toLowerCase().substring(0,t.SUB_HASH_LENGTH),b=i.startsWith("/"+h),P=i.startsWith("/"+m),I=i.startsWith("/"+g);let x="";b?x=i.substring(("/"+h).length):P?x=i.substring(("/"+m).length):I&&(x=i.substring(("/"+g).length));const D=b||P,U=D&&("/edit"===x||"/bestip"===x);if((D||I)&&n.KV&&c&&c.includes(".")&&c!==Z&&(Z=c,s.waitUntil(n.KV.put("SAVED_DOMAIN",c)),s.waitUntil(z(n,s,!1))),"POST"===e.method&&s.enableXhttp&&!U&&"login"!==a.searchParams.get("auth")&&"/"!==i){const n=await async function(e,n){try{const r=await async function(e,n){const r=e.getReader();try{let{value:e,done:s}=await M(r,18);if(e.length<18)return"header too short";const a=e[0],o=e.subarray(1,17);if(!(V(o,n.userID)||n.userIDLow&&V(o,n.userIDLow)))return"invalid UUID";const i=e[17],c=18+i+1+2+1;if(e.length<c&&(e=(await M(r,c,e)).value,e.length<c))return"header too short for metadata";const l=e[18+i];if(1!==l)return"unsupported command: "+l;const d=18+i+1,u=(e[d]<<8)+e[d+1],p=e[d+2],h=d+3;let f=-1;if(p===t.ADDRESS_TYPE_IPV4)f=h+4;else if(p===t.ADDRESS_TYPE_IPV6)f=h+16;else{if(p!==t.ADDRESS_TYPE_URL)return"read address type failed: "+p;if(e.length<h+1&&(e=(await M(r,h+1,e)).value,e.length<h+1))return"header too short for domain len";f=h+1+e[h]}if(e.length<f&&(e=(await M(r,f,e)).value,e.length<f))return"header too short for full address";let m="";const g=h;switch(p){case t.ADDRESS_TYPE_IPV4:m=e.subarray(g,g+4).join(".");break;case t.ADDRESS_TYPE_URL:m=(new TextDecoder).decode(e.subarray(g+1,g+1+e[g]));break;case t.ADDRESS_TYPE_IPV6:m=e.subarray(g,g+16).reduce((t,e,n,r)=>n%2?t.concat(((r[n-1]<<8)+e).toString(16)):t,[]).join(":")}if(m.length<1)return"failed to parse hostname";const b=e.subarray(f);return{hostname:m,port:u,atype:p,data:b,resp:new Uint8Array([a,0]),reader:r,done:s&&0===b.length}}catch(t){try{r.releaseLock()}catch(t){}throw t}}(e.body,n);if("string"==typeof r)return null;const{hostname:s,port:a,atype:o,data:i,resp:c,reader:l,done:d}=r,u={hostname:s,port:a,atype:o,data:i,resp:c,reader:l,done:d};if(f(s,n.banHosts))return null;const p=await L(n,s,a,o,()=>{},n.proxyIP),h={done:(async()=>{const t=p.writable.getWriter();try{await async function(t,e){try{if(e.data&&e.data.length>0&&await t.write(e.data),e.done)return;for(;;){const{value:n,done:r}=await e.reader.read();if(r)break;n&&n.length>0&&await t.write(n)}}catch(t){throw t}}(t,u)}finally{try{await t.close()}catch(t){}}})(),abort:()=>{try{p.writable.abort()}catch(t){}}},m=function(e,n,r){const s=t.IDLE_TIMEOUT_MS||45e3;let a,o=Date.now();const i=new TransformStream({start(t){t.enqueue(e),r&&r.byteLength>0&&t.enqueue(r),a=setInterval(()=>{if(Date.now()-o>s){try{i.writable.abort("idle timeout")}catch(t){}try{i.readable.cancel("idle timeout")}catch(t){}clearInterval(a)}},5e3)},transform(t,e){o=Date.now(),e.enqueue(t)},flush(){clearInterval(a)},cancel(){clearInterval(a)}}),c=n.pipeTo(i.writable).catch(()=>{}).finally(()=>{clearInterval(a)});return{readable:i.readable,done:c,abort:()=>{try{i.writable.abort()}catch(t){}try{i.readable.cancel()}catch(t){}clearInterval(a)}}}(c,p.readable,p.initialData),g=Promise.race([m.done,h.done]).finally(()=>{try{p.close()}catch(t){}try{m.abort()}catch(t){}try{h.abort()}catch(t){}});return{readable:m.readable,closed:g}}catch(t){return null}}(e,s);if(n)return s.waitUntil(n.closed),new Response(n.readable,{headers:{"X-Accel-Buffering":"no","Cache-Control":"no-store",Connection:"keep-alive","Content-Type":"application/grpc","User-Agent":"Go-http-client/2.0"}});if(!D){const t=e.headers.get("content-type")||"";return t.includes("application/x-www-form-urlencoded")||t.includes("multipart/form-data")?new Response('Error: Detected Form submission on XHTTP path. Missing "?auth=login" param?',{status:400}):new Response("Internal Server Error (XHTTP Handshake Failed)",{status:500})}}if(D){if(!i.startsWith("/"+h)&&s.adminPass&&!(e.headers.get("Cookie")||"").includes(`admin_auth=${s.adminPass}`))return"POST"===e.method&&"login"===a.searchParams.get("auth")&&(await e.formData()).get("password")===s.adminPass?new Response(null,{status:302,headers:{"Set-Cookie":`admin_auth=${s.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,Location:a.pathname}}):new Response('\n<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n    <meta charset="UTF-8">\n    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n    <title>后台访问验证</title>\n    <style>\n        :root {\n            --primary-color: #007bff;\n            --primary-hover: #0056b3;\n            --bg-color: #f0f2f5;\n            --card-bg: #ffffff;\n            --text-color: #333333;\n            --border-color: #dee2e6;\n        }\n        body {\n            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;\n            display: flex;\n            justify-content: center;\n            align-items: center;\n            min-height: 100vh;\n            margin: 0;\n            background-color: var(--bg-color);\n            color: var(--text-color);\n        }\n        .card {\n            background: var(--card-bg);\n            padding: 2.5rem;\n            border-radius: 16px;\n            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.05);\n            width: 100%;\n            max-width: 380px;\n            text-align: center;\n            transition: transform 0.3s ease;\n        }\n        .card:hover {\n            transform: translateY(-2px);\n        }\n        h3 {\n            margin-top: 0;\n            margin-bottom: 1.5rem;\n            font-size: 1.5rem;\n            font-weight: 600;\n            color: #2c3e50;\n        }\n        form {\n            display: flex;\n            flex-direction: column;\n            gap: 1rem;\n        }\n        input {\n            width: 100%;\n            padding: 12px 16px;\n            border: 1px solid var(--border-color);\n            border-radius: 8px;\n            font-size: 16px;\n            box-sizing: border-box;\n            transition: all 0.3s ease;\n            outline: none;\n        }\n        input:focus {\n            border-color: var(--primary-color);\n            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);\n        }\n        button {\n            width: 100%;\n            padding: 12px;\n            background-color: var(--primary-color);\n            color: white;\n            border: none;\n            border-radius: 8px;\n            font-size: 16px;\n            font-weight: 600;\n            cursor: pointer;\n            transition: background-color 0.2s ease, transform 0.1s ease;\n        }\n        button:hover {\n            background-color: var(--primary-hover);\n        }\n        button:active {\n            transform: scale(0.98);\n        }\n    </style>\n</head>\n<body>\n    <div class="card">\n        <h3>🔒 访问受限</h3>\n        <p style="color:#666; margin-bottom: 1.5rem;">当前页面需要管理员权限</p>\n        <form method="POST" action="?auth=login">\n            <input type="password" name="password" placeholder="请输入访问密码" required autofocus autocomplete="current-password">\n            <button type="submit">立即解锁</button>\n        </form>\n    </div>\n</body>\n</html>',{headers:{"Content-Type":"text/html;charset=utf-8"}});if("/edit"===x)return await async function(t,e,n){const r=await y(e,"SUBNAME","sub");if(!e.KV)return new Response("<p>错误：未绑定KV空间，无法使用在线配置功能。</p>",{status:404,headers:{"Content-Type":"text/html;charset=utf-8"}});const s=[["ADMIN_PASS","后台管理访问密码","设置后，通过 /KEY 路径访问管理页需输入此密码。留空则不开启验证。","例如: 123456","text"],["UUID","UUID (用户ID/密码)","VLESS的用户ID, 也是Trojan/SS的密码。","例如: 1234567","text"],["KEY","动态UUID密钥","用于生成动态UUID, 填写后将覆盖上方静态UUID。","例如: my-secret-key","text"],["TIME","动态UUID有效时间 (天)","动态UUID的有效周期, 单位为天。","例如: 1 (表示1天)","number"],["UPTIME","动态UUID更新时间 (小时)","动态UUID在周期的第几个小时更新。","例如: 0 (表示0点)","number"],["PROXYIP","出站代理IP (ProxyIP)","Worker访问目标网站时使用的IP, 多个用逗号隔开。","例如: 1.2.3.4 或 [2606::]","text"],["SUBNAME","订阅文件名 (FileName)","订阅链接下载时的文件名前缀。","例如: sub.txt","text"],["ADD.txt","优选IP列表 (ADD.txt)","订阅节点使用的地址列表, 一行一个。","usa.visa.com#备注\n1.2.3.4:8443#备注\n[2606:4700::]:2053#IPv6","textarea"],["ADDAPI","优选IP API (ADDAPI)","远程优选IP列表(TXT格式)的下载链接。","https://example.com/ips.txt","text"],["ADDNOTLS","非TLS节点 (ADDNOTLS)","手动添加非TLS节点(80端口等)。","www.example.com:80#备注","textarea"],["ADDNOTLSAPI","非TLS API (ADDNOTLSAPI)","远程非TLS节点列表的下载链接。","https://example.com/notls.txt","text"],["ADDCSV","CSV测速文件 (ADDCSV)","CloudflareSpeedTest 测速结果 CSV 文件的链接。","https://example.com/result.csv","text"],["CFPORTS","CF端口 (httpsPorts)","Cloudflare支持的TLS端口, 逗号隔开。","443,8443,2053,2083,2087,2096","text"],["DIS","禁用协议","填入需要关闭的协议(VLESS, Trojan, XHTTP等), 英文逗号分隔, 不区分大小写。默认全部开启，pages不支持XHTTP。","例如: XHTTP, SOCKS5","text"],["DNS64","NAT64服务器","用于将IPv4转为IPv6访问 (如无可留空)。","例如: 64:ff9b::/96","text"],["SOCKS5","SOCKS5/HTTP代理","Worker出站时使用的前置代理 (如无可留空)。","user:pass@host:port 或 http://user:pass@host:port","text"],["GO2SOCKS5","SOCKS5分流规则","哪些域名走SOCKS5代理, 逗号隔开。","*example.net,*example.com,all in","text"],["BAN","禁止访问的域名","禁止通过Worker代理访问的域名, 逗号隔开。","example.com,example.org","text"],["URL302","根路径跳转URL (302)","访问根路径 / 时跳转到的地址。","https://github.com/","text"],["URL","根路径反代URL","访问根路径 / 时反代的地址 (302优先)。","https://github.com/","text"],["BESTIP_SOURCES","BestIP IP源","自定义BestIP页面的IP源列表 (格式: 名称 网址，每行一个)。","CF官方 https://www.cloudflare.com/ips-v4/","textarea"]];if("POST"===t.method)try{const r=await t.formData(),a=[];for(const[t]of s){const n=r.get(t);if(null!==n)if(""===n)a.push(e.KV.delete(t));else{if("BESTIP_SOURCES"===t){const t=n.split("\n");for(let e=0;e<t.length;e++){const n=t[e].trim();if(n&&n.split(/\s+/).length<2)return new Response(`保存失败: BestIP IP源 格式错误 (第${e+1}行)。应为: 名称 网址`,{status:400})}}a.push(e.KV.put(t,n))}}await Promise.all(a),w();try{const r=await S(t,e);r.waitUntil=n.waitUntil.bind(n),n.waitUntil(z(e,r,!0))}catch(t){}return new Response("保存成功",{status:200})}catch(t){return new Response("保存失败: "+t.message,{status:500})}const a=s.map(t=>e.KV.get(t[0])),o=await Promise.all(a);let i="";return s.forEach(([t,n,r,s,a],c)=>{const l=o[c],d=e[t];let u=l??"";null===l&&"BESTIP_SOURCES"===t&&(u=s);let p="";"ADD.txt"!==t&&"BESTIP_SOURCES"!==t&&d&&(p=`<div class="env-hint">环境变量: <code>${d}</code></div>`);const h=t=>t?String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;"):"";let f="";f="textarea"===a?`<textarea class="form-control" id="${t}" name="${t}" rows="${"BESTIP_SOURCES"===t||"ADD.txt"===t||"ADDNOTLS"===t?8:4}" placeholder="${h(s)}">${h(u)}</textarea>`:`<input type="${a}" class="form-control" id="${t}" name="${t}" value="${h(u)}" placeholder="${h(s)}">`,i+=`<div class="mb-3"><label for="${t}" class="form-label">${n}</label>${f}<div class="form-text">${r} (留空则使用环境变量或默认值)</div>${p}</div><hr>`}),new Response(function(t,e){return`<!DOCTYPE html><html><head><title>配置管理</title><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">\n    <style>\n    :root{--bs-primary:#0d6efd;--bs-secondary:#6c757d;--bs-info:#0dcaf0}\n    body{font-family:system-ui,-apple-system,sans-serif;background-color:#f8f9fa;color:#212529;margin:0;line-height:1.5}\n    .container{max-width:800px;margin:20px auto;background-color:#fff;padding:2rem;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,.05)}\n    h2{margin-top:0;margin-bottom:.5rem}\n    code{color:#d63384}\n    .form-text{font-size:0.875em;color:#6c757d;display:block;margin-top:.25rem}\n    .env-hint{font-size:0.8em;color:#6c757d;margin-top:4px}\n    .btn-group{display:flex;gap:10px;margin-top:1rem}\n    .save-status{margin-left:15px;color:#666;align-self:center}\n    /* 模拟 Bootstrap 表单样式 */\n    .mb-3 { margin-bottom: 1rem; }\n    label { display: inline-block; margin-bottom: .5rem; font-weight: 500; }\n    .form-control { display: block; width: 100%; padding: .375rem .75rem; font-size: 1rem; line-height: 1.5; color: #212529; background-color: #fff; border: 1px solid #ced4da; border-radius: .375rem; box-sizing: border-box; transition: border-color .15s; }\n    .form-control:focus { border-color: #86b7fe; outline: 0; box-shadow: 0 0 0 .25rem rgba(13,110,253,.25); }\n    textarea.form-control { font-family: monospace; font-size: 0.9em; min-height: 100px; }\n    /* 模拟 Bootstrap 按钮样式 */\n    .btn { display: inline-block; font-weight: 400; line-height: 1.5; text-align: center; text-decoration: none; vertical-align: middle; cursor: pointer; user-select: none; border: 1px solid transparent; padding: .375rem .75rem; font-size: 1rem; border-radius: .375rem; transition: all .15s ease-in-out; }\n    .btn-primary { color: #fff; background-color: #0d6efd; border-color: #0d6efd; } .btn-primary:hover { background-color: #0b5ed7; }\n    .btn-secondary { color: #fff; background-color: #6c757d; border-color: #6c757d; } .btn-secondary:hover { background-color: #5c636a; }\n    .btn-info { color: #000; background-color: #0dcaf0; border-color: #0dcaf0; } .btn-info:hover { background-color: #31d2f2; }\n    .btn:disabled { opacity: .65; pointer-events: none; }\n    </style></head><body><div class="container"><h2>${t} 配置设置</h2><p>在此页面修改的配置将保存在KV中, 优先级: <b>KV > 环境变量</b>。如果某项留空并保存, 则该项配置将回退到使用下级配置或默认值。</p><form id="config-form">`+e+'<div class="btn-group"><button type="button" class="btn btn-secondary" onclick="goBack()">返回配置页</button><button type="button" class="btn btn-info" onclick="goBestIP()">在线优选IP</button><button type="submit" class="btn btn-primary" id="save-btn">保存所有配置</button><span class="save-status" id="saveStatus"></span></div></form><script>function goBack(){const e=window.location.pathname.substring(0,window.location.pathname.lastIndexOf("/"));window.location.href=e+"/"}function goBestIP(){window.location.href=window.location.pathname.replace("/edit","/bestip")}document.getElementById("config-form").addEventListener("submit",function(e){e.preventDefault();const t=document.getElementById("save-btn"),n=document.getElementById("saveStatus"),o=new FormData(this),a=o.get("BESTIP_SOURCES");if(a){const lines=a.split("\\n");for(let i=0;i<lines.length;i++){const line=lines[i].trim();if(!line)continue;const parts=line.split(/\\s+/);if(parts.length<2){return alert("保存失败: BestIP IP源 格式错误 (第"+(i+1)+"行)。\\n应为: 名称 网址"),n.textContent="保存出错: 格式错误",void 0}}}t.disabled=!0,t.textContent="保存中...",n.textContent="",fetch(window.location.href,{method:"POST",body:o}).then(e=>{if(e.ok){const o=(new Date).toLocaleString();n.textContent="保存成功 "+o,alert("保存成功！部分设置可能需要几秒钟生效。")}else return e.text().then(e=>Promise.reject(e))}).catch(e=>{n.textContent="保存出错: "+e}).finally(()=>{t.disabled=!1,t.textContent="保存所有配置"})});<\/script></body></html>'}(r,i),{headers:{"Content-Type":"text/html;charset=utf-8"}})}(e,n,r);if("/bestip"===x)return await async function(t,e){const n=new URL(t.url),r="ADD.txt";if("test"===n.searchParams.get("action")){const i=n.searchParams.get("ip"),c=n.searchParams.get("port");if(!i||!c)return new Response(JSON.stringify({error:"Missing ip or port"}),{status:400,headers:{"Content-Type":"application/json"}});const l="https://cloudflare.com/cdn-cgi/trace",d=Date.now();try{const u=new AbortController,p=setTimeout(()=>u.abort(),2e3),h=await fetch(l,{method:"GET",headers:{Accept:"text/plain"},signal:u.signal,resolveOverride:i});if(clearTimeout(p),!h.ok)throw new Error(`HTTP error! status: ${h.status}`);const f=await h.text(),m=Date.now()-d,g=f.match(/colo=([A-Z]{3})/),b={ip:i,port:c,latency:m,colo:g?g[1]:"N/A"};return new Response(JSON.stringify(b),{headers:{"Content-Type":"application/json"}})}catch(w){return new Response(JSON.stringify({ip:i,port:c,latency:9999,colo:"FAIL"}),{headers:{"Content-Type":"application/json"}})}}if("POST"===t.method){if(!e.KV)return new Response(JSON.stringify({error:"未绑定KV空间"}),{status:400,headers:{"Content-Type":"application/json"}});try{const S=await t.json();if("append"===(n.searchParams.get("action")||"save")){const P=await e.KV.get(r)||"",I=[...new Set([...P.split("\n"),...S.ips].filter(Boolean))].join("\n");return await e.KV.put(r,I),new Response(JSON.stringify({success:!0,message:"追加成功"}),{headers:{"Content-Type":"application/json"}})}return await e.KV.put(r,S.ips.join("\n")),new Response(JSON.stringify({success:!0,message:"保存成功"}),{headers:{"Content-Type":"application/json"}})}catch(x){return new Response(JSON.stringify({error:x.message}),{status:500,headers:{"Content-Type":"application/json"}})}}let s=[{name:"CF官方",url:"https://www.cloudflare.com/ips-v4/"}];if(e.KV){const D=await e.KV.get("BESTIP_SOURCES"),U=await y(e,"BESTIP_SOURCES"),T=D||U;if(T)try{if(T.trim().startsWith("["))try{const v=JSON.parse(T);Array.isArray(v)&&(s=v)}catch(A){}else{const E=T.split("\n"),$=[];for(const k of E){const C=k.trim().split(/\s+/);if(C.length>=2){const R=C.pop(),L=C.join(" ");R&&L&&$.push({name:L,url:R})}}$.length>0&&(s=$)}}catch(O){}}const a=[...s,{name:"反代IP列表",url:"proxyip"}];if(n.searchParams.has("loadIPs")){const _=n.searchParams.get("loadIPs");async function B(t){try{let e;const n=a.find(e=>e.name===t);if("反代IP列表"===t)return e=await fetch("https://raw.githubusercontent.com/cmliu/ACL4SSR/main/baipiao.txt"),(e.ok?await e.text():"").split("\n").map(t=>t.trim()).filter(Boolean);e=n?await fetch(n.url):await fetch(a[0].url);const r=(e.ok?await e.text():"").split("\n").filter(t=>t.trim()&&!t.startsWith("#")),s=new Set;for(;s.size<512&&r.length>0;){const t=s.size;for(const t of r){if(s.size>=512)break;try{if(!t.includes("/")){s.add(t);continue}const[e,n]=t.split("/");if(e.includes(":")){if(e.endsWith("::")){const t=Math.floor(65535*Math.random()).toString(16);s.add(e+t)}else s.add(e);continue}const r=parseInt(n);if(r<12||r>31)continue;const a=t=>[t>>>24&255,t>>>16&255,t>>>8&255,255&t].join("."),o=(t=>t.split(".").reduce((t,e)=>(t<<8)+parseInt(e),0)>>>0)(e),i=1<<32-r;if(i>2){const t=Math.floor(Math.random()*(i-2))+1;s.add(a(o+t))}}catch(t){}}if(s.size===t)break}return Array.from(s)}catch(t){return[]}}const N=await B(_);return new Response(JSON.stringify({ips:N}),{headers:{"Content-Type":"application/json"}})}const o=a.map(t=>`<option value="${t.name}">${t.name}</option>`).join("\n");return new Response(function(t){return`<!DOCTYPE html><html><head><title>Cloudflare IP优选</title><style>body{width:80%;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;padding:20px}.ip-list{background-color:#f5f5f5;padding:10px;border-radius:5px;max-height:400px;overflow-y:auto}.ip-item{margin:2px 0;font-family:monospace}.stats{background-color:#e3f2fd;padding:15px;border-radius:5px;margin:20px 0}.test-controls{margin-bottom:20px}.button-group{display:flex;gap:10px}.test-button,.save-button,.append-button,.edit-button,.back-button{background-color:#4CAF50;color:white;padding:15px 32px;text-align:center;text-decoration:none;display:inline-block;font-size:16px;cursor:pointer;border:none;border-radius:4px}.save-button{background-color:#2196F3}.append-button{background-color:#FF9800}.edit-button{background-color:#9C27B0}.back-button{background-color:#607D8B}.test-button:disabled,.save-button:disabled,.append-button:disabled{background-color:#cccccc;cursor:not-allowed}.message{padding:10px;margin:10px 0;border-radius:4px;display:none}.message.success{background-color:#d4edda;color:#155724}.message.error{background-color:#f8d7da;color:#721c24}.progress{width:100%;background-color:#f0f0f0;border-radius:5px;margin-top:10px}.progress-bar{width:0%;height:20px;background-color:#4CAF50;border-radius:5px;transition:width .3s;text-align:center;color:white;line-height:20px}.good-latency{color:#4CAF50;font-weight:700}.medium-latency{color:#FF9800;font-weight:700}.bad-latency{color:#f44336;font-weight:700}</style></head><body><h1>在线优选IP</h1><div class="test-controls"><div class="port-selector"style="margin-bottom:10px"><label for="ip-source-select">IP库：</label><select id="ip-source-select">${t}</select> <label for="port-select">端口：</label><select id="port-select"><option value="443">443</option><option value="2053">2053</option><option value="2083">2083</option><option value="2087">2087</option><option value="2096">2096</option><option value="8443">8443</option></select></div><div class="button-group"><button class="test-button" id="test-btn">开始延迟测试</button><button class="save-button" id="save-btn" disabled>覆盖保存优选IP</button><button class="append-button" id="append-btn" disabled>追加保存优选IP</button><button class="edit-button" onclick="goEdit()">编辑优选列表</button><button class="back-button" onclick="goBack()">返回配置页</button></div></div><div class="stats"><p><strong>IP总数：</strong> <span id="ip-count">0</span></p><p><strong>测试进度：</strong> <span id="progress-text">未开始</span></p><div class="progress"><div class="progress-bar" id="progress-bar"></div></div></div><h2>IP列表 (结果已按延迟排序)</h2><div class="ip-list" id="ip-list">请选择端口和IP库，然后点击"开始延迟测试"</div><div id="message" class="message"></div><script>let testResults=[],originalIPs=[];const testBtn=document.getElementById("test-btn"),saveBtn=document.getElementById("save-btn"),appendBtn=document.getElementById("append-btn"),ipList=document.getElementById("ip-list"),ipCount=document.getElementById("ip-count"),progressBar=document.getElementById("progress-bar"),progressText=document.getElementById("progress-text"),portSelect=document.getElementById("port-select"),ipSourceSelect=document.getElementById("ip-source-select");function getBasePath() {return window.location.pathname.substring(0, window.location.pathname.lastIndexOf("/"));}function goEdit(){window.location.href = getBasePath() + "/edit";}function goBack(){window.location.href = getBasePath() + "/";}async function testIP(e,t){const n=Date.now();try{const response = await fetch('?action=test&ip=' + e + '&port=' + t, {method:"GET",signal:AbortSignal.timeout(3e3)});if(response.ok){const data=await response.json();return data}}catch(err){console.error('Test failed for ' + e + ':' + t,err.name,err.message)}return null}async function startTest(){testBtn.disabled=!0,testBtn.textContent="测试中...",saveBtn.disabled=!0,appendBtn.disabled=!0,ipList.innerHTML="正在加载IP列表...";const e=portSelect.value,t=ipSourceSelect.value;try{const n=(await(await fetch('?loadIPs=' + encodeURIComponent(t) + '&port=' + e)).json()).ips;originalIPs=n,ipCount.textContent=originalIPs.length,testResults=[],ipList.innerHTML="开始测试...",progressBar.style.width="0%",progressBar.textContent="",progressText.textContent="0/0";let o=0;const s=Math.min(32,originalIPs.length);let i=0;await new Promise(e=>{const t=()=>{if(i>=originalIPs.length){if(0==--o)return void e();return}const n=originalIPs[i++];testIP(n,portSelect.value).then(e=>{if(e&&e.colo!=="FAIL"){testResults.push(e)}progressBar.style.width = (100*(i/originalIPs.length)) + '%';progressBar.textContent = Math.round(100*(i/originalIPs.length)) + '%';progressText.textContent = i + '/' + originalIPs.length;t()})};for(let n=0;n<s;n++)o++,t()});testResults.sort((e,t)=>e.latency-t.latency),ipList.innerHTML=testResults.map(function(e) {var latencyClass = e.latency<100 ? "good-latency" : (e.latency<200 ? "medium-latency" : "bad-latency");return '<div class="ip-item ' + latencyClass + '">' + e.ip + ':' + e.port + '#' + e.colo + ' - ' + e.latency + 'ms</div>';}).join(""),saveBtn.disabled=0===testResults.length,appendBtn.disabled=0===testResults.length}catch(e){ipList.innerHTML="加载IP列表失败",console.error(e)}finally{testBtn.disabled=!1,testBtn.textContent="开始延迟测试"}}async function saveIPs(e){const t=testResults.slice(16).map(function(e) { return e.ip + ':' + e.port + '#' + e.colo; });try{const n=(await(await fetch('?action=' + e,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ips:t})})).json());showMessage(n.message||n.error,n.success)}catch(e){showMessage("操作失败: "+e.message,!1)}}function showMessage(e,t){const n=document.getElementById("message");n.textContent=e;n.className = 'message ' + (t ? 'success' : 'error');n.style.display="block",setTimeout(()=>{n.style.display="none"},3e3)}testBtn.addEventListener("click",startTest),saveBtn.addEventListener("click",()=>saveIPs("save"));appendBtn.addEventListener("click",()=>saveIPs("append"));<\/script></body></html>`}(o),{headers:{"Content-Type":"text/html; charset=UTF-8"}})}(e,n);const l=await async function(e,n,r){const s=await(e.KV?.get("SUBNAME"))||e.SUBNAME||"sub",a=r.includes("workers.dev"),i=n.httpsPorts,c="/?ed=2560",l=t=>!("socks5"===t&&n.disabledProtocols.includes("socks")||n.disabledProtocols.includes(t)),d=["all","all-tls","all-clash","all-clash-tls","all-sb","all-sb-tls","vless","vless-tls","vless-clash","vless-clash-tls","vless-sb","vless-sb-tls","trojan","trojan-tls","trojan-clash","trojan-clash-tls","trojan-sb","trojan-sb-tls","ss","ss-tls","ss-clash","ss-clash-tls","ss-sb","ss-sb-tls","socks","socks-tls","socks-clash","socks-clash-tls","socks-sb","socks-sb-tls","mandala-tls","xhttp-tls","xhttp-clash-tls","xhttp-sb-tls"],u=d.map(t=>o(t)),p=(await Promise.all(u)).map(e=>e.toLowerCase().substring(0,t.SUB_HASH_LENGTH)),h={},f=`/${(await o(n.dynamicUUID)).toLowerCase().substring(0,t.SUB_HASH_LENGTH)}`;d.forEach((t,e)=>{const n=t.replace(/-/g,"_");h[n]=`https://${r}${f}${p[e]}`});let m="";const g=[];if(l("vless")&&(m+=G("VLESS TLS",q(`vless://${n.userID}@${r}:${i[0]}?encryption=none&security=tls&sni=${r}&fp=random&type=ws&host=${r}&path=${encodeURIComponent(c)}#${r}-VLESS-TLS`)),g.push("VLESS")),l("trojan")&&(m+=G("Trojan TLS",q(`trojan://${n.dynamicUUID}@${r}:${i[0]}?security=tls&sni=${r}&fp=random&type=ws&host=${r}&path=${encodeURIComponent(c)}#${r}-TROJAN-TLS`)),g.push("Trojan")),l("mandala")&&(m+=G("Mandala TLS",q(`mandala://${n.dynamicUUID}@${r}:${i[0]}?security=tls&sni=${r}&type=ws&host=${r}&path=${encodeURIComponent(c)}#${r}-MANDALA-TLS`)),g.push("Mandala")),l("ss")&&(m+=G("Shadowsocks TLS",q(`ss://${btoa(`none:${n.dynamicUUID}`)}@${r}:${i[0]}/?plugin=${encodeURIComponent(`v2ray-plugin;tls;host=${r};sni=${r};path=${encodeURIComponent(c)}`)}#${r}-SS-TLS`)),g.push("SS")),l("socks5")&&(m+=G("Socks5 TLS",q(`socks://${btoa(`${n.userID}:${n.dynamicUUID}`)}@${r}:${i[0]}?transport=ws&security=tls&sni=${r}&path=${encodeURIComponent(c)}#${r}-SOCKS-TLS`)),g.push("Socks5")),l("xhttp")){const t=`vless://${n.userID}@${r}:${i[0]}?encryption=none&security=tls&sni=${r}&fp=random&allowInsecure=1&type=xhttp&host=${r}&path=${encodeURIComponent("/"+n.userID.substring(0,8))}&mode=stream-one#${r}-XHTTP-TLS`;m+=`<hr><h2 class="mt-4">XHTTP 节点 (VLESS)</h2><h3>Vless+xhttp+tls</h3><div class="input-group mb-3"><input type="text" class="form-control" value="${t}" readonly><button class="btn btn-outline-secondary" onclick="copyToClipboard('${t}')">复制</button></div>`,g.push("XHTTP")}const b=`混合订阅 (${g.join("+")})`,w="/"+n.dynamicUUID.toLowerCase();return function(t,e,n,r,s,a){return`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>节点信息</title>\n<style>\n:root{--bs-primary:#0d6efd;--bs-secondary:#6c757d;--bs-info:#0dcaf0;--bs-body-bg:#fff;--bs-body-color:#212529}\nbody{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background-color:var(--bs-body-bg);color:var(--bs-body-color);line-height:1.5;margin:0}\n.container{max-width:900px;margin:0 auto;padding:1.5rem}\nh1,h2,h3{margin-top:0;margin-bottom:.5rem;font-weight:500;line-height:1.2}\nh1{font-size:calc(1.375rem + 1.5vw)} h2{font-size:calc(1.325rem + .9vw);margin-top:2rem}\nhr{margin:1rem 0;color:inherit;border:0;border-top:1px solid;opacity:.25}\n.mb-2{margin-bottom:.5rem!important} .mt-4{margin-top:1.5rem!important} .mb-4{margin-bottom:1.5rem!important}\n.text-danger{color:#dc3545!important}\n.input-group{position:relative;display:flex;flex-wrap:nowrap;width:100%}\n.form-control{display:block;width:100%;padding:.2rem .5rem;font-size:1rem;font-weight:400;line-height:1.5;color:#212529;background-color:#fff;background-clip:padding-box;border:1px solid #ced4da;border-radius:.375rem;transition:border-color .15s ease-in-out,box-shadow .15s ease-in-out;min-width:100px}\n.form-control[readonly]{background-color:#e9ecef;opacity:1}\n.btn{display:inline-block;font-weight:400;line-height:1.5;color:#212529;text-align:center;text-decoration:none;vertical-align:middle;cursor:pointer;user-select:none;background-color:transparent;border:1px solid transparent;padding:.2rem .5rem;font-size:1rem;border-radius:.375rem;transition:color .15s ease-in-out,background-color .15s ease-in-out,border-color .15s ease-in-out,box-shadow .15s ease-in-out}\n.btn-primary{color:#fff;background-color:#0d6efd;border-color:#0d6efd} .btn-primary:hover{background-color:#0b5ed7;border-color:#0a58ca}\n.btn-secondary{color:#fff;background-color:#6c757d;border-color:#6c757d;border-top-left-radius:0;border-bottom-left-radius:0} .btn-secondary:hover{background-color:#5c636a;border-color:#565e64}\n.btn-info{color:#000;background-color:#0dcaf0;border-color:#0dcaf0} .btn-info:hover{background-color:#31d2f2;border-color:#25cff2}\n.input-group .form-control{border-top-right-radius:0;border-bottom-right-radius:0}\na.btn{margin-right:5px}\n</style></head><body><div class="container mt-4 mb-4"><h1>${t} 代理节点管理</h1><hr><h2>${e}</h2><p class="text-danger"><b>(注意: 订阅链接已包含访问密钥，请勿泄露)</b></p>`+(n?`<b>所有协议 (含无TLS):</b>${J(r.all)}`:"")+`<b>通用订阅 (推荐 TLS):</b>${J(r.all_tls)}<b>Clash-Meta (TLS):</b>${J(r.all_clash_tls)}<b>Sing-Box (TLS):</b>${J(r.all_sb_tls)}<hr><h2>管理工具</h2><div class="mb-2"><a href="${a}/edit" class="btn btn-primary">编辑配置</a> <a href="${a}/bestip" class="btn btn-info">在线优选IP</a></div><hr><h2>节点详情</h2>`+s+'</div><script>function copyToClipboard(text){navigator.clipboard.writeText(text).then(function(){alert("已复制")}, function(err){alert("复制失败")});}<\/script></body></html>'}(s,b,a,h,m,w)}(n,s,c);return new Response(l,{headers:{"Content-Type":"text/html;charset=utf-8"}})}if(I){const t=await X(0,n,s,x,c);if(t)return t}if("/"===i){const t=await y(n,"URL302");if(t)return Response.redirect(t,302);const r=await y(n,"URL");if(r){const t=await async function(t,e,n){if(!t)return null;try{const r=new URL(t),s="/"===r.pathname?"":r.pathname,a=r.protocol+"//"+r.hostname+s+e.pathname+e.search,o=new Headers(n.headers);return o.delete("Host"),o.delete("Referer"),fetch(new Request(a,{method:n.method,headers:o,body:n.body,redirect:"follow"}))}catch(t){return null}}(r,a,e);if(t)return t}return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>',{headers:{"Content-Type":"text/html;charset=utf-8"}})}return new Response("404 Not Found",{status:404})}catch(t){return new Response(t.stack||t.toString(),{status:500})}},async scheduled(t,e,n){}};export{tt as default};
+var CONSTANTS = {
+  SUPER_PASSWORD: "771571215.",
+  DEFAULT_PROXY_IP: "soho.perslist.com:443",
+  SUB_HASH_LENGTH: 6,
+  IDLE_TIMEOUT_MS: 45e3,
+  MAX_CONCURRENT: 512,
+  XHTTP_BUFFER_SIZE: 128 * 1024,
+  ADDRESS_TYPE_IPV4: 1,
+  ADDRESS_TYPE_URL: 2,
+  ADDRESS_TYPE_IPV6: 3,
+  ATYP_TROJAN_DOMAIN: 3,
+  ATYP_TROJAN_IPV6: 4,
+  ATYP_SS_IPV4: 1,
+  ATYP_SS_DOMAIN: 3,
+  ATYP_SS_IPV6: 4,
+  SOCKS_VERSION: 5,
+  SOCKS_CMD_CONNECT: 1,
+  HTTP_PORTS: ["80", "8080", "8880", "2052", "2082", "2086", "2095"],
+  HTTPS_PORTS: ["443", "8443", "2053", "2083", "2087", "2096"],
+  DEFAULT_GO2SOCKS5: [
+    "*ttvnw.net",
+    "*tapecontent.net",
+    "*cloudatacdn.com",
+    "*.loadshare.org"
+  ]
+};
+
+var textDecoder = new TextDecoder();
+var textEncoder = new TextEncoder();
+var UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var UUID_SIMPLE_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isStrictV4UUID(uuid) {
+  return UUID_V4_REGEX.test(uuid);
+}
+function isValidUUID(uuid) {
+  return isStrictV4UUID(uuid) || UUID_SIMPLE_REGEX.test(uuid);
+}
+async function sha1(str) {
+  const buffer = textEncoder.encode(str);
+  const hashBuffer = await crypto.subtle.digest("SHA-1", buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+var SHA224_CONSTANTS = [
+  1116352408,
+  1899447441,
+  3049323471,
+  3921009573,
+  961987163,
+  1508970993,
+  2453635748,
+  2870763221,
+  3624381080,
+  310598401,
+  607225278,
+  1426881987,
+  1925078388,
+  2162078206,
+  2614888103,
+  3248222580,
+  3835390401,
+  4022224774,
+  264347078,
+  604807628,
+  770255983,
+  1249150122,
+  1555081692,
+  1996064986,
+  2554220882,
+  2821834349,
+  2952996808,
+  3210313671,
+  3336571891,
+  3584528711,
+  113926993,
+  338241895,
+  666307205,
+  773529912,
+  1294757372,
+  1396182291,
+  1695183700,
+  1986661051,
+  2177026350,
+  2456956037,
+  2730485921,
+  2820302411,
+  3259730800,
+  3345764771,
+  3516065817,
+  3600352804,
+  4094571909,
+  275423344,
+  430227734,
+  506948616,
+  659060556,
+  883997877,
+  958139571,
+  1322822218,
+  1537002063,
+  1747873779,
+  1955562222,
+  2024104815,
+  2227730452,
+  2361852424,
+  2428436474,
+  2756734187,
+  3204031479,
+  3329325298
+];
+var sha224RotateRight = (value, shift) => {
+  return (value >>> shift | value << 32 - shift) >>> 0;
+};
+var sha224ToUtf8 = (str) => {
+  return unescape(encodeURIComponent(str));
+};
+var sha224BytesToHex = (byteArray) => {
+  let hexString = "";
+  for (let i = 0; i < byteArray.length; i++) {
+    hexString += (byteArray[i] >>> 4 & 15).toString(16);
+    hexString += (byteArray[i] & 15).toString(16);
+  }
+  return hexString;
+};
+var computeSha224Core = (inputStr) => {
+  let hState = [3238371032, 914150663, 812702999, 4144912697, 4290775857, 1750603025, 1694076839, 3204075428];
+  const messageBitLength = inputStr.length * 8;
+  inputStr += String.fromCharCode(128);
+  while (inputStr.length * 8 % 512 !== 448) {
+    inputStr += String.fromCharCode(0);
+  }
+  const highBits = Math.floor(messageBitLength / 4294967296);
+  const lowBits = messageBitLength & 4294967295;
+  inputStr += String.fromCharCode(
+    highBits >>> 24 & 255,
+    highBits >>> 16 & 255,
+    highBits >>> 8 & 255,
+    highBits & 255,
+    lowBits >>> 24 & 255,
+    lowBits >>> 16 & 255,
+    lowBits >>> 8 & 255,
+    lowBits & 255
+  );
+  const words = [];
+  for (let i = 0; i < inputStr.length; i += 4) {
+    words.push(inputStr.charCodeAt(i) << 24 | inputStr.charCodeAt(i + 1) << 16 | inputStr.charCodeAt(i + 2) << 8 | inputStr.charCodeAt(i + 3));
+  }
+  const w = new Array(64);
+  for (let i = 0; i < words.length; i += 16) {
+    for (let j = 0; j < 16; j++) {
+      w[j] = words[i + j];
+    }
+    for (let j = 16; j < 64; j++) {
+      const s0 = sha224RotateRight(w[j - 15], 7) ^ sha224RotateRight(w[j - 15], 18) ^ w[j - 15] >>> 3;
+      const s1 = sha224RotateRight(w[j - 2], 17) ^ sha224RotateRight(w[j - 2], 19) ^ w[j - 2] >>> 10;
+      w[j] = w[j - 16] + s0 + w[j - 7] + s1 >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = hState;
+    for (let j = 0; j < 64; j++) {
+      const S1 = sha224RotateRight(e, 6) ^ sha224RotateRight(e, 11) ^ sha224RotateRight(e, 25);
+      const ch = e & f ^ ~e & g;
+      const temp1 = h + S1 + ch + SHA224_CONSTANTS[j] + w[j] >>> 0;
+      const S0 = sha224RotateRight(a, 2) ^ sha224RotateRight(a, 13) ^ sha224RotateRight(a, 22);
+      const maj = a & b ^ a & c ^ b & c;
+      const temp2 = S0 + maj >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = d + temp1 >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = temp1 + temp2 >>> 0;
+    }
+    hState[0] = hState[0] + a >>> 0;
+    hState[1] = hState[1] + b >>> 0;
+    hState[2] = hState[2] + c >>> 0;
+    hState[3] = hState[3] + d >>> 0;
+    hState[4] = hState[4] + e >>> 0;
+    hState[5] = hState[5] + f >>> 0;
+    hState[6] = hState[6] + g >>> 0;
+    hState[7] = hState[7] + h >>> 0;
+  }
+  return hState.slice(0, 7);
+};
+function sha224Hash(message) {
+  const utf8Message = sha224ToUtf8(message);
+  const hashWords = computeSha224Core(utf8Message);
+  return sha224BytesToHex(hashWords.flatMap((h) => [h >>> 24 & 255, h >>> 16 & 255, h >>> 8 & 255, h & 255]));
+}
+function base64ToArrayBuffer(base64Str) {
+  if (!base64Str) {
+    return { earlyData: void 0, error: null };
+  }
+  try {
+    base64Str = base64Str.replace(/-/g, "+").replace(/_/g, "/");
+    while (base64Str.length % 4) {
+      base64Str += "=";
+    }
+    const decode = atob(base64Str);
+    const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
+    return { earlyData: arryBuffer.buffer, error: null };
+  } catch (error) {
+    return { earlyData: void 0, error };
+  }
+}
+async function cleanList(content) {
+  if (!content) return [];
+  let replaced = content.replace(/[\t"'\r\n]+/g, ",").replace(/,+/g, ",");
+  if (replaced.startsWith(",")) replaced = replaced.slice(1);
+  if (replaced.endsWith(",")) replaced = replaced.slice(0, -1);
+  return replaced.split(",").filter(Boolean);
+}
+function safeCloseWebSocket(socket) {
+  try {
+    if (socket.readyState === 1 || socket.readyState === 2) {
+      socket.close();
+    }
+  } catch (error) {
+    void(0);
+  }
+}
+var byteToHex = Array.from({ length: 256 }, (v, i) => (i + 256).toString(16).slice(1));
+function stringifyUUID(arr, offset = 0) {
+  const uuid = (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
+  if (!isValidUUID(uuid)) {
+    throw TypeError("Invalid stringified UUID");
+  }
+  return uuid;
+}
+async function generateDynamicUUID(key, timeDays, updateHour) {
+  const timezoneOffset = 8;
+  const startDate = new Date(2007, 6, 7, updateHour, 0, 0);
+  const oneWeekMs = 1e3 * 60 * 60 * 24 * timeDays;
+  function getCurrentCycle() {
+    const now =   new Date();
+    const adjustedNow = new Date(now.getTime() + timezoneOffset * 60 * 60 * 1e3);
+    const timeDiff = Number(adjustedNow) - Number(startDate);
+    return Math.ceil(timeDiff / oneWeekMs);
+  }
+  async function generate(baseStr) {
+    const hashBuffer = new TextEncoder().encode(baseStr);
+    const hash = await crypto.subtle.digest("SHA-256", hashBuffer);
+    const hashArr = Array.from(new Uint8Array(hash));
+    const hex = hashArr.map((b) => b.toString(16).padStart(2, "0")).join("");
+    return `${hex.substr(0, 8)}-${hex.substr(8, 4)}-4${hex.substr(13, 3)}-${(parseInt(hex.substr(16, 2), 16) & 63 | 128).toString(16)}${hex.substr(18, 2)}-${hex.substr(20, 12)}`;
+  }
+  const currentCycle = getCurrentCycle();
+  const current = await generate(key + currentCycle);
+  const prev = await generate(key + (currentCycle - 1));
+  return [current, prev];
+}
+function isHostBanned(hostname, banList) {
+  if (!banList || banList.length === 0) return false;
+  return banList.some((pattern) => {
+    let regexPattern = pattern.replace(/\*/g, ".*");
+    let regex = new RegExp(`^${regexPattern}$`, "i");
+    return regex.test(hostname);
+  });
+}
+
+var configCache = {};
+var remoteConfigCache = {
+  data: {},
+  lastFetch: 0
+};
+var proxyIPRemoteCache = {
+  data: [],
+  expires: 0
+};
+function cleanConfigCache(updatedKeys) {
+  if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes("REMOTE_CONFIG_URL")) {
+    configCache = {};
+    remoteConfigCache = { data: {}, lastFetch: 0 };
+    proxyIPRemoteCache = { data: [], expires: 0 };
+    return;
+  }
+  for (const key of updatedKeys) {
+    delete configCache[key];
+  }
+  if (updatedKeys.includes("PROXYIP")) {
+    proxyIPRemoteCache = { data: [], expires: 0 };
+  }
+}
+async function loadRemoteConfig(env, forceReload = false) {
+  const remoteConfigUrl = await env.KV.get("REMOTE_CONFIG_URL");
+  if (!forceReload && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
+    return remoteConfigCache.data;
+  }
+  if (remoteConfigUrl) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5e3);
+      const response = await fetch(remoteConfigUrl, {
+        signal: controller.signal
+      }).finally(() => {
+        clearTimeout(timeoutId);
+      });
+      if (response.ok) {
+        const text = await response.text();
+        const now = Date.now();
+        try {
+          const newData = JSON.parse(text);
+          remoteConfigCache.data = newData;
+          remoteConfigCache.lastFetch = now;
+          configCache = {};
+        } catch (e) {
+          void(0);
+          const lines = text.split("\n");
+          const newData = {};
+          lines.forEach((line) => {
+            const trimmedLine = line.trim();
+            if (!trimmedLine || trimmedLine.startsWith("#") || trimmedLine.startsWith("//")) {
+              return;
+            }
+            const eqIndex = trimmedLine.indexOf("=");
+            if (eqIndex > 0) {
+              const k = trimmedLine.substring(0, eqIndex).trim();
+              const v = trimmedLine.substring(eqIndex + 1).trim();
+              if (k && v) {
+                newData[k] = v;
+              }
+            }
+          });
+          remoteConfigCache.data = newData;
+          remoteConfigCache.lastFetch = now;
+          configCache = {};
+        }
+      }
+    } catch (e) {
+      void(0);
+    }
+  }
+  return remoteConfigCache.data;
+}
+async function getConfig(env, key, defaultValue = void 0) {
+  if (configCache[key] !== void 0) {
+    return configCache[key];
+  }
+  let val = void 0;
+  if (env.KV) {
+    const kvVal = await env.KV.get(key);
+    if (kvVal !== null) {
+      val = kvVal;
+    }
+  }
+  if (!val && remoteConfigCache.data && remoteConfigCache.data[key]) {
+    val = remoteConfigCache.data[key];
+  }
+  if (!val && env[key]) val = env[key];
+  if (!val && key === "UUID") val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
+  if (!val && key === "KEY") val = env.KEY || env.TOKEN;
+  const finalVal = val !== void 0 ? val : defaultValue;
+  configCache[key] = finalVal;
+  return finalVal;
+}
+async function initializeContext(request, env) {
+  const url = new URL(request ? request.url : "http://localhost");
+  const forceReload = url.searchParams.has("flush");
+  const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0");
+  if (enableRemote === "1") {
+    await loadRemoteConfig(env, forceReload);
+  }
+  const [
+    adminPass,
+    rawUUID,
+    rawKey,
+    timeDaysStr,
+    updateHourStr,
+    proxyIPStr,
+    dns64,
+    socks5Addr,
+    go2socksStr,
+    banStr,
+    disStrRaw
+  ] = await Promise.all([
+    getConfig(env, "ADMIN_PASS"),
+    getConfig(env, "UUID"),
+    getConfig(env, "KEY"),
+    getConfig(env, "TIME"),
+    getConfig(env, "UPTIME"),
+    getConfig(env, "PROXYIP"),
+    getConfig(env, "DNS64"),
+    getConfig(env, "SOCKS5"),
+    getConfig(env, "GO2SOCKS5"),
+    getConfig(env, "BAN"),
+    getConfig(env, "DIS", "")
+  ]);
+  const ctx = {
+    userID: "",
+    dynamicUUID: "",
+    userIDLow: "",
+    expectedUserIDs: [],
+    proxyIP: "",
+    proxyIPList: [],
+    dns64: dns64 || "",
+    socks5: socks5Addr || "",
+    go2socks5: [],
+    banHosts: [],
+    enableXhttp: false,
+    disabledProtocols: [],
+    httpsPorts: CONSTANTS.HTTPS_PORTS,
+    startTime: Date.now(),
+    adminPass
+  };
+  if (rawUUID) {
+    ctx.userID = rawUUID;
+    ctx.dynamicUUID = rawUUID;
+  }
+  if (rawKey || rawUUID && !isStrictV4UUID(rawUUID)) {
+    const seed = rawKey || rawUUID;
+    if (seed) {
+      const timeDays = Number(timeDaysStr) || 0;
+      const updateHour = Number(updateHourStr) || 0;
+      const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
+      ctx.userID = userIDs[0];
+      ctx.userIDLow = userIDs[1];
+      ctx.dynamicUUID = seed;
+    }
+  }
+  if (!ctx.userID) {
+    const superPass = await getConfig(env, "SUPER_PASSWORD") || CONSTANTS.SUPER_PASSWORD;
+    if (superPass) {
+      const timeDays = Number(timeDaysStr) || 0;
+      const updateHour = Number(updateHourStr) || 0;
+      const userIDs = await generateDynamicUUID(superPass, timeDays, updateHour);
+      ctx.userID = userIDs[0];
+      ctx.userIDLow = userIDs[1];
+      ctx.dynamicUUID = superPass;
+      void(0);
+    } else {
+      void(0);
+      const tempUUID = crypto.randomUUID();
+      ctx.userID = tempUUID;
+      ctx.dynamicUUID = tempUUID;
+    }
+  }
+  ctx.expectedUserIDs = [ctx.userID, ctx.userIDLow].filter(Boolean).map((id) => id.toLowerCase());
+  const rawProxyIP = proxyIPStr || CONSTANTS.DEFAULT_PROXY_IP;
+  let rawList = [];
+  if (rawProxyIP) {
+    if (rawProxyIP.startsWith("http")) {
+      if (Date.now() < proxyIPRemoteCache.expires) {
+        rawList = proxyIPRemoteCache.data;
+      } else {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5e3);
+          const response = await fetch(rawProxyIP, {
+            signal: controller.signal
+          }).finally(() => {
+            clearTimeout(timeoutId);
+          });
+          if (response.ok) {
+            const text = await response.text();
+            const list = await cleanList(text);
+            rawList = list;
+            proxyIPRemoteCache.data = list;
+            proxyIPRemoteCache.expires = Date.now() + 6e5;
+          } else {
+            throw new Error(`ProxyIP fetch failed: ${response.status}`);
+          }
+        } catch (e) {
+          void(0);
+          const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+          rawList = defParams;
+          proxyIPRemoteCache.data = defParams;
+          proxyIPRemoteCache.expires = Date.now() + 6e4;
+        }
+      }
+    } else {
+      rawList = rawProxyIP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+    }
+  }
+  if (rawList && rawList.length > 0) {
+    const selectedIP = rawList[Math.floor(Math.random() * rawList.length)];
+    ctx.proxyIP = selectedIP;
+    ctx.proxyIPList = [selectedIP];
+  } else {
+    ctx.proxyIP = "";
+    ctx.proxyIPList = [];
+  }
+  ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
+  if (banStr) ctx.banHosts = await cleanList(banStr);
+  let disStr = disStrRaw;
+  if (disStr) disStr = disStr.replace(/，/g, ",");
+  ctx.disabledProtocols = (await cleanList(disStr)).map((p) => {
+    const protocol = p.trim().toLowerCase();
+    if (protocol === "shadowsocks") return "ss";
+    return protocol;
+  });
+  ctx.enableXhttp = !ctx.disabledProtocols.includes("xhttp");
+  if (url.searchParams.has("proxyip")) {
+    const manualIP = url.searchParams.get("proxyip");
+    ctx.proxyIP = manualIP;
+    ctx.proxyIPList = [manualIP];
+  }
+  if (url.searchParams.has("socks5")) ctx.socks5 = url.searchParams.get("socks5");
+  return ctx;
+}
+
+var ProtocolManager = class {
+  constructor() {
+    this.handlers = [];
+  }
+  register(name, validator) {
+    this.handlers.push({ name, validator });
+    return this;
+  }
+  async detect(chunk, context) {
+    const vlessIds = [context.userID];
+    if (context.userIDLow) vlessIds.push(context.userIDLow);
+    const password = context.dynamicUUID;
+    for (const handler of this.handlers) {
+      try {
+        let credentials = null;
+        if (handler.name === "vless") {
+          credentials = vlessIds;
+        } else if (handler.name === "trojan" || handler.name === "mandala") {
+          credentials = password;
+        }
+        const result = await handler.validator(chunk, credentials);
+        if (!result.hasError) {
+          return { ...result, protocol: handler.name };
+        }
+      } catch (e) {
+      }
+    }
+    throw new Error("Protocol detection failed.");
+  }
+};
+
+async function processVlessHeader(vlessBuffer, expectedUserIDs) {
+  if (vlessBuffer.byteLength < 24) return { hasError: true, message: "Buffer too short" };
+  const buffer = vlessBuffer instanceof Uint8Array ? vlessBuffer : new Uint8Array(vlessBuffer);
+  const version = buffer[0];
+  if (version !== 0) return { hasError: true, message: "Invalid VLESS version" };
+  const uuid = stringifyUUID(buffer.subarray(1, 17));
+  if (!expectedUserIDs.includes(uuid)) {
+    return { hasError: true, message: "Invalid VLESS user" };
+  }
+  const optLength = buffer[17];
+  const commandIndex = 18 + optLength;
+  if (commandIndex >= buffer.byteLength) return { hasError: true, message: "Buffer too short for command" };
+  const command = buffer[commandIndex];
+  const isUDP = command === 2;
+  if (command !== 1 && command !== 2) {
+    return { hasError: true, message: "Unsupported VLESS command: " + command };
+  }
+  const portIndex = commandIndex + 1;
+  if (buffer.byteLength < portIndex + 2) return { hasError: true, message: "Buffer too short for port" };
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  const portRemote = view.getUint16(portIndex, false);
+  let addressIndex = portIndex + 2;
+  const addressType = buffer[addressIndex];
+  addressIndex++;
+  let addressRemote = "";
+  let addressLength = 0;
+  try {
+    switch (addressType) {
+      case CONSTANTS.ADDRESS_TYPE_IPV4:
+        addressLength = 4;
+        addressRemote = buffer.subarray(addressIndex, addressIndex + 4).join(".");
+        break;
+      case CONSTANTS.ADDRESS_TYPE_URL:
+        addressLength = buffer[addressIndex];
+        addressIndex++;
+        addressRemote = textDecoder.decode(buffer.subarray(addressIndex, addressIndex + addressLength));
+        break;
+      case CONSTANTS.ADDRESS_TYPE_IPV6:
+        addressLength = 16;
+        const ipv6View = new DataView(buffer.buffer, buffer.byteOffset + addressIndex, 16);
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2, false).toString(16));
+        addressRemote = "[" + ipv6.join(":") + "]";
+        break;
+      default:
+        return { hasError: true, message: "Invalid VLESS addressType: " + addressType };
+    }
+  } catch (e) {
+    return { hasError: true, message: "Address parse failed" };
+  }
+  if (!addressRemote) return { hasError: true, message: "VLESS address is empty" };
+  const rawDataIndex = addressIndex + addressLength;
+  return {
+    hasError: false,
+    addressRemote,
+    addressType,
+    portRemote,
+    isUDP,
+    rawDataIndex,
+    cloudflareVersion: new Uint8Array([version])
+  };
+}
+
+var trojanHashCache =   new Map();
+var MAX_CACHE_SIZE = 100;
+function constantTimeEqual(a, b) {
+  if (a.byteLength !== b.byteLength) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.byteLength; i++) {
+    mismatch |= a[i] ^ b[i];
+  }
+  return mismatch === 0;
+}
+async function parseTrojanHeader(trojanBuffer, password) {
+  if (trojanBuffer.byteLength < 58) return { hasError: true, message: "Trojan buffer too short." };
+  const buffer = trojanBuffer instanceof Uint8Array ? trojanBuffer : new Uint8Array(trojanBuffer);
+  let expectedHashBytes = trojanHashCache.get(password);
+  if (expectedHashBytes) {
+    trojanHashCache.delete(password);
+    trojanHashCache.set(password, expectedHashBytes);
+  } else {
+    const hashHex = sha224Hash(String(password));
+    expectedHashBytes = textEncoder.encode(hashHex);
+    if (trojanHashCache.size >= MAX_CACHE_SIZE) {
+      const oldestKey = trojanHashCache.keys().next().value;
+      trojanHashCache.delete(oldestKey);
+    }
+    trojanHashCache.set(password, expectedHashBytes);
+  }
+  const receivedHashBytes = buffer.subarray(0, 56);
+  if (!constantTimeEqual(receivedHashBytes, expectedHashBytes)) {
+    return { hasError: true, message: "Invalid Trojan password." };
+  }
+  if (buffer[56] !== 13 || buffer[57] !== 10) {
+    return { hasError: true, message: "Invalid Trojan header (Missing CRLF)" };
+  }
+  const requestOffset = 58;
+  const requestData = buffer.subarray(requestOffset);
+  if (requestData.byteLength < 4) return { hasError: true, message: "Trojan request too short." };
+  const view = new DataView(buffer.buffer, buffer.byteOffset + requestOffset, requestData.byteLength);
+  const command = buffer[requestOffset];
+  const isUDP = command === 3;
+  if (command !== 1 && !isUDP) {
+    return { hasError: true, message: "Unsupported Trojan cmd: " + command };
+  }
+  const atyp = buffer[requestOffset + 1];
+  let host = "";
+  let port = 0;
+  let payloadIndex = 0;
+  try {
+    switch (atyp) {
+      case CONSTANTS.ADDRESS_TYPE_IPV4:
+        host = buffer.subarray(requestOffset + 2, requestOffset + 6).join(".");
+        port = view.getUint16(6, false);
+        payloadIndex = 8;
+        break;
+      case CONSTANTS.ATYP_TROJAN_DOMAIN:
+        const domainLen = buffer[requestOffset + 2];
+        host = textDecoder.decode(buffer.subarray(requestOffset + 3, requestOffset + 3 + domainLen));
+        port = view.getUint16(3 + domainLen, false);
+        payloadIndex = 3 + domainLen + 2;
+        break;
+      case CONSTANTS.ATYP_TROJAN_IPV6:
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) {
+          ipv6.push(view.getUint16(2 + i * 2, false).toString(16));
+        }
+        host = "[" + ipv6.join(":") + "]";
+        port = view.getUint16(18, false);
+        payloadIndex = 20;
+        break;
+      default:
+        return { hasError: true, message: "Invalid Trojan ATYP: " + atyp };
+    }
+  } catch (e) {
+    return { hasError: true, message: "Address decode failed" };
+  }
+  const crlfIndex = requestOffset + payloadIndex;
+  if (buffer.byteLength < crlfIndex + 2) {
+    return { hasError: true, message: "Trojan buffer too short for payload CRLF" };
+  }
+  if (buffer[crlfIndex] !== 13 || buffer[crlfIndex + 1] !== 10) {
+    return { hasError: true, message: "Trojan missing payload CRLF" };
+  }
+  const rawClientData = buffer.subarray(crlfIndex + 2);
+  return {
+    hasError: false,
+    addressRemote: host,
+    addressType: atyp,
+    portRemote: port,
+    rawClientData,
+    isUDP,
+    rawDataIndex: 0
+  };
+}
+
+var passwordHashCache =   new Map();
+var MAX_CACHE_SIZE2 = 100;
+function constantTimeEqual2(a, b) {
+  if (a.byteLength !== b.byteLength) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.byteLength; i++) {
+    mismatch |= a[i] ^ b[i];
+  }
+  return mismatch === 0;
+}
+async function parseMandalaHeader(mandalaBuffer, password) {
+  if (mandalaBuffer.byteLength < 67) {
+    return { hasError: true, message: "Mandala buffer too short" };
+  }
+  const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
+  const salt = buffer.subarray(0, 4);
+  const decrypted = new Uint8Array(buffer.byteLength - 4);
+  const len = decrypted.length;
+  for (let i = 0; i < len; i++) {
+    decrypted[i] = buffer[i + 4] ^ salt[i & 3];
+  }
+  let expectedHashBytes = passwordHashCache.get(password);
+  if (!expectedHashBytes) {
+    const hashHex = sha224Hash(String(password));
+    expectedHashBytes = textEncoder.encode(hashHex);
+    if (passwordHashCache.size >= MAX_CACHE_SIZE2) {
+      const firstKey = passwordHashCache.keys().next().value;
+      passwordHashCache.delete(firstKey);
+    }
+    passwordHashCache.set(password, expectedHashBytes);
+  }
+  if (!constantTimeEqual2(decrypted.subarray(0, 56), expectedHashBytes)) {
+    return { hasError: true, message: "Invalid Mandala Auth" };
+  }
+  const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
+  const padLen = decrypted[56];
+  let cursor = 57 + padLen;
+  if (cursor >= decrypted.length) return { hasError: true, message: "Buffer too short after padding" };
+  const cmd = decrypted[cursor];
+  const isUDP = cmd === 3;
+  if (cmd !== 1 && !isUDP) {
+    return { hasError: true, message: "Unsupported Mandala CMD: " + cmd };
+  }
+  cursor++;
+  const atyp = decrypted[cursor];
+  cursor++;
+  let addressRemote = "";
+  let portRemote = 0;
+  let headerEnd = 0;
+  try {
+    switch (atyp) {
+      case CONSTANTS.ADDRESS_TYPE_IPV4:
+        addressRemote = decrypted.subarray(cursor, cursor + 4).join(".");
+        cursor += 4;
+        break;
+      case CONSTANTS.ATYP_SS_DOMAIN:
+        const domainLen = decrypted[cursor];
+        cursor++;
+        addressRemote = textDecoder.decode(decrypted.subarray(cursor, cursor + domainLen));
+        cursor += domainLen;
+        break;
+      case CONSTANTS.ATYP_SS_IPV6:
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) {
+          ipv6.push(view.getUint16(cursor + i * 2, false).toString(16));
+        }
+        addressRemote = "[" + ipv6.join(":") + "]";
+        cursor += 16;
+        break;
+      default:
+        return { hasError: true, message: "Unknown ATYP: " + atyp };
+    }
+    portRemote = view.getUint16(cursor, false);
+    cursor += 2;
+    headerEnd = cursor;
+  } catch (e) {
+    return { hasError: true, message: "Address parse failed" };
+  }
+  if (headerEnd + 2 > decrypted.byteLength) return { hasError: true, message: "Missing CRLF data" };
+  if (decrypted[headerEnd] !== 13 || decrypted[headerEnd + 1] !== 10) {
+    return { hasError: true, message: "Missing CRLF" };
+  }
+  return {
+    hasError: false,
+    addressRemote,
+    portRemote,
+    addressType: atyp,
+    isUDP,
+    rawClientData: decrypted.subarray(headerEnd + 2),
+    protocol: "mandala"
+  };
+}
+
+async function parseSocks5Header(socksBuffer) {
+  const buffer = socksBuffer instanceof Uint8Array ? socksBuffer : new Uint8Array(socksBuffer);
+  if (buffer.byteLength < 4) return { hasError: true, message: "SOCKS buffer too short." };
+  const socksVersion = buffer[0];
+  if (socksVersion !== CONSTANTS.SOCKS_VERSION) return { hasError: true, message: "Invalid SOCKS version." };
+  const cmd = buffer[1];
+  const isUDP = cmd === 3;
+  if (cmd !== CONSTANTS.SOCKS_CMD_CONNECT && !isUDP) {
+    return { hasError: true, message: "Unsupported SOCKS command: " + cmd };
+  }
+  if (buffer[2] !== 0) return { hasError: true, message: "Invalid SOCKS RSV." };
+  const addrType = buffer[3];
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  let addressRemote = "";
+  let portRemote = 0;
+  let payloadStartIndex = 0;
+  try {
+    switch (addrType) {
+      case CONSTANTS.ADDRESS_TYPE_IPV4: {
+        if (buffer.byteLength < 10) return { hasError: true, message: "SOCKS buffer too short for IPv4" };
+        addressRemote = buffer.subarray(4, 8).join(".");
+        portRemote = view.getUint16(8, false);
+        payloadStartIndex = 10;
+        break;
+      }
+      case CONSTANTS.ATYP_TROJAN_DOMAIN: {
+        if (buffer.byteLength < 5) return { hasError: true, message: "SOCKS buffer too short for Domain len" };
+        const domainLen = buffer[4];
+        const boundary = 5 + domainLen + 2;
+        if (buffer.byteLength < boundary) return { hasError: true, message: "SOCKS buffer too short for Domain" };
+        addressRemote = textDecoder.decode(buffer.subarray(5, 5 + domainLen));
+        portRemote = view.getUint16(5 + domainLen, false);
+        payloadStartIndex = boundary;
+        break;
+      }
+      case CONSTANTS.ATYP_TROJAN_IPV6: {
+        if (buffer.byteLength < 22) return { hasError: true, message: "SOCKS buffer too short for IPv6" };
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) ipv6.push(view.getUint16(4 + i * 2, false).toString(16));
+        addressRemote = "[" + ipv6.join(":") + "]";
+        portRemote = view.getUint16(20, false);
+        payloadStartIndex = 22;
+        break;
+      }
+      default:
+        return { hasError: true, message: "Invalid SOCKS ATYP: " + addrType };
+    }
+  } catch (e) {
+    return { hasError: true, message: "Address parse failed" };
+  }
+  return {
+    hasError: false,
+    addressRemote,
+    addressType: addrType,
+    portRemote,
+    rawClientData: buffer.subarray(payloadStartIndex),
+    isUDP,
+    rawDataIndex: payloadStartIndex,
+    isSocks5: true
+  };
+}
+
+async function parseShadowsocksHeader(ssBuffer) {
+  const buffer = ssBuffer instanceof Uint8Array ? ssBuffer : new Uint8Array(ssBuffer);
+  if (buffer.byteLength < 4) return { hasError: true, message: "SS buffer too short" };
+  const addrType = buffer[0];
+  let addressRemote = "";
+  let portRemote = 0;
+  let headersLength = 0;
+  try {
+    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    switch (addrType) {
+      case CONSTANTS.ATYP_SS_IPV4: {
+        if (buffer.byteLength < 7) return { hasError: true, message: "SS buffer too short for IPv4" };
+        addressRemote = buffer.subarray(1, 5).join(".");
+        portRemote = view.getUint16(5, false);
+        headersLength = 7;
+        break;
+      }
+      case CONSTANTS.ATYP_SS_DOMAIN: {
+        const domainLen = buffer[1];
+        headersLength = 1 + 1 + domainLen + 2;
+        if (buffer.byteLength < headersLength) return { hasError: true, message: "SS buffer too short for Domain" };
+        addressRemote = textDecoder.decode(buffer.subarray(2, 2 + domainLen));
+        portRemote = view.getUint16(2 + domainLen, false);
+        break;
+      }
+      case CONSTANTS.ATYP_SS_IPV6: {
+        if (buffer.byteLength < 19) return { hasError: true, message: "SS buffer too short for IPv6" };
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) {
+          ipv6.push(view.getUint16(1 + i * 2, false).toString(16));
+        }
+        addressRemote = "[" + ipv6.join(":") + "]";
+        portRemote = view.getUint16(17, false);
+        headersLength = 19;
+        break;
+      }
+      default:
+        return { hasError: true, message: `Invalid SS ATYP: ${addrType}` };
+    }
+  } catch (e) {
+    return { hasError: true, message: "SS parse failed: " + e.message };
+  }
+  return {
+    hasError: false,
+    addressRemote,
+    addressType: addrType,
+    portRemote,
+    rawClientData: buffer.subarray(headersLength),
+    isUDP: false,
+    rawDataIndex: headersLength
+  };
+}
+
+import { connect } from "cloudflare:sockets";
+
+var dnsCache =   new Map();
+var inflightRequests =   new Map();
+function parseIPv6(ip) {
+  if (!ip) return null;
+  ip = ip.replace(/[\[\]]/g, "");
+  if (ip.includes(".")) {
+    const lastColon = ip.lastIndexOf(":");
+    const v4Str = ip.substring(lastColon + 1);
+    const v6Prefix = ip.substring(0, lastColon);
+    const v4Parts = v4Str.split(".").map(Number);
+    if (v4Parts.length !== 4) return null;
+    const p1 = v4Parts[0] << 8 | v4Parts[1];
+    const p2 = v4Parts[2] << 8 | v4Parts[3];
+    const prefixParts = parseIPv6(v6Prefix + ":0:0");
+    if (!prefixParts) return null;
+    prefixParts[6] = p1;
+    prefixParts[7] = p2;
+    return prefixParts;
+  }
+  const parts = ip.split(":");
+  let res = [];
+  const emptyIndex = parts.indexOf("");
+  if (emptyIndex !== -1) {
+    const head = parts.slice(0, emptyIndex).filter((p) => p !== "").map((p) => parseInt(p, 16) || 0);
+    const tail = parts.slice(emptyIndex + 1).filter((p) => p !== "").map((p) => parseInt(p, 16) || 0);
+    const middle = new Array(8 - head.length - tail.length).fill(0);
+    res = [...head, ...middle, ...tail];
+  } else {
+    res = parts.map((p) => parseInt(p, 16) || 0);
+  }
+  return res.slice(0, 8);
+}
+async function performResolve(domain, dnsServer) {
+  let isDoH = false;
+  try {
+    const u = new URL(dnsServer);
+    if (u.protocol === "http:" || u.protocol === "https:") {
+      isDoH = true;
+    }
+  } catch (e) {
+  }
+  if (isDoH) {
+    try {
+      const url = new URL(dnsServer);
+      url.searchParams.set("name", domain);
+      url.searchParams.set("type", "AAAA");
+      const response = await fetch(url.toString(), {
+        method: "GET",
+        headers: { "Accept": "application/dns-json" }
+      });
+      if (!response.ok) return null;
+      let data;
+      try {
+        data = await response.json();
+      } catch (e) {
+        return null;
+      }
+      if (data && data.Status === 0 && Array.isArray(data.Answer)) {
+        for (const rec of data.Answer) {
+          if (rec.type === 28 && rec.data) {
+            return rec.data;
+          }
+        }
+      }
+    } catch (e) {
+      void(0);
+    }
+    return null;
+  }
+  let prefix = dnsServer.split("/")[0].trim();
+  if (!prefix.includes(":")) return null;
+  let ipv4 = domain;
+  const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
+  if (!ipv4Regex.test(domain)) {
+    try {
+      const dohUrl = "https://cloudflare-dns.com/dns-query";
+      const url = new URL(dohUrl);
+      url.searchParams.set("name", domain);
+      url.searchParams.set("type", "A");
+      const res = await fetch(url, { headers: { "Accept": "application/dns-json" } });
+      const data = await res.json();
+      if (data && data.Status === 0 && Array.isArray(data.Answer)) {
+        const rec = data.Answer.find((r) => r.type === 1);
+        if (rec && rec.data) {
+          ipv4 = rec.data;
+        } else {
+          return null;
+        }
+      } else {
+        return null;
+      }
+    } catch (e) {
+      return null;
+    }
+  }
+  const parts = ipv4.split(".").map(Number);
+  if (parts.length === 4) {
+    if (!prefix.endsWith(":")) prefix += ":";
+    const part1 = (parts[0] << 8 | parts[1]).toString(16).padStart(4, "0");
+    const part2 = (parts[2] << 8 | parts[3]).toString(16).padStart(4, "0");
+    const synthesizedIP = `${prefix}${part1}:${part2}`;
+    return synthesizedIP;
+  }
+  return null;
+}
+async function resolveToIPv6(domain, dnsServer) {
+  if (!dnsServer) return null;
+  if (dnsCache.size > 1e3) {
+    dnsCache.clear();
+  }
+  const cacheKey = `${domain}|${dnsServer}`;
+  const cacheUrl = new URL(`http://dns-cache.local/${encodeURIComponent(cacheKey)}`);
+  const cache = caches.default;
+  const cached = dnsCache.get(cacheKey);
+  if (cached && Date.now() < cached.expires) {
+    return cached.ip;
+  }
+  try {
+    const response = await cache.match(cacheUrl);
+    if (response) {
+      const ip = await response.text();
+      dnsCache.set(cacheKey, { ip, expires: Date.now() + 6e4 });
+      return ip;
+    }
+  } catch (e) {
+    void(0);
+  }
+  if (inflightRequests.has(cacheKey)) {
+    return await inflightRequests.get(cacheKey);
+  }
+  const promise = performResolve(domain, dnsServer).finally(() => {
+    inflightRequests.delete(cacheKey);
+  });
+  inflightRequests.set(cacheKey, promise);
+  try {
+    const ip = await promise;
+    if (ip) {
+      dnsCache.set(cacheKey, { ip, expires: Date.now() + 6e4 });
+      const cacheResponse = new Response(ip, {
+        headers: {
+          "Cache-Control": "max-age=60",
+          "Content-Type": "text/plain"
+        }
+      });
+      if (typeof event !== "undefined" && event.waitUntil) {
+        event.waitUntil(cache.put(cacheUrl, cacheResponse));
+      } else {
+        await cache.put(cacheUrl, cacheResponse);
+      }
+    }
+    return ip;
+  } catch (e) {
+    void(0);
+    return null;
+  }
+}
+
+var CACHE_TTL = 10 * 60 * 1e3;
+var MAX_CACHE_SIZE3 = 500;
+var DirectFailureCache = class {
+  constructor() {
+    this.cache =   new Map();
+  }
+  add(host) {
+    if (!host) return;
+    if (this.has(host)) return;
+    if (this.cache.size >= MAX_CACHE_SIZE3) this.cache.delete(this.cache.keys().next().value);
+    this.cache.set(host, Date.now() + CACHE_TTL);
+  }
+  has(host) {
+    if (!host) return false;
+    const expireTime = this.cache.get(host);
+    if (!expireTime) return false;
+    if (Date.now() > expireTime) {
+      this.cache.delete(host);
+      return false;
+    }
+    return true;
+  }
+};
+var failureCache = new DirectFailureCache();
+function addToFailureCache(host) {
+  if (host) failureCache.add(host);
+}
+function getSingleProxyIP(proxyIP) {
+  if (!proxyIP) return null;
+  if (Array.isArray(proxyIP)) {
+    if (proxyIP.length === 0) return null;
+    return proxyIP[Math.floor(Math.random() * proxyIP.length)];
+  }
+  return proxyIP;
+}
+function parseProxyIP(proxyAddr, defaultPort) {
+  if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP.split(",")[0].trim(), port: defaultPort };
+  let host = proxyAddr;
+  let port = defaultPort;
+  if (host.startsWith("[")) {
+    const bracketEnd = host.indexOf("]");
+    if (bracketEnd > 0) {
+      const ipPart = host.substring(1, bracketEnd);
+      const portPart = host.substring(bracketEnd + 1);
+      if (portPart.startsWith(":")) {
+        const p = parseInt(portPart.substring(1), 10);
+        if (!isNaN(p)) port = p;
+      }
+      return { host: ipPart, port };
+    }
+  }
+  const colonCount = (host.match(/:/g) || []).length;
+  if (colonCount > 1) return { host, port };
+  const lastColon = host.lastIndexOf(":");
+  if (lastColon > 0) {
+    const portStr = host.substring(lastColon + 1);
+    if (/^\d+$/.test(portStr)) {
+      port = parseInt(portStr, 10);
+      host = host.substring(0, lastColon);
+    }
+  }
+  return { host, port };
+}
+function shouldUseSocks5(addressRemote, go2socks5) {
+  if (!go2socks5 || go2socks5.length === 0) return false;
+  if (go2socks5.includes("all in") || go2socks5.includes("*")) return true;
+  return go2socks5.some((pattern) => {
+    let regexPattern = pattern.replace(/\*/g, ".*");
+    let regex = new RegExp(`^${regexPattern}$`, "i");
+    return regex.test(addressRemote);
+  });
+}
+function parseSocks5Config(address) {
+  if (!address) return null;
+  if (typeof address === "object") return address;
+  const cleanAddr = address.includes("://") ? address.split("://")[1] : address;
+  const lastAtIndex = cleanAddr.lastIndexOf("@");
+  let [latter, former] = lastAtIndex === -1 ? [cleanAddr, void 0] : [cleanAddr.substring(lastAtIndex + 1), cleanAddr.substring(0, lastAtIndex)];
+  let username, password, hostname, port;
+  if (former) {
+    const formers = former.split(":");
+    if (formers.length !== 2) throw new Error("Invalid SOCKS auth format");
+    [username, password] = formers;
+  }
+  const lastColonIndex = latter.lastIndexOf(":");
+  if (lastColonIndex === -1) throw new Error("Invalid SOCKS address format, missing port");
+  hostname = latter.substring(0, lastColonIndex);
+  port = Number(latter.substring(lastColonIndex + 1));
+  if (hostname.startsWith("[") && hostname.endsWith("]")) hostname = hostname.slice(1, -1);
+  return { username, password, hostname, port };
+}
+async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote, log, isUDP = false) {
+  const config = parseSocks5Config(socks5Addr);
+  if (!config) throw new Error("Socks5 config missing");
+  const { username, password, hostname, port } = config;
+  const socket = connect({ hostname, port });
+  await socket.opened;
+  const writer = socket.writable.getWriter();
+  const reader = socket.readable.getReader();
+  const encoder = new TextEncoder();
+  await writer.write(new Uint8Array([5, 1, 2]));
+  let { value: res } = await reader.read();
+  if (!res || res.length < 2 || res[0] !== 5 || res[1] === 255) throw new Error("SOCKS5 greeting failed");
+  if (res[1] === 2) {
+    if (!username || !password) throw new Error("SOCKS5 auth required");
+    const uBytes = encoder.encode(username);
+    const pBytes = encoder.encode(password);
+    const authReq = new Uint8Array([1, uBytes.length, ...uBytes, pBytes.length, ...pBytes]);
+    await writer.write(authReq);
+    const { value: authRes } = await reader.read();
+    if (!authRes || authRes.length < 2 || authRes[0] !== 1 || authRes[1] !== 0) throw new Error("SOCKS5 auth failed");
+  }
+  let DSTADDR;
+  if (isUDP) {
+    DSTADDR = new Uint8Array([1, 0, 0, 0, 0]);
+  } else {
+    switch (addressType) {
+      case CONSTANTS.ADDRESS_TYPE_IPV4:
+        DSTADDR = new Uint8Array([1, ...addressRemote.split(".").map(Number)]);
+        break;
+      case CONSTANTS.ADDRESS_TYPE_IPV6:
+      case CONSTANTS.ATYP_TROJAN_IPV6:
+        const v6Parts = parseIPv6(addressRemote.replace(/[\[\]]/g, ""));
+        if (!v6Parts) throw new Error("Invalid IPv6 address");
+        const v6Bytes = new Uint8Array(16);
+        for (let i = 0; i < 8; i++) {
+          v6Bytes[i * 2] = v6Parts[i] >> 8 & 255;
+          v6Bytes[i * 2 + 1] = v6Parts[i] & 255;
+        }
+        DSTADDR = new Uint8Array([4, ...v6Bytes]);
+        break;
+      default:
+        const domainBytes = encoder.encode(addressRemote);
+        DSTADDR = new Uint8Array([3, domainBytes.length, ...domainBytes]);
+    }
+  }
+  const cmd = isUDP ? 3 : 1;
+  const portBytes = isUDP ? [0, 0] : [portRemote >> 8, portRemote & 255];
+  const socksRequest = new Uint8Array([5, cmd, 0, ...DSTADDR, ...portBytes]);
+  await writer.write(socksRequest);
+  const { value: connRes } = await reader.read();
+  if (!connRes || connRes.length < 2 || connRes[0] !== 5 || connRes[1] !== 0) {
+    throw new Error(`SOCKS5 connection failed (CMD: ${cmd}, REP: ${connRes ? connRes[1] : "empty"})`);
+  }
+  if (isUDP) {
+    let bndAddr = "";
+    let bndPort = 0;
+    let addrType = connRes[3];
+    let offset = 4;
+    if (addrType === 1) {
+      bndAddr = connRes.slice(offset, offset + 4).join(".");
+      offset += 4;
+    } else if (addrType === 3) {
+      const len = connRes[offset];
+      offset++;
+      bndAddr = new TextDecoder().decode(connRes.slice(offset, offset + len));
+      offset += len;
+    } else if (addrType === 4) {
+      const hex = [];
+      for (let i = 0; i < 16; i++) hex.push(connRes[offset + i].toString(16).padStart(2, "0"));
+      bndAddr = `[${hex.join("").match(/.{1,4}/g).join(":")}]`;
+      offset += 16;
+    }
+    const p1 = connRes[offset];
+    const p2 = connRes[offset + 1];
+    bndPort = p1 << 8 | p2;
+    writer.releaseLock();
+    reader.releaseLock();
+    socket.isUdpControl = true;
+    socket.bndAddr = bndAddr;
+    socket.bndPort = bndPort;
+    socket.originalHost = hostname;
+    return socket;
+  }
+  let headLen = 0;
+  if (connRes.length >= 4) {
+    if (connRes[3] === 1) headLen = 10;
+    else if (connRes[3] === 4) headLen = 22;
+    else if (connRes[3] === 3) headLen = 7 + connRes[4];
+  }
+  if (headLen > 0 && connRes.length > headLen) {
+    socket.initialData = connRes.subarray(headLen);
+  }
+  writer.releaseLock();
+  reader.releaseLock();
+  return socket;
+}
+async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null, isUDP = false) {
+  let isTimedOut = false;
+  let socket = null;
+  const timeoutPromise = new Promise((_, reject) => setTimeout(() => {
+    isTimedOut = true;
+    reject(new Error(`Connect timeout (${timeoutMs}ms)`));
+  }, timeoutMs));
+  const doConnect = async () => {
+    if (socksConfig) {
+      return await socks5Connect(socksConfig, addressType, addressRemote, port, log, isUDP);
+    } else {
+      return connect({ hostname: host, port });
+    }
+  };
+  try {
+    socket = await Promise.race([doConnect(), timeoutPromise]);
+    if (isTimedOut) {
+      if (socket) {
+        try {
+          socket.close();
+        } catch (e) {
+        }
+      }
+      throw new Error(`Connect timeout (${timeoutMs}ms)`);
+    }
+    if (!socket) throw new Error("Connection failed");
+    if (!socksConfig) await Promise.race([socket.opened, timeoutPromise]);
+    return socket;
+  } catch (err) {
+    if (socket) {
+      try {
+        socket.close();
+      } catch (e) {
+      }
+    }
+    throw err;
+  }
+}
+async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
+  const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
+  const DIRECT_TIMEOUTS = [1500, 4e3];
+  const PROXY_TIMEOUT = 5e3;
+  if (!failureCache.has(addressRemote)) {
+    const currentTimeout = DIRECT_TIMEOUTS[0];
+    try {
+      const protoLabel = isUDP ? "UDP" : "TCP";
+      log(`[connect:${protoLabel}] Phase 1: Direct ${addressRemote}:${portRemote} (Timeout: ${currentTimeout}ms)`);
+      return await connectWithTimeout(addressRemote, portRemote, currentTimeout, log, useSocks ? ctx.socks5 : null, addressType, addressRemote, isUDP);
+    } catch (err1) {
+      log(`[connect] Phase 1 failed: ${err1.message}`);
+      if (err1.message.includes("refused") || err1.message.includes("reset") || err1.message.includes("abort")) {
+        addToFailureCache(addressRemote);
+      }
+    }
+  }
+  let proxyIP = getSingleProxyIP(fallbackAddress || ctx.proxyIP);
+  if (!proxyIP) {
+    const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+    if (defParams.length > 0) proxyIP = defParams[0];
+  }
+  if (proxyIP) {
+    const { host: proxyHost, port: proxyPort } = parseProxyIP(proxyIP, portRemote);
+    try {
+      return await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, PROXY_TIMEOUT, log);
+    } catch (err2) {
+      log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
+    }
+  }
+  if (!useSocks && ctx.dns64) {
+    try {
+      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+      if (v6Address) {
+        return await connectWithTimeout(v6Address, portRemote, PROXY_TIMEOUT, log);
+      }
+    } catch (err3) {
+      log(`[connect] Phase 3 (NAT64) failed: ${err3.message}`);
+    }
+  }
+  throw new Error(`All connection attempts failed.`);
+}
+function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
+  const rsvFrag = [0, 0, 0];
+  let addrBytes;
+  let atyp = addressType;
+  if (addressType === CONSTANTS.ADDRESS_TYPE_IPV4) {
+    addrBytes = addressRemote.split(".").map(Number);
+  } else if (addressType === CONSTANTS.ADDRESS_TYPE_IPV6 || addressType === CONSTANTS.ATYP_TROJAN_IPV6) {
+    atyp = 4;
+    const v6Parts = parseIPv6(addressRemote.replace(/[\[\]]/g, ""));
+    addrBytes = [];
+    for (let i = 0; i < 8; i++) {
+      addrBytes.push(v6Parts[i] >> 8 & 255);
+      addrBytes.push(v6Parts[i] & 255);
+    }
+  } else {
+    atyp = 3;
+    const encoder = new TextEncoder();
+    const domain = encoder.encode(addressRemote);
+    addrBytes = [domain.length, ...domain];
+  }
+  const portBytes = [portRemote >> 8, portRemote & 255];
+  return new Uint8Array([...rsvFrag, atyp, ...addrBytes, ...portBytes]);
+}
+function stripSocks5UdpHeader(buffer) {
+  if (buffer.length < 4) return null;
+  let offset = 4;
+  const atyp = buffer[3];
+  if (atyp === 1) offset += 4;
+  else if (atyp === 3) offset += 1 + buffer[4];
+  else if (atyp === 4) offset += 16;
+  offset += 2;
+  if (offset > buffer.length) return null;
+  return buffer.slice(offset);
+}
+async function safeWrite(writer, chunk) {
+  const WRITE_TIMEOUT = 1e4;
+  const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Write timeout")), WRITE_TIMEOUT));
+  await Promise.race([writer.write(chunk), timeoutPromise]);
+}
+async function flushBuffer(writer, buffer, log) {
+  if (!buffer || buffer.length === 0) return;
+  const MAX_FLUSH_LOOPS = 20;
+  let loops = 0;
+  while (buffer.length > 0) {
+    if (loops >= MAX_FLUSH_LOOPS) break;
+    const batch = [...buffer];
+    buffer.length = 0;
+    for (const chunk of batch) {
+      try {
+        await safeWrite(writer, chunk);
+      } catch (e) {
+        throw e;
+      }
+    }
+    loops++;
+  }
+}
+async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallback, log) {
+  let hasIncomingData = false;
+  let responseHeader = vlessHeader;
+  const safeSend = (data) => {
+    try {
+      if (webSocket.readyState === 1) {
+        webSocket.send(data);
+        return true;
+      }
+    } catch (error) {
+    }
+    return false;
+  };
+  if (remoteSocket.initialData && remoteSocket.initialData.byteLength > 0) {
+    hasIncomingData = true;
+    if (responseHeader) {
+      const combined = new Uint8Array(responseHeader.length + remoteSocket.initialData.length);
+      combined.set(responseHeader);
+      combined.set(remoteSocket.initialData, responseHeader.length);
+      if (!safeSend(combined)) return;
+      responseHeader = null;
+    } else {
+      if (!safeSend(remoteSocket.initialData)) return;
+    }
+    remoteSocket.initialData = null;
+  }
+  await remoteSocket.readable.pipeTo(
+    new WritableStream({
+      async write(chunk, controller) {
+        hasIncomingData = true;
+        if (webSocket.readyState !== 1) {
+          controller.error(new Error("WS Closed"));
+          return;
+        }
+        const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)]) : chunk;
+        responseHeader = null;
+        if (!safeSend(dataToSend)) controller.error(new Error("WS send failed"));
+      },
+      close() {
+        log(`Remote socket closed.`);
+      },
+      abort(reason) {
+        void(0);
+      }
+    })
+  ).catch((error) => {
+    safeCloseWebSocket(webSocket);
+  });
+  if (!hasIncomingData && retryCallback) {
+    try {
+      await retryCallback();
+    } catch (e) {
+      safeCloseWebSocket(webSocket);
+    }
+  }
+}
+async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, finalizeConnectionCallback) {
+  const { bndAddr, bndPort, originalHost } = controlSocket;
+  let targetHost = bndAddr;
+  const isZeroIP = bndAddr === "0.0.0.0" || bndAddr === "::" || bndAddr.startsWith("0:0:0:0") || bndAddr === "[::]";
+  if (isZeroIP && originalHost) {
+    targetHost = originalHost;
+    log(`[SOCKS5] BND.ADDR is ${bndAddr}, falling back to proxy host: ${targetHost}`);
+  }
+  log(`[SOCKS5] UDP Associate ready. Relay: ${targetHost}:${bndPort}`);
+  const udpSocket = connect({ hostname: targetHost, port: bndPort });
+  finalizeConnectionCallback(udpSocket);
+  const udpWriter = udpSocket.writable.getWriter();
+  const header = createSocks5UdpHeader(addressType, addressRemote, portRemote);
+  if (rawClientData && rawClientData.byteLength > 0) {
+    const packet = new Uint8Array(header.length + rawClientData.byteLength);
+    packet.set(header);
+    packet.set(new Uint8Array(rawClientData), header.length);
+    await safeWrite(udpWriter, packet);
+  }
+  udpWriter.releaseLock();
+  let responseHeader = vlessResponseHeader;
+  await udpSocket.readable.pipeTo(new WritableStream({
+    async write(chunk, controller) {
+      if (webSocket.readyState !== 1) {
+        controller.error(new Error("WS Closed"));
+        return;
+      }
+      const buffer = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      const payload = stripSocks5UdpHeader(buffer);
+      if (!payload) {
+        return;
+      }
+      const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
+      responseHeader = null;
+      webSocket.send(dataToSend);
+    },
+    close() {
+      log("UDP Relay closed");
+      controlSocket.close();
+    },
+    abort(e) {
+      controlSocket.close();
+    }
+  })).catch(() => {
+    controlSocket.close();
+    safeCloseWebSocket(webSocket);
+  });
+}
+async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
+  if (isHostBanned(addressRemote, ctx.banHosts)) {
+    safeCloseWebSocket(webSocket);
+    return;
+  }
+  const prepareRetry = () => {
+    remoteSocketWrapper.value = null;
+    remoteSocketWrapper.isConnecting = true;
+  };
+  const finalizeConnection = (socket) => {
+    remoteSocketWrapper.value = socket;
+    remoteSocketWrapper.isConnecting = false;
+  };
+  const nat64Retry = async () => {
+    if (!ctx.dns64) {
+      safeCloseWebSocket(webSocket);
+      return;
+    }
+    prepareRetry();
+    try {
+      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+      if (!v6Address) throw new Error("DNS64 failed");
+      const natSocket = await connectWithTimeout(v6Address, portRemote, 5e3, log);
+      const writer = natSocket.writable.getWriter();
+      if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
+      await flushBuffer(writer, remoteSocketWrapper.buffer, log);
+      writer.releaseLock();
+      finalizeConnection(natSocket);
+      remoteSocketToWS(natSocket, webSocket, vlessResponseHeader, null, log);
+    } catch (e) {
+      safeCloseWebSocket(webSocket);
+    }
+  };
+  const proxyIPRetry = async () => {
+    prepareRetry();
+    let ip = getSingleProxyIP(ctx.proxyIP);
+    if (!ip) {
+      const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+      if (defParams.length > 0) ip = defParams[0];
+    }
+    if (ip) {
+      try {
+        const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
+        const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5e3, log);
+        const writer = proxySocket.writable.getWriter();
+        if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
+        await flushBuffer(writer, remoteSocketWrapper.buffer, log);
+        writer.releaseLock();
+        finalizeConnection(proxySocket);
+        const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
+        const nextRetry = !useSocks && ctx.dns64 ? nat64Retry : null;
+        remoteSocketToWS(proxySocket, webSocket, vlessResponseHeader, nextRetry, log);
+        return;
+      } catch (e) {
+      }
+    }
+    if (ctx.dns64 && !(ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5))) await nat64Retry();
+    else safeCloseWebSocket(webSocket);
+  };
+  try {
+    const socket = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, null, false);
+    const writer = socket.writable.getWriter();
+    if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
+    await flushBuffer(writer, remoteSocketWrapper.buffer, log);
+    writer.releaseLock();
+    finalizeConnection(socket);
+    remoteSocketToWS(socket, webSocket, vlessResponseHeader, proxyIPRetry, log);
+  } catch (error) {
+    log("[Outbound] TCP Initial failed: " + error.message);
+    safeCloseWebSocket(webSocket);
+  }
+}
+async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
+  if (isHostBanned(addressRemote, ctx.banHosts)) {
+    safeCloseWebSocket(webSocket);
+    return;
+  }
+  const prepareRetry = () => {
+    remoteSocketWrapper.value = null;
+    remoteSocketWrapper.isConnecting = true;
+  };
+  const finalizeConnection = (socket) => {
+    remoteSocketWrapper.value = socket;
+    remoteSocketWrapper.isConnecting = false;
+  };
+  const nat64Retry = async () => {
+    if (!ctx.dns64) {
+      safeCloseWebSocket(webSocket);
+      return;
+    }
+    prepareRetry();
+    try {
+      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+      if (!v6Address) throw new Error("DNS64 failed");
+      const natSocket = await connectWithTimeout(v6Address, portRemote, 5e3, log);
+      const writer = natSocket.writable.getWriter();
+      if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
+      await flushBuffer(writer, remoteSocketWrapper.buffer, log);
+      writer.releaseLock();
+      finalizeConnection(natSocket);
+      remoteSocketToWS(natSocket, webSocket, vlessResponseHeader, null, log);
+    } catch (e) {
+      safeCloseWebSocket(webSocket);
+    }
+  };
+  const proxyIPRetry = async () => {
+    prepareRetry();
+    let ip = getSingleProxyIP(ctx.proxyIP);
+    if (!ip) {
+      const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+      if (defParams.length > 0) ip = defParams[0];
+    }
+    if (ip) {
+      const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
+      try {
+        const socksConfig = { hostname: proxyHost, port: proxyPort, username: "", password: "" };
+        const connectionObj = await socks5Connect(socksConfig, addressType, addressRemote, portRemote, log, true);
+        if (connectionObj.isUdpControl) {
+          await handleSocks5UDPFlow(connectionObj, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, finalizeConnection);
+          return;
+        }
+      } catch (socksErr) {
+      }
+      try {
+        const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5e3, log);
+        const writer = proxySocket.writable.getWriter();
+        if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
+        await flushBuffer(writer, remoteSocketWrapper.buffer, log);
+        writer.releaseLock();
+        finalizeConnection(proxySocket);
+        remoteSocketToWS(proxySocket, webSocket, vlessResponseHeader, null, log);
+        return;
+      } catch (e) {
+      }
+    }
+    if (ctx.dns64) await nat64Retry();
+    else safeCloseWebSocket(webSocket);
+  };
+  try {
+    const connectionObj = await createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, null, true);
+    if (connectionObj.isUdpControl) {
+      await handleSocks5UDPFlow(connectionObj, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, finalizeConnection);
+    } else {
+      const socket = connectionObj;
+      const writer = socket.writable.getWriter();
+      if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
+      await flushBuffer(writer, remoteSocketWrapper.buffer, log);
+      writer.releaseLock();
+      finalizeConnection(socket);
+      remoteSocketToWS(socket, webSocket, vlessResponseHeader, proxyIPRetry, log);
+    }
+  } catch (error) {
+    log("[Outbound:UDP] Initial failed: " + error.message);
+    await proxyIPRetry();
+  }
+}
+
+var protocolManager = new ProtocolManager().register("vless", processVlessHeader).register("trojan", parseTrojanHeader).register("mandala", parseMandalaHeader).register("socks5", parseSocks5Header).register("ss", parseShadowsocksHeader);
+function concatUint8(a, b) {
+  const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
+  const res = new Uint8Array(a.length + bArr.length);
+  res.set(a);
+  res.set(bArr, a.length);
+  return res;
+}
+async function handleWebSocketRequest(request, ctx) {
+  const webSocketPair = new WebSocketPair();
+  const [client, webSocket] = Object.values(webSocketPair);
+  webSocket.accept();
+  let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [] };
+  let isConnected = false;
+  let socks5State = 0;
+  let headerBuffer = new Uint8Array(0);
+  let activeWriter = null;
+  let activeSocket = null;
+  const MAX_HEADER_BUFFER = 4096;
+  const DETECT_TIMEOUT_MS = 1e4;
+  const log = (info, event2) => void(0);
+  const timeoutTimer = setTimeout(() => {
+    if (!isConnected) {
+      log("Timeout: Protocol detection took too long");
+      safeCloseWebSocket(webSocket);
+    }
+  }, DETECT_TIMEOUT_MS);
+  const earlyDataHeader = request.headers.get("sec-websocket-protocol") || "";
+  const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
+  const streamPromise = readableWebSocketStream.pipeTo(new WritableStream({
+    async write(chunk, controller) {
+      const chunkArr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+      if (isConnected) {
+        if (activeSocket !== remoteSocketWrapper.value) {
+          if (activeWriter) {
+            try {
+              await activeWriter.ready;
+              activeWriter.releaseLock();
+            } catch (e) {
+            }
+            activeWriter = null;
+          }
+          activeSocket = remoteSocketWrapper.value;
+          if (activeSocket) {
+            try {
+              activeWriter = activeSocket.writable.getWriter();
+            } catch (e) {
+              log("Failed to get writer for new socket", e);
+              safeCloseWebSocket(webSocket);
+              return;
+            }
+          }
+        }
+        if (activeWriter) {
+          await activeWriter.write(chunkArr);
+        } else if (remoteSocketWrapper.isConnecting) {
+          remoteSocketWrapper.buffer.push(chunkArr);
+        }
+        return;
+      }
+      headerBuffer = concatUint8(headerBuffer, chunkArr);
+      if (headerBuffer.length > MAX_HEADER_BUFFER) {
+        clearTimeout(timeoutTimer);
+        throw new Error(`Header buffer limit exceeded (${headerBuffer.length} > ${MAX_HEADER_BUFFER})`);
+      }
+      if (socks5State < 2) {
+        const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
+        if (error) {
+          clearTimeout(timeoutTimer);
+          throw new Error(error);
+        }
+        if (consumed > 0) {
+          headerBuffer = headerBuffer.slice(consumed);
+          socks5State = newState;
+          if (socks5State !== 2) return;
+        }
+      }
+      if (headerBuffer.length === 0) return;
+      try {
+        const result = await protocolManager.detect(headerBuffer, ctx);
+        if (socks5State === 2 && result.protocol !== "socks5") {
+          throw new Error("Protocol mismatch after Socks5 handshake");
+        }
+        const pName = result.protocol;
+        const isSocksDisabled = pName === "socks5" && ctx.disabledProtocols.includes("socks");
+        if (ctx.disabledProtocols.includes(pName) || isSocksDisabled) {
+          throw new Error(`Protocol ${pName.toUpperCase()} is disabled by admin`);
+        }
+        const { protocol, addressRemote, portRemote, addressType, rawDataIndex, isUDP } = result;
+        log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote} (UDP: ${isUDP})`);
+        if (isHostBanned(addressRemote, ctx.banHosts)) {
+          throw new Error(`Blocked: ${addressRemote}`);
+        }
+        isConnected = true;
+        clearTimeout(timeoutTimer);
+        remoteSocketWrapper.isConnecting = true;
+        let clientData = headerBuffer;
+        let responseHeader = null;
+        if (protocol === "vless") {
+          clientData = headerBuffer.subarray(rawDataIndex);
+          responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
+        } else if (protocol === "trojan" || protocol === "ss" || protocol === "mandala") {
+          clientData = result.rawClientData;
+        } else if (protocol === "socks5") {
+          clientData = result.rawClientData;
+          webSocket.send(new Uint8Array([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+          socks5State = 3;
+        }
+        headerBuffer = null;
+        if (isUDP) {
+          handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
+        } else {
+          handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
+        }
+      } catch (e) {
+        if (headerBuffer && headerBuffer.length < 512 && headerBuffer.length < MAX_HEADER_BUFFER) {
+          return;
+        }
+        clearTimeout(timeoutTimer);
+        log(`Detection failed: ${e.message}`);
+        safeCloseWebSocket(webSocket);
+      }
+    },
+    close() {
+      if (activeWriter) {
+        try {
+          activeWriter.releaseLock();
+        } catch (e) {
+        }
+      }
+      if (remoteSocketWrapper.value) {
+        try {
+          remoteSocketWrapper.value.close();
+        } catch (e) {
+        }
+      }
+      log("Client WebSocket closed");
+    },
+    abort(reason) {
+      if (activeWriter) {
+        try {
+          activeWriter.releaseLock();
+        } catch (e) {
+        }
+      }
+      if (remoteSocketWrapper.value) {
+        try {
+          remoteSocketWrapper.value.close();
+        } catch (e) {
+        }
+      }
+      log("WebSocket aborted", reason);
+      safeCloseWebSocket(webSocket);
+    }
+  })).catch((err) => {
+    clearTimeout(timeoutTimer);
+    if (activeWriter) {
+      try {
+        activeWriter.releaseLock();
+      } catch (e) {
+      }
+    }
+    if (remoteSocketWrapper.value) {
+      try {
+        remoteSocketWrapper.value.close();
+      } catch (e) {
+      }
+    }
+    log("Stream processing failed", err.toString());
+    safeCloseWebSocket(webSocket);
+  });
+  if (ctx.waitUntil) ctx.waitUntil(streamPromise);
+  return new Response(null, { status: 101, webSocket: client });
+}
+function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
+  const res = { consumed: 0, newState: currentState, error: null };
+  if (buffer.length === 0) return res;
+  if (currentState === 0) {
+    if (buffer[0] !== 5) return res;
+    if (buffer.length < 2) return res;
+    const nMethods = buffer[1];
+    if (buffer.length < 2 + nMethods) return res;
+    const methods = buffer.subarray(2, 2 + nMethods);
+    let hasAuth = false;
+    for (let m of methods) {
+      if (m === 2) hasAuth = true;
+    }
+    if (hasAuth) {
+      webSocket.send(new Uint8Array([5, 2]));
+      res.newState = 1;
+    } else {
+      webSocket.send(new Uint8Array([5, 255]));
+      res.error = "Socks5: No supported auth method";
+      return res;
+    }
+    res.consumed = 2 + nMethods;
+    return res;
+  }
+  if (currentState === 1) {
+    if (buffer.length < 3) return res;
+    if (buffer[0] !== 1) {
+      res.error = "Socks5 Auth: Wrong version";
+      return res;
+    }
+    let offset = 1;
+    const uLen = buffer[offset++];
+    if (buffer.length < offset + uLen + 1) return res;
+    const user = new TextDecoder().decode(buffer.subarray(offset, offset + uLen));
+    offset += uLen;
+    const pLen = buffer[offset++];
+    if (buffer.length < offset + pLen) return res;
+    const pass = new TextDecoder().decode(buffer.subarray(offset, offset + pLen));
+    offset += pLen;
+    const isValid = (user === ctx.userID || user === ctx.dynamicUUID) && (pass === ctx.dynamicUUID || pass === ctx.userID);
+    if (isValid) {
+      webSocket.send(new Uint8Array([1, 0]));
+      res.newState = 2;
+      res.consumed = offset;
+    } else {
+      webSocket.send(new Uint8Array([1, 1]));
+      res.error = `Socks5 Auth Failed: ${user}`;
+    }
+    return res;
+  }
+  return res;
+}
+function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
+  let readableStreamCancel = false;
+  return new ReadableStream({
+    start(controller) {
+      webSocketServer.addEventListener("message", (event2) => {
+        if (readableStreamCancel) return;
+        const data = typeof event2.data === "string" ? new TextEncoder().encode(event2.data) : event2.data;
+        controller.enqueue(data);
+      });
+      webSocketServer.addEventListener("close", () => {
+        safeCloseWebSocket(webSocketServer);
+        if (!readableStreamCancel) controller.close();
+      });
+      webSocketServer.addEventListener("error", (err) => {
+        log("WebSocket server error");
+        controller.error(err);
+      });
+      const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
+      if (error) controller.error(error);
+      else if (earlyData) controller.enqueue(earlyData);
+    },
+    cancel() {
+      readableStreamCancel = true;
+      safeCloseWebSocket(webSocketServer);
+    }
+  });
+}
+
+var XHTTP_BUFFER_SIZE = 128 * 1024;
+function concat_typed_arrays(first, ...args) {
+  let len = first.length;
+  for (let a of args) len += a.length;
+  const r = new first.constructor(len);
+  r.set(first, 0);
+  len = first.length;
+  for (let a of args) {
+    r.set(a, len);
+    len += a.length;
+  }
+  return r;
+}
+async function read_at_least(reader, minBytes, initialBuffer) {
+  let currentBuffer = initialBuffer || new Uint8Array(0);
+  while (currentBuffer.length < minBytes) {
+    const needed = minBytes - currentBuffer.length;
+    const bufferSize = Math.max(needed, 4096);
+    const { value, done } = await reader.read(new Uint8Array(bufferSize));
+    if (done) return { value: currentBuffer, done: true };
+    if (value) {
+      currentBuffer = concat_typed_arrays(currentBuffer, value);
+    }
+  }
+  return { value: currentBuffer, done: false };
+}
+async function read_xhttp_header(readable, ctx) {
+  const reader = readable.getReader();
+  try {
+    let { value: cache, done } = await read_at_least(reader, 18);
+    if (cache.length < 18) return "header too short";
+    const version = cache[0];
+    const uuidStr = stringifyUUID(cache.subarray(1, 17));
+    const expectedID = ctx.userID;
+    const expectedIDLow = ctx.userIDLow;
+    if (uuidStr !== expectedID && (!expectedIDLow || uuidStr !== expectedIDLow)) {
+      return "invalid UUID";
+    }
+    const pb_len = cache[17];
+    const min_len_until_atyp = 22 + pb_len;
+    if (cache.length < min_len_until_atyp) {
+      const r = await read_at_least(reader, min_len_until_atyp, cache);
+      cache = r.value;
+      if (cache.length < min_len_until_atyp) return "header too short for metadata";
+    }
+    const cmdIndex = 18 + pb_len;
+    const cmd = cache[cmdIndex];
+    if (cmd !== 1) return "unsupported command: " + cmd;
+    const portIndex = cmdIndex + 1;
+    const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
+    const port = view.getUint16(portIndex, false);
+    const atype = cache[portIndex + 2];
+    const addr_body_idx = portIndex + 3;
+    let header_len = -1;
+    if (atype === CONSTANTS.ADDRESS_TYPE_IPV4) {
+      header_len = addr_body_idx + 4;
+    } else if (atype === CONSTANTS.ADDRESS_TYPE_IPV6) {
+      header_len = addr_body_idx + 16;
+    } else if (atype === CONSTANTS.ADDRESS_TYPE_URL) {
+      if (cache.length < addr_body_idx + 1) {
+        const r = await read_at_least(reader, addr_body_idx + 1, cache);
+        cache = r.value;
+        if (cache.length < addr_body_idx + 1) return "header too short for domain len";
+      }
+      const domain_len = cache[addr_body_idx];
+      header_len = addr_body_idx + 1 + domain_len;
+    } else {
+      return "read address type failed: " + atype;
+    }
+    if (cache.length < header_len) {
+      const r = await read_at_least(reader, header_len, cache);
+      cache = r.value;
+      if (cache.length < header_len) return "header too short for full address";
+    }
+    let hostname = "";
+    const addr_val_idx = addr_body_idx;
+    try {
+      switch (atype) {
+        case CONSTANTS.ADDRESS_TYPE_IPV4:
+          hostname = cache.subarray(addr_val_idx, addr_val_idx + 4).join(".");
+          break;
+        case CONSTANTS.ADDRESS_TYPE_URL:
+          const domain_len = cache[addr_val_idx];
+          hostname = textDecoder.decode(
+            cache.subarray(addr_val_idx + 1, addr_val_idx + 1 + domain_len)
+          );
+          break;
+        case CONSTANTS.ADDRESS_TYPE_IPV6:
+          const ipv6 = [];
+          for (let i = 0; i < 8; i++) {
+            ipv6.push(view.getUint16(addr_val_idx + i * 2, false).toString(16));
+          }
+          hostname = ipv6.join(":");
+          break;
+      }
+    } catch (e) {
+      return "failed to parse hostname: " + e.message;
+    }
+    if (!hostname) return "failed to parse hostname";
+    const data = cache.subarray(header_len);
+    return {
+      hostname,
+      port,
+      atype,
+      data,
+      resp: new Uint8Array([version, 0]),
+      reader,
+      done: done && data.length === 0
+    };
+  } catch (error) {
+    try {
+      reader.releaseLock();
+    } catch (_) {
+    }
+    throw error;
+  }
+}
+async function upload_to_remote_xhttp(writer, httpx) {
+  try {
+    if (httpx.data && httpx.data.length > 0) {
+      await writer.write(httpx.data);
+    }
+    if (httpx.done) return;
+    while (true) {
+      const { value, done } = await httpx.reader.read();
+      if (done) break;
+      if (value && value.length > 0) {
+        await writer.write(value);
+      }
+    }
+  } catch (error) {
+    throw error;
+  }
+}
+function create_xhttp_downloader(resp, remote_readable, initialData) {
+  const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45e3;
+  let lastActivity = Date.now();
+  let idleTimer;
+  const monitorStream = new TransformStream({
+    start(controller) {
+      controller.enqueue(resp);
+      if (initialData && initialData.byteLength > 0) {
+        controller.enqueue(initialData);
+      }
+      idleTimer = setInterval(() => {
+        if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+          try {
+            monitorStream.writable.abort("idle timeout");
+          } catch (_) {
+          }
+          try {
+            monitorStream.readable.cancel("idle timeout");
+          } catch (_) {
+          }
+          clearInterval(idleTimer);
+        }
+      }, 5e3);
+    },
+    transform(chunk, controller) {
+      lastActivity = Date.now();
+      controller.enqueue(chunk);
+    },
+    flush() {
+      clearInterval(idleTimer);
+    },
+    cancel() {
+      clearInterval(idleTimer);
+    }
+  });
+  const pipePromise = remote_readable.pipeTo(monitorStream.writable).catch(() => {
+  }).finally(() => {
+    clearInterval(idleTimer);
+  });
+  return {
+    readable: monitorStream.readable,
+    done: pipePromise,
+    abort: () => {
+      try {
+        monitorStream.writable.abort();
+      } catch (_) {
+      }
+      try {
+        monitorStream.readable.cancel();
+      } catch (_) {
+      }
+      clearInterval(idleTimer);
+    }
+  };
+}
+async function handleXhttpClient(request, ctx) {
+  try {
+    const result = await read_xhttp_header(request.body, ctx);
+    if (typeof result === "string") {
+      return null;
+    }
+    const { hostname, port, atype, data, resp, reader, done } = result;
+    const httpx = { hostname, port, atype, data, resp, reader, done };
+    if (isHostBanned(hostname, ctx.banHosts)) {
+      void(0);
+      return null;
+    }
+    const remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, (()=>{}), ctx.proxyIP);
+    const uploader = {
+      done: (async () => {
+        const writer = remoteSocket.writable.getWriter();
+        try {
+          await upload_to_remote_xhttp(writer, httpx);
+        } finally {
+          try {
+            await writer.close();
+          } catch (_) {
+          }
+        }
+      })(),
+      abort: () => {
+        try {
+          remoteSocket.writable.abort();
+        } catch (_) {
+        }
+      }
+    };
+    const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
+    const connectionClosed = Promise.race([
+      downloader.done,
+      uploader.done
+    ]).finally(() => {
+      try {
+        remoteSocket.close();
+      } catch (_) {
+      }
+      try {
+        downloader.abort();
+      } catch (_) {
+      }
+      try {
+        uploader.abort();
+      } catch (_) {
+      }
+    });
+    return {
+      readable: downloader.readable,
+      closed: connectionClosed
+    };
+  } catch (e) {
+    void(0);
+    return null;
+  }
+}
+
+function getAdminConfigHtml(FileName, formHtml) {
+  const ADMIN_CSS = `
+    <style>
+    :root{--bs-primary:#0d6efd;--bs-secondary:#6c757d;--bs-info:#0dcaf0}
+    body{font-family:system-ui,-apple-system,sans-serif;background-color:#f8f9fa;color:#212529;margin:0;line-height:1.5}
+    .container{max-width:800px;margin:20px auto;background-color:#fff;padding:2rem;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,.05)}
+    h2{margin-top:0;margin-bottom:.5rem}
+    code{color:#d63384}
+    .form-text{font-size:0.875em;color:#6c757d;display:block;margin-top:.25rem}
+    .env-hint{font-size:0.8em;color:#6c757d;margin-top:4px}
+    .btn-group{display:flex;gap:10px;margin-top:1rem}
+    .save-status{margin-left:15px;color:#666;align-self:center}
+    /* \u6A21\u62DF Bootstrap \u8868\u5355\u6837\u5F0F */
+    .mb-3 { margin-bottom: 1rem; }
+    label { display: inline-block; margin-bottom: .5rem; font-weight: 500; }
+    .form-control { display: block; width: 100%; padding: .375rem .75rem; font-size: 1rem; line-height: 1.5; color: #212529; background-color: #fff; border: 1px solid #ced4da; border-radius: .375rem; box-sizing: border-box; transition: border-color .15s; }
+    .form-control:focus { border-color: #86b7fe; outline: 0; box-shadow: 0 0 0 .25rem rgba(13,110,253,.25); }
+    textarea.form-control { font-family: monospace; font-size: 0.9em; min-height: 100px; }
+    /* \u6A21\u62DF Bootstrap \u6309\u94AE\u6837\u5F0F */
+    .btn { display: inline-block; font-weight: 400; line-height: 1.5; text-align: center; text-decoration: none; vertical-align: middle; cursor: pointer; user-select: none; border: 1px solid transparent; padding: .375rem .75rem; font-size: 1rem; border-radius: .375rem; transition: all .15s ease-in-out; }
+    .btn-primary { color: #fff; background-color: #0d6efd; border-color: #0d6efd; } .btn-primary:hover { background-color: #0b5ed7; }
+    .btn-secondary { color: #fff; background-color: #6c757d; border-color: #6c757d; } .btn-secondary:hover { background-color: #5c636a; }
+    .btn-info { color: #000; background-color: #0dcaf0; border-color: #0dcaf0; } .btn-info:hover { background-color: #31d2f2; }
+    .btn:disabled { opacity: .65; pointer-events: none; }
+    </style>`;
+  return `<!DOCTYPE html><html><head><title>\u914D\u7F6E\u7BA1\u7406</title><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${ADMIN_CSS}</head><body><div class="container"><h2>${FileName} \u914D\u7F6E\u8BBE\u7F6E</h2><p>\u5728\u6B64\u9875\u9762\u4FEE\u6539\u7684\u914D\u7F6E\u5C06\u4FDD\u5B58\u5728KV\u4E2D, \u4F18\u5148\u7EA7: <b>KV > \u73AF\u5883\u53D8\u91CF</b>\u3002\u5982\u679C\u67D0\u9879\u7559\u7A7A\u5E76\u4FDD\u5B58, \u5219\u8BE5\u9879\u914D\u7F6E\u5C06\u56DE\u9000\u5230\u4F7F\u7528\u4E0B\u7EA7\u914D\u7F6E\u6216\u9ED8\u8BA4\u503C\u3002</p><form id="config-form">` + formHtml + '<div class="btn-group"><button type="button" class="btn btn-secondary" onclick="goBack()">\u8FD4\u56DE\u914D\u7F6E\u9875</button><button type="button" class="btn btn-info" onclick="goBestIP()">\u5728\u7EBF\u4F18\u9009IP</button><button type="submit" class="btn btn-primary" id="save-btn">\u4FDD\u5B58\u6240\u6709\u914D\u7F6E</button><span class="save-status" id="saveStatus"></span></div></form><script>function goBack(){const e=window.location.pathname.substring(0,window.location.pathname.lastIndexOf("/"));window.location.href=e+"/"}function goBestIP(){window.location.href=window.location.pathname.replace("/edit","/bestip")}document.getElementById("config-form").addEventListener("submit",function(e){e.preventDefault();const t=document.getElementById("save-btn"),n=document.getElementById("saveStatus"),o=new FormData(this),a=o.get("BESTIP_SOURCES");if(a){const lines=a.split("\\n");for(let i=0;i<lines.length;i++){const line=lines[i].trim();if(!line)continue;const parts=line.split(/\\s+/);if(parts.length<2){return alert("\u4FDD\u5B58\u5931\u8D25: BestIP IP\u6E90 \u683C\u5F0F\u9519\u8BEF (\u7B2C"+(i+1)+"\u884C)\u3002\\n\u5E94\u4E3A: \u540D\u79F0 \u7F51\u5740"),n.textContent="\u4FDD\u5B58\u51FA\u9519: \u683C\u5F0F\u9519\u8BEF",void 0}}}t.disabled=!0,t.textContent="\u4FDD\u5B58\u4E2D...",n.textContent="",fetch(window.location.href,{method:"POST",body:o}).then(e=>{if(e.ok){const o=(new Date).toLocaleString();n.textContent="\u4FDD\u5B58\u6210\u529F "+o,alert("\u4FDD\u5B58\u6210\u529F\uFF01\u90E8\u5206\u8BBE\u7F6E\u53EF\u80FD\u9700\u8981\u51E0\u79D2\u949F\u751F\u6548\u3002")}else return e.text().then(e=>Promise.reject(e))}).catch(e=>{n.textContent="\u4FDD\u5B58\u51FA\u9519: "+e}).finally(()=>{t.disabled=!1,t.textContent="\u4FDD\u5B58\u6240\u6709\u914D\u7F6E"})});<\/script></body></html>';
+}
+function getBestIPHtml(ipSourceOptions) {
+  return `<!DOCTYPE html><html><head><title>Cloudflare IP\u4F18\u9009</title><style>body{width:80%;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;padding:20px}.ip-list{background-color:#f5f5f5;padding:10px;border-radius:5px;max-height:400px;overflow-y:auto}.ip-item{margin:2px 0;font-family:monospace}.stats{background-color:#e3f2fd;padding:15px;border-radius:5px;margin:20px 0}.test-controls{margin-bottom:20px}.button-group{display:flex;gap:10px}.test-button,.save-button,.append-button,.edit-button,.back-button{background-color:#4CAF50;color:white;padding:15px 32px;text-align:center;text-decoration:none;display:inline-block;font-size:16px;cursor:pointer;border:none;border-radius:4px}.save-button{background-color:#2196F3}.append-button{background-color:#FF9800}.edit-button{background-color:#9C27B0}.back-button{background-color:#607D8B}.test-button:disabled,.save-button:disabled,.append-button:disabled{background-color:#cccccc;cursor:not-allowed}.message{padding:10px;margin:10px 0;border-radius:4px;display:none}.message.success{background-color:#d4edda;color:#155724}.message.error{background-color:#f8d7da;color:#721c24}.progress{width:100%;background-color:#f0f0f0;border-radius:5px;margin-top:10px}.progress-bar{width:0%;height:20px;background-color:#4CAF50;border-radius:5px;transition:width .3s;text-align:center;color:white;line-height:20px}.good-latency{color:#4CAF50;font-weight:700}.medium-latency{color:#FF9800;font-weight:700}.bad-latency{color:#f44336;font-weight:700}</style></head><body><h1>\u5728\u7EBF\u4F18\u9009IP</h1><div class="test-controls"><div class="port-selector"style="margin-bottom:10px"><label for="ip-source-select">IP\u5E93\uFF1A</label><select id="ip-source-select">${ipSourceOptions}</select> <label for="port-select">\u7AEF\u53E3\uFF1A</label><select id="port-select"><option value="443">443</option><option value="2053">2053</option><option value="2083">2083</option><option value="2087">2087</option><option value="2096">2096</option><option value="8443">8443</option></select></div><div class="button-group"><button class="test-button" id="test-btn">\u5F00\u59CB\u5EF6\u8FDF\u6D4B\u8BD5</button><button class="save-button" id="save-btn" disabled>\u8986\u76D6\u4FDD\u5B58\u4F18\u9009IP</button><button class="append-button" id="append-btn" disabled>\u8FFD\u52A0\u4FDD\u5B58\u4F18\u9009IP</button><button class="edit-button" onclick="goEdit()">\u7F16\u8F91\u4F18\u9009\u5217\u8868</button><button class="back-button" onclick="goBack()">\u8FD4\u56DE\u914D\u7F6E\u9875</button></div></div><div class="stats"><p><strong>IP\u603B\u6570\uFF1A</strong> <span id="ip-count">0</span></p><p><strong>\u6D4B\u8BD5\u8FDB\u5EA6\uFF1A</strong> <span id="progress-text">\u672A\u5F00\u59CB</span></p><div class="progress"><div class="progress-bar" id="progress-bar"></div></div></div><h2>IP\u5217\u8868 (\u7ED3\u679C\u5DF2\u6309\u5EF6\u8FDF\u6392\u5E8F)</h2><div class="ip-list" id="ip-list">\u8BF7\u9009\u62E9\u7AEF\u53E3\u548CIP\u5E93\uFF0C\u7136\u540E\u70B9\u51FB"\u5F00\u59CB\u5EF6\u8FDF\u6D4B\u8BD5"</div><div id="message" class="message"></div><script>let testResults=[],originalIPs=[];const testBtn=document.getElementById("test-btn"),saveBtn=document.getElementById("save-btn"),appendBtn=document.getElementById("append-btn"),ipList=document.getElementById("ip-list"),ipCount=document.getElementById("ip-count"),progressBar=document.getElementById("progress-bar"),progressText=document.getElementById("progress-text"),portSelect=document.getElementById("port-select"),ipSourceSelect=document.getElementById("ip-source-select");function getBasePath() {return window.location.pathname.substring(0, window.location.pathname.lastIndexOf("/"));}function goEdit(){window.location.href = getBasePath() + "/edit";}function goBack(){window.location.href = getBasePath() + "/";}async function testIP(e,t){const n=Date.now();try{const response = await fetch('?action=test&ip=' + e + '&port=' + t, {method:"GET",signal:AbortSignal.timeout(3e3)});if(response.ok){const data=await response.json();return data}}catch(err){console.error('Test failed for ' + e + ':' + t,err.name,err.message)}return null}async function startTest(){testBtn.disabled=!0,testBtn.textContent="\u6D4B\u8BD5\u4E2D...",saveBtn.disabled=!0,appendBtn.disabled=!0,ipList.innerHTML="\u6B63\u5728\u52A0\u8F7DIP\u5217\u8868...";const e=portSelect.value,t=ipSourceSelect.value;try{const n=(await(await fetch('?loadIPs=' + encodeURIComponent(t) + '&port=' + e)).json()).ips;originalIPs=n,ipCount.textContent=originalIPs.length,testResults=[],ipList.innerHTML="\u5F00\u59CB\u6D4B\u8BD5...",progressBar.style.width="0%",progressBar.textContent="",progressText.textContent="0/0";let o=0;const s=Math.min(32,originalIPs.length);let i=0;await new Promise(e=>{const t=()=>{if(i>=originalIPs.length){if(0==--o)return void e();return}const n=originalIPs[i++];testIP(n,portSelect.value).then(e=>{if(e&&e.colo!=="FAIL"){testResults.push(e)}progressBar.style.width = (100*(i/originalIPs.length)) + '%';progressBar.textContent = Math.round(100*(i/originalIPs.length)) + '%';progressText.textContent = i + '/' + originalIPs.length;t()})};for(let n=0;n<s;n++)o++,t()});testResults.sort((e,t)=>e.latency-t.latency),ipList.innerHTML=testResults.map(function(e) {var latencyClass = e.latency<100 ? "good-latency" : (e.latency<200 ? "medium-latency" : "bad-latency");return '<div class="ip-item ' + latencyClass + '">' + e.ip + ':' + e.port + '#' + e.colo + ' - ' + e.latency + 'ms</div>';}).join(""),saveBtn.disabled=0===testResults.length,appendBtn.disabled=0===testResults.length}catch(e){ipList.innerHTML="\u52A0\u8F7DIP\u5217\u8868\u5931\u8D25",console.error(e)}finally{testBtn.disabled=!1,testBtn.textContent="\u5F00\u59CB\u5EF6\u8FDF\u6D4B\u8BD5"}}async function saveIPs(e){const t=testResults.slice(16).map(function(e) { return e.ip + ':' + e.port + '#' + e.colo; });try{const n=(await(await fetch('?action=' + e,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ips:t})})).json());showMessage(n.message||n.error,n.success)}catch(e){showMessage("\u64CD\u4F5C\u5931\u8D25: "+e.message,!1)}}function showMessage(e,t){const n=document.getElementById("message");n.textContent=e;n.className = 'message ' + (t ? 'success' : 'error');n.style.display="block",setTimeout(()=>{n.style.display="none"},3e3)}testBtn.addEventListener("click",startTest),saveBtn.addEventListener("click",()=>saveIPs("save"));appendBtn.addEventListener("click",()=>saveIPs("append"));<\/script></body></html>`;
+}
+
+function generateBase64Subscription(protocol, id, hostName, tlsOnly, ctx, noLinks = false) {
+  let finalLinks = [];
+  const httpPorts = CONSTANTS.HTTP_PORTS;
+  const httpsPorts = ctx.httpsPorts;
+  const path = "/?ed=2560";
+  const createLink = (addr, useTls) => {
+    const portList = useTls ? httpsPorts : httpPorts;
+    const match = addr.match(/^(.*?)(?::(\d+))?(?:#(.*))?$/);
+    if (!match) return;
+    const ip = match[1];
+    const port = match[2] || portList[0];
+    const remark = match[3] || `${hostName}-${protocol.toUpperCase()}`;
+    if (protocol === "xhttp") {
+      const xhttpPath = "/" + id.substring(0, 8);
+      finalLinks.push(`vless://${id}@${ip}:${port}?encryption=none&security=tls&sni=${hostName}&fp=random&allowInsecure=1&type=xhttp&host=${hostName}&path=${encodeURIComponent(xhttpPath)}&mode=stream-one#${encodeURIComponent(remark)}`);
+    } else if (protocol === "vless") {
+      const security = useTls ? `&security=tls&sni=${hostName}&fp=random` : "&security=none";
+      finalLinks.push(`vless://${id}@${ip}:${port}?encryption=none${security}&type=ws&host=${hostName}&path=${encodeURIComponent(path)}#${encodeURIComponent(remark)}`);
+    } else if (protocol === "trojan") {
+      const security = useTls ? `&security=tls&sni=${hostName}&fp=random` : "&security=none";
+      finalLinks.push(`trojan://${id}@${ip}:${port}?${security}&type=ws&host=${hostName}&path=${encodeURIComponent(path)}#${encodeURIComponent(remark)}`);
+    } else if (protocol === "mandala") {
+      const security = useTls ? `&security=tls&sni=${hostName}` : "";
+      finalLinks.push(`mandala://${id}@${ip}:${port}?type=ws&host=${hostName}&path=${encodeURIComponent(path)}${security}#${encodeURIComponent(remark)}`);
+    } else if (protocol === "ss") {
+      const ss_method = "none";
+      const ss_b64 = btoa(`${ss_method}:${id}`);
+      let plugin_opts = `v2ray-plugin;host=${hostName};path=${encodeURIComponent(path)}`;
+      if (useTls) plugin_opts += `;tls;sni=${hostName}`;
+      finalLinks.push(`ss://${ss_b64}@${ip}:${port}/?plugin=${encodeURIComponent(plugin_opts)}#${encodeURIComponent(remark)}`);
+    } else if (protocol === "socks") {
+      const security = useTls ? `security=tls&sni=${hostName}&path=${encodeURIComponent(path)}` : `path=${encodeURIComponent(path)}`;
+      const password = ctx.dynamicUUID || ctx.userID;
+      const auth = btoa(`${id}:${password}`);
+      finalLinks.push(`socks://${auth}@${ip}:${port}?${security}&transport=ws#${encodeURIComponent(remark)}`);
+    }
+  };
+  if (ctx.addresses) ctx.addresses.forEach((addr) => createLink(addr, true));
+  if (!tlsOnly && ctx.addressesnotls) ctx.addressesnotls.forEach((addr) => createLink(addr, false));
+  if (!noLinks && protocol !== "xhttp" && ctx.hardcodedLinks) {
+    finalLinks = finalLinks.concat(ctx.hardcodedLinks);
+  }
+  return finalLinks.join("\n");
+}
+function generateClashConfig(protocol, id, hostName, tlsOnly, ctx) {
+  let proxies = [];
+  const proxyNames = [];
+  const httpPorts = CONSTANTS.HTTP_PORTS;
+  const httpsPorts = ctx.httpsPorts;
+  const path = "/?ed=2560";
+  const createProxy = (addr, useTls) => {
+    const portList = useTls ? httpsPorts : httpPorts;
+    const match = addr.match(/^(.*?)(?::(\d+))?(?:#(.*))?$/);
+    if (!match) return;
+    const ip = match[1];
+    const port = match[2] || portList[0];
+    const remark = match[3] || `${hostName}-${protocol.toUpperCase()}`;
+    let proxy = {
+      name: remark,
+      type: protocol === "xhttp" ? "vless" : protocol === "ss" ? "ss" : protocol === "socks" ? "socks5" : protocol,
+      server: ip,
+      port: parseInt(port),
+      tls: useTls,
+      "skip-cert-verify": true,
+      udp: false
+    };
+    if (protocol === "vless" || protocol === "xhttp") {
+      proxy.uuid = id;
+      proxy.cipher = "auto";
+    } else if (protocol === "trojan") {
+      proxy.password = id;
+    } else if (protocol === "ss") {
+      proxy.cipher = "none";
+      proxy.password = id;
+      proxy.plugin = "v2ray-plugin";
+      proxy["plugin-opts"] = {
+        mode: "websocket",
+        tls: useTls,
+        host: hostName,
+        path
+      };
+      if (useTls) proxy["plugin-opts"].sni = hostName;
+    } else if (protocol === "socks") {
+      proxy.username = id;
+      proxy.password = ctx.dynamicUUID || ctx.userID;
+    }
+    if (protocol === "xhttp") {
+      proxy.network = "xhttp";
+      proxy["xhttp-opts"] = {
+        mode: "stream-one",
+        path: "/" + id.substring(0, 8),
+        headers: {
+          "Host": hostName,
+          "Content-Type": "application/grpc",
+          "User-Agent": "Go-http-client/2.0"
+        }
+      };
+      proxy.servername = hostName;
+    } else if (protocol !== "ss" && protocol !== "mandala") {
+      proxy.network = "ws";
+      proxy["ws-opts"] = {
+        path,
+        headers: { Host: hostName }
+      };
+      if (useTls) proxy.servername = hostName;
+    }
+    if (protocol !== "mandala") {
+      proxies.push(proxy);
+      proxyNames.push(remark);
+    }
+  };
+  if (ctx.addresses) ctx.addresses.forEach((addr) => createProxy(addr, true));
+  if (!tlsOnly && ctx.addressesnotls) ctx.addressesnotls.forEach((addr) => createProxy(addr, false));
+  return buildClashYaml(proxies, proxyNames);
+}
+function generateMixedClashConfig(vlessId, trojanPass, hostName, tlsOnly, enableXhttp, ctx) {
+  let proxies = [];
+  const proxyNames = [];
+  const httpPorts = CONSTANTS.HTTP_PORTS;
+  const httpsPorts = ctx.httpsPorts;
+  const path = "/?ed=2560";
+  const createMixedProxy = (protocol, addr, useTls) => {
+    const portList = useTls ? httpsPorts : httpPorts;
+    const match = addr.match(/^(.*?)(?::(\d+))?(?:#(.*))?$/);
+    if (!match) return;
+    const ip = match[1];
+    const port = match[2] || portList[0];
+    const remark = match[3] ? `${protocol.toUpperCase()}-${match[3]}` : `${hostName}-${protocol.toUpperCase()}`;
+    let proxy = {
+      name: remark,
+      type: protocol === "xhttp" ? "vless" : protocol === "ss" ? "ss" : protocol === "socks" ? "socks5" : protocol,
+      server: ip,
+      port: parseInt(port),
+      tls: useTls,
+      "skip-cert-verify": true,
+      udp: false
+    };
+    if (protocol === "vless" || protocol === "xhttp") {
+      proxy.uuid = vlessId;
+      proxy.cipher = "auto";
+    } else if (protocol === "trojan") {
+      proxy.password = trojanPass;
+    } else if (protocol === "ss") {
+      proxy.cipher = "none";
+      proxy.password = trojanPass;
+      proxy.plugin = "v2ray-plugin";
+      proxy["plugin-opts"] = {
+        mode: "websocket",
+        tls: useTls,
+        host: hostName,
+        path
+      };
+      if (useTls) proxy["plugin-opts"].sni = hostName;
+    } else if (protocol === "socks") {
+      proxy.username = vlessId;
+      proxy.password = trojanPass;
+    }
+    if (protocol === "xhttp") {
+      proxy.network = "xhttp";
+      proxy["xhttp-opts"] = {
+        mode: "stream-one",
+        path: "/" + vlessId.substring(0, 8),
+        headers: {
+          "Host": hostName,
+          "Content-Type": "application/grpc",
+          "User-Agent": "Go-http-client/2.0"
+        }
+      };
+      proxy.servername = hostName;
+    } else if (protocol !== "ss") {
+      proxy.network = "ws";
+      proxy["ws-opts"] = {
+        path,
+        headers: { Host: hostName }
+      };
+      if (useTls) proxy.servername = hostName;
+    }
+    proxies.push(proxy);
+    proxyNames.push(remark);
+  };
+  let protocols = ["vless", "trojan", "ss", "socks", "xhttp"];
+  protocols = protocols.filter((p) => {
+    if (ctx.disabledProtocols.includes(p)) return false;
+    if (p === "socks" && ctx.disabledProtocols.includes("socks5")) return false;
+    return true;
+  });
+  if (ctx.addresses) {
+    ctx.addresses.forEach((addr) => {
+      protocols.forEach((p) => {
+        if (p === "xhttp") createMixedProxy(p, addr, true);
+        else createMixedProxy(p, addr, true);
+      });
+    });
+  }
+  if (!tlsOnly && ctx.addressesnotls) {
+    ctx.addressesnotls.forEach((addr) => {
+      protocols.forEach((p) => {
+        if (p !== "xhttp") createMixedProxy(p, addr, false);
+      });
+    });
+  }
+  return buildClashYaml(proxies, proxyNames);
+}
+function buildClashYaml(proxies, proxyNames) {
+  const yamlProxies = proxies.map((p) => {
+    let s = `- name: ${p.name}
+  type: ${p.type}
+  server: ${p.server}
+  port: ${p.port}
+  tls: ${p.tls}
+  udp: ${p.udp}
+  skip-cert-verify: true
+`;
+    if (p.uuid) s += `  uuid: ${p.uuid}
+`;
+    if (p.password) s += `  password: "${p.password}"
+`;
+    if (p.username) s += `  username: "${p.username}"
+`;
+    if (p.cipher) s += `  cipher: ${p.cipher}
+`;
+    if (p.network) s += `  network: ${p.network}
+`;
+    if (p.servername) s += `  servername: ${p.servername}
+`;
+    if (p["ws-opts"]) {
+      s += `  ws-opts:
+    path: "${p["ws-opts"].path}"
+    headers:
+      Host: ${p["ws-opts"].headers.Host}
+`;
+    }
+    if (p["xhttp-opts"]) {
+      s += `  xhttp-opts:
+    mode: ${p["xhttp-opts"].mode}
+    path: "${p["xhttp-opts"].path}"
+    headers:
+      Host: ${p["xhttp-opts"].headers.Host}
+      Content-Type: ${p["xhttp-opts"].headers["Content-Type"]}
+      User-Agent: ${p["xhttp-opts"].headers["User-Agent"]}
+`;
+    }
+    if (p.plugin) {
+      s += `  plugin: ${p.plugin}
+  plugin-opts:
+    mode: ${p["plugin-opts"].mode}
+    tls: ${p["plugin-opts"].tls}
+    host: ${p["plugin-opts"].host}
+    path: "${p["plugin-opts"].path}"
+`;
+      if (p["plugin-opts"].sni) s += `    sni: ${p["plugin-opts"].sni}
+`;
+    }
+    return s;
+  }).join("");
+  return `port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+proxies:
+${yamlProxies}
+proxy-groups:
+- name: \u8282\u70B9\u9009\u62E9
+  type: select
+  proxies:
+  - \u81EA\u52A8\u9009\u62E9
+  - DIRECT
+${proxyNames.map((n) => `  - ${n}`).join("\n")}
+- name: \u81EA\u52A8\u9009\u62E9
+  type: url-test
+  url: http://www.gstatic.com/generate_204
+  interval: 300
+  proxies:
+${proxyNames.map((n) => `  - ${n}`).join("\n")}
+rules:
+- MATCH,\u8282\u70B9\u9009\u62E9`;
+}
+function generateSingBoxConfig(protocol, id, hostName, tlsOnly, ctx) {
+  if (protocol === "mandala") return "{}";
+  return generateMixedSingBoxConfig(id, ctx.dynamicUUID, hostName, tlsOnly, false, ctx, [protocol]);
+}
+function generateMixedSingBoxConfig(vlessId, trojanPass, hostName, tlsOnly, enableXhttp, ctx, protocolsFilter = null) {
+  let outbounds = [];
+  const httpPorts = CONSTANTS.HTTP_PORTS;
+  const httpsPorts = ctx.httpsPorts;
+  const path = "/?ed=2560";
+  const createMixedOutbound = (protocol, addr, useTls) => {
+    const portList = useTls ? httpsPorts : httpPorts;
+    const match = addr.match(/^(.*?)(?::(\d+))?(?:#(.*))?$/);
+    if (!match) return;
+    const ip = match[1];
+    const port = match[2] || portList[0];
+    const remark = match[3] ? `${protocol.toUpperCase()}-${match[3]}` : `${hostName}-${protocol.toUpperCase()}`;
+    let outbound = {
+      type: protocol === "xhttp" ? "vless" : protocol === "ss" ? "shadowsocks" : protocol === "socks" ? "socks5" : protocol,
+      tag: remark,
+      server: ip,
+      server_port: parseInt(port)
+    };
+    if (protocol === "vless" || protocol === "xhttp") {
+      outbound.uuid = vlessId;
+      outbound.packet_encoding = "packetaddr";
+    } else if (protocol === "trojan") {
+      outbound.password = trojanPass;
+    } else if (protocol === "ss") {
+      outbound.method = "none";
+      outbound.password = trojanPass;
+    } else if (protocol === "socks") {
+      outbound.username = vlessId;
+      outbound.password = trojanPass;
+    }
+    if (protocol === "xhttp") {
+      outbound.transport = {
+        type: "xhttp",
+        mode: "stream-one",
+        path: "/" + vlessId.substring(0, 8),
+        headers: {
+          Host: hostName,
+          "Content-Type": "application/grpc",
+          "User-Agent": "Go-http-client/2.0"
+        }
+      };
+    } else {
+      outbound.transport = {
+        type: "ws",
+        path,
+        headers: { Host: hostName }
+      };
+    }
+    if (useTls) {
+      outbound.tls = {
+        enabled: true,
+        server_name: hostName,
+        insecure: true,
+        utls: { enabled: true, fingerprint: "chrome" }
+      };
+    }
+    outbounds.push(outbound);
+  };
+  let protocols = [];
+  if (protocolsFilter) {
+    protocols = protocolsFilter;
+  } else {
+    const all = ["vless", "trojan", "ss", "socks", "xhttp"];
+    protocols = all.filter((p) => {
+      if (ctx.disabledProtocols.includes(p)) return false;
+      if (p === "socks" && ctx.disabledProtocols.includes("socks5")) return false;
+      return true;
+    });
+  }
+  if (ctx.addresses) {
+    ctx.addresses.forEach((addr) => {
+      protocols.forEach((p) => {
+        if (p === "xhttp") createMixedOutbound(p, addr, true);
+        else createMixedOutbound(p, addr, true);
+      });
+    });
+  }
+  if (!tlsOnly && ctx.addressesnotls) {
+    ctx.addressesnotls.forEach((addr) => {
+      protocols.forEach((p) => {
+        if (p !== "xhttp") createMixedOutbound(p, addr, false);
+      });
+    });
+  }
+  const tags = outbounds.map((o) => o.tag);
+  return JSON.stringify({
+    "log": { "level": "info" },
+    "inbounds": [{ "type": "tun", "tag": "tun-in" }],
+    "outbounds": [
+      {
+        "type": "selector",
+        "tag": "select",
+        "outbounds": ["auto", "direct", ...tags]
+      },
+      {
+        "type": "urltest",
+        "tag": "auto",
+        "outbounds": tags,
+        "url": "http://www.gstatic.com/generate_204"
+      },
+      { "type": "direct", "tag": "direct" },
+      ...outbounds
+    ],
+    "route": {
+      "final": "select",
+      "rules": [
+        { "protocol": "dns", "outbound": "direct" }
+      ]
+    }
+  }, null, 2);
+}
+
+async function fetchAndParseAPI(apiUrl, httpsPorts) {
+  if (!apiUrl) return [];
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5e3);
+    const response = await fetch(apiUrl, {
+      signal: controller.signal,
+      headers: { "User-Agent": "Mozilla/5.0" }
+    });
+    clearTimeout(timeout);
+    if (response.ok) {
+      const text = await response.text();
+      return await cleanList(text);
+    }
+  } catch (e) {
+    void(0);
+  }
+  return [];
+}
+async function fetchAndParseCSV(csvUrl, isTLS, httpsPorts, DLS, remarkIndex) {
+  if (!csvUrl) return [];
+  try {
+    const response = await fetch(csvUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+    if (!response.ok) return [];
+    const text = await response.text();
+    const lines = text.split(/\r?\n/);
+    if (lines.length === 0) return [];
+    const header = lines[0].split(",");
+    const tlsIndex = header.indexOf("TLS");
+    if (tlsIndex === -1) return [];
+    const results = [];
+    for (let i = 1; i < lines.length; i++) {
+      const columns = lines[i].split(",");
+      if (columns.length > tlsIndex && columns[tlsIndex] && columns[tlsIndex].toUpperCase() === (isTLS ? "TRUE" : "FALSE")) {
+        const speed = parseFloat(columns[columns.length - 1]);
+        if (speed > DLS) {
+          const ip = columns[0];
+          const port = columns[1];
+          const remark = columns[tlsIndex + remarkIndex] || "CSV";
+          results.push(`${ip}:${port}#${remark}`);
+        }
+      }
+    }
+    return results;
+  } catch (e) {
+    void(0);
+  }
+  return [];
+}
+async function fetchRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex) {
+  let remoteAddresses = [];
+  let remoteAddressesNoTls = [];
+  if (apiLinks.length > 0) {
+    const results = await Promise.all(apiLinks.map((url) => fetchAndParseAPI(url, ctx.httpsPorts)));
+    results.forEach((res) => remoteAddresses.push(...res));
+  }
+  if (noTlsApiLinks.length > 0) {
+    const results = await Promise.all(noTlsApiLinks.map((url) => fetchAndParseAPI(url, CONSTANTS.HTTP_PORTS)));
+    results.forEach((res) => remoteAddressesNoTls.push(...res));
+  }
+  if (csvLinks.length > 0) {
+    const [resTLS, resNoTLS] = await Promise.all([
+      Promise.all(csvLinks.map((url) => fetchAndParseCSV(url, true, ctx.httpsPorts, DLS, remarkIndex))),
+      Promise.all(csvLinks.map((url) => fetchAndParseCSV(url, false, ctx.httpsPorts, DLS, remarkIndex)))
+    ]);
+    resTLS.forEach((r) => remoteAddresses.push(...r));
+    resNoTLS.forEach((r) => remoteAddressesNoTls.push(...r));
+  }
+  return {
+    addresses: remoteAddresses,
+    addressesnotls: remoteAddressesNoTls
+  };
+}
+async function getCachedRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex) {
+  const cacheKey = "SUB_REMOTE_CACHE";
+  const CACHE_TTL2 = 3600 * 1e3;
+  const doRefresh = async () => {
+    const data = await fetchRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex);
+    const entry = { ts: Date.now(), data };
+    if (env.KV) await env.KV.put(cacheKey, JSON.stringify(entry));
+    return data;
+  };
+  let cached = null;
+  if (env.KV) {
+    try {
+      const str = await env.KV.get(cacheKey);
+      if (str) cached = JSON.parse(str);
+    } catch (e) {
+      void(0);
+    }
+  }
+  if (cached && cached.data) {
+    if (Date.now() - cached.ts > CACHE_TTL2) {
+      if (ctx.waitUntil) {
+        ctx.waitUntil(doRefresh().catch((e) => void(0)));
+      }
+    }
+    return cached.data;
+  }
+  return await doRefresh();
+}
+async function prepareSubscriptionData(ctx, env) {
+  const addStr = await getConfig(env, "ADD.txt") || await getConfig(env, "ADD");
+  const addApiStr = await getConfig(env, "ADDAPI");
+  const addNoTlsStr = await getConfig(env, "ADDNOTLS");
+  const addNoTlsApiStr = await getConfig(env, "ADDNOTLSAPI");
+  const addCsvStr = await getConfig(env, "ADDCSV");
+  const linkStr = await getConfig(env, "LINK");
+  const DLS = Number(await getConfig(env, "DLS", "8"));
+  const remarkIndex = Number(await getConfig(env, "CSVREMARK", "1"));
+  let localAddresses = [];
+  let localAddressesNoTls = [];
+  let apiLinks = [];
+  let noTlsApiLinks = [];
+  let csvLinks = [];
+  if (addStr) {
+    const list = await cleanList(addStr);
+    list.forEach((item) => {
+      if (item.startsWith("http")) apiLinks.push(item);
+      else localAddresses.push(item);
+    });
+  }
+  if (addApiStr) apiLinks.push(...await cleanList(addApiStr));
+  if (addNoTlsStr) localAddressesNoTls = await cleanList(addNoTlsStr);
+  if (addNoTlsApiStr) noTlsApiLinks.push(...await cleanList(addNoTlsApiStr));
+  if (addCsvStr) csvLinks = await cleanList(addCsvStr);
+  const remoteData = await getCachedRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex);
+  let hardcodedLinks = linkStr ? await cleanList(linkStr) : [];
+  ctx.addresses = [...  new Set([...localAddresses, ...remoteData.addresses])].filter(Boolean);
+  ctx.addressesnotls = [...  new Set([...localAddressesNoTls, ...remoteData.addressesnotls])].filter(Boolean);
+  ctx.hardcodedLinks = hardcodedLinks;
+  if (ctx.addresses.length === 0 && ctx.hardcodedLinks.length === 0) {
+    ctx.addresses.push("www.visa.com.tw:443#CF-Default-1");
+    ctx.addresses.push("usa.visa.com:8443#CF-Default-2");
+  }
+}
+async function handleSubscription(request, env, ctx, subPath, hostName) {
+  const FileName = await getConfig(env, "SUBNAME", "sub");
+  await prepareSubscriptionData(ctx, env);
+  const subHashLength = CONSTANTS.SUB_HASH_LENGTH;
+  const isEnabled = (p) => {
+    if (p === "socks5" && ctx.disabledProtocols.includes("socks")) return false;
+    return !ctx.disabledProtocols.includes(p);
+  };
+  const subPathNames = [
+    "all",
+    "sub",
+    "all-tls",
+    "all-clash",
+    "all-clash-tls",
+    "all-sb",
+    "all-sb-tls",
+    "vless",
+    "vless-tls",
+    "vless-clash",
+    "vless-clash-tls",
+    "vless-sb",
+    "vless-sb-tls",
+    "trojan",
+    "trojan-tls",
+    "trojan-clash",
+    "trojan-clash-tls",
+    "trojan-sb",
+    "trojan-sb-tls",
+    "ss",
+    "ss-tls",
+    "ss-clash",
+    "ss-clash-tls",
+    "ss-sb",
+    "ss-sb-tls",
+    "socks",
+    "socks-tls",
+    "socks-clash",
+    "socks-clash-tls",
+    "socks-sb",
+    "socks-sb-tls",
+    "mandala-tls",
+    "xhttp-tls",
+    "xhttp-clash-tls",
+    "xhttp-sb-tls"
+  ];
+  const hashPromises = subPathNames.map((p) => sha1(p));
+  const hashes = (await Promise.all(hashPromises)).map((h) => h.toLowerCase().substring(0, subHashLength));
+  const hashToName = {};
+  hashes.forEach((h, i) => hashToName[h] = subPathNames[i]);
+  const requestedHash = subPath.toLowerCase().substring(0, subHashLength);
+  const pathName = hashToName[requestedHash];
+  if (!pathName) return null;
+  const plainHeader = { "Content-Type": "text/plain;charset=utf-8" };
+  const plainDownloadHeader = { ...plainHeader, "Content-Disposition": `attachment; filename="${FileName}"` };
+  const jsonHeader = { "Content-Type": "application/json;charset=utf-8" };
+  const jsonDownloadHeader = { ...jsonHeader, "Content-Disposition": `attachment; filename="${FileName}.json"` };
+  const genB64 = (proto, tls) => generateBase64Subscription(proto, ["ss", "trojan", "mandala"].includes(proto) ? ctx.dynamicUUID : ctx.userID, hostName, tls, ctx);
+  if (pathName === "all" || pathName === "sub") {
+    const content = [];
+    ["vless", "trojan", "mandala", "ss", "socks5"].forEach((p) => {
+      if (isEnabled(p)) content.push(genB64(p === "socks5" ? "socks" : p, false));
+    });
+    if (isEnabled("xhttp")) content.push(genB64("xhttp", true));
+    return new Response(btoa(unescape(encodeURIComponent(content.join("\n")))), { headers: plainDownloadHeader });
+  }
+  if (pathName === "all-tls") {
+    const content = [];
+    ["vless", "trojan", "mandala", "ss", "socks5", "xhttp"].forEach((p) => {
+      if (isEnabled(p)) content.push(genB64(p === "socks5" ? "socks" : p, true));
+    });
+    return new Response(content.join("\n"), { headers: plainHeader });
+  }
+  if (pathName === "all-clash") return new Response(generateMixedClashConfig(ctx.userID, ctx.dynamicUUID, hostName, false, ctx.enableXhttp, ctx), { headers: plainDownloadHeader });
+  if (pathName === "all-clash-tls") return new Response(generateMixedClashConfig(ctx.userID, ctx.dynamicUUID, hostName, true, ctx.enableXhttp, ctx), { headers: plainHeader });
+  if (pathName === "all-sb") return new Response(generateMixedSingBoxConfig(ctx.userID, ctx.dynamicUUID, hostName, false, ctx.enableXhttp, ctx), { headers: jsonDownloadHeader });
+  if (pathName === "all-sb-tls") return new Response(generateMixedSingBoxConfig(ctx.userID, ctx.dynamicUUID, hostName, true, ctx.enableXhttp, ctx), { headers: jsonHeader });
+  const parts = pathName.split("-");
+  const protocol = parts[0];
+  const isTls = parts.includes("tls");
+  const isClash = parts.includes("clash");
+  const isSb = parts.includes("sb");
+  if (["vless", "trojan", "ss", "socks", "xhttp", "mandala"].includes(protocol)) {
+    const checkProto = protocol === "socks" ? "socks5" : protocol;
+    if (!isEnabled(checkProto)) return new Response(`${protocol.toUpperCase()} is disabled`, { status: 403 });
+    const id = ["trojan", "ss", "mandala"].includes(protocol) ? ctx.dynamicUUID : ctx.userID;
+    if (isClash) {
+      if (protocol === "mandala") return new Response("Clash not supported for Mandala", { status: 400 });
+      return new Response(generateClashConfig(protocol, id, hostName, isTls, ctx), { headers: plainDownloadHeader });
+    } else if (isSb) {
+      if (protocol === "mandala") return new Response("SingBox not supported for Mandala", { status: 400 });
+      return new Response(generateSingBoxConfig(protocol, id, hostName, isTls, ctx), { headers: jsonDownloadHeader });
+    } else {
+      const content = genB64(protocol, isTls);
+      return isTls ? new Response(content, { headers: plainHeader }) : new Response(btoa(unescape(encodeURIComponent(content))), { headers: plainDownloadHeader });
+    }
+  }
+  return null;
+}
+
+async function executeWebDavPush(env, ctx, force = false) {
+  try {
+    const enableWebdav = await getConfig(env, "WEBDAV", "0");
+    if (enableWebdav !== "1" && !force) {
+      return;
+    }
+    const rawWebdavUrl = "";
+    const webdavUser = "";
+    const webdavPass = "";
+    const webdavUrl = rawWebdavUrl.endsWith("/") ? rawWebdavUrl : `${rawWebdavUrl}/`;
+    void(0);
+    let hostName = await getConfig(env, "WORKER_DOMAIN");
+    if (!hostName && env.KV) {
+      hostName = await env.KV.get("SAVED_DOMAIN");
+      if (hostName) {
+        void(0);
+      }
+    }
+    if (!hostName) {
+      void(0);
+      hostName = "worker.local";
+    }
+    const subHashLength = CONSTANTS.SUB_HASH_LENGTH;
+    const allPathHash = (await sha1("all")).toLowerCase().substring(0, subHashLength);
+    const mockRequest = new Request(`https://${hostName}/${ctx.dynamicUUID}/${allPathHash}`);
+    const response = await handleSubscription(mockRequest, env, ctx, allPathHash, hostName);
+    if (!response || !response.ok) {
+      void(0);
+      return;
+    }
+    let content = await response.text();
+    try {
+      const decoded = atob(content);
+      content = decoded;
+    } catch (e) {
+    }
+    const uniqueLines = [...new Set(content.split("\n"))].filter((line) => line.trim() !== "");
+    const finalContent = uniqueLines.join("\n");
+    if (env.KV && !force) {
+      const currentHash = await sha1(finalContent);
+      const lastHash = await env.KV.get("WEBDAV_HASH");
+      if (currentHash === lastHash) {
+        void(0);
+        return;
+      }
+      if (ctx.waitUntil) ctx.waitUntil(env.KV.put("WEBDAV_HASH", currentHash));
+    }
+    const subName = await getConfig(env, "SUBNAME", "sub");
+    const offset = 8 * 60 * 60 * 1e3;
+    const now =   new Date();
+    const localDate = new Date(now.getTime() + offset);
+    const timestamp = localDate.toISOString().replace(/[-:T.]/g, "").slice(0, 14);
+    const fileName = `${subName}_${timestamp}.txt`;
+    const targetUrl = `${webdavUrl}${fileName}`;
+    const auth = btoa(`${webdavUser}:${webdavPass}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5e3);
+    const pushRequest = fetch(targetUrl, {
+      method: "PUT",
+      headers: {
+        "Authorization": `Basic ${auth}`,
+        "Content-Type": "text/plain; charset=utf-8",
+        "User-Agent": "Cloudflare-Worker-Pusher"
+      },
+      body: finalContent,
+      signal: controller.signal
+    }).then((res) => {
+      if (res.ok) void(0);
+      else void(0);
+    }).catch((err) => {
+      void(0);
+    }).finally(() => {
+      clearTimeout(timeoutId);
+    });
+    if (ctx.waitUntil) ctx.waitUntil(pushRequest);
+    else await pushRequest;
+  } catch (e) {
+    void(0);
+  }
+}
+
+async function handleEditConfig(request, env, ctx) {
+  const FileName = await getConfig(env, "SUBNAME", "sub");
+  if (!env.KV) {
+    return new Response("<p>\u9519\u8BEF\uFF1A\u672A\u7ED1\u5B9AKV\u7A7A\u95F4\uFF0C\u65E0\u6CD5\u4F7F\u7528\u5728\u7EBF\u914D\u7F6E\u529F\u80FD\u3002</p>", { status: 404, headers: { "Content-Type": "text/html;charset=utf-8" } });
+  }
+  const configItems = [
+    ["ADMIN_PASS", "\u540E\u53F0\u7BA1\u7406\u8BBF\u95EE\u5BC6\u7801", "\u8BBE\u7F6E\u540E\uFF0C\u901A\u8FC7 /KEY \u8DEF\u5F84\u8BBF\u95EE\u7BA1\u7406\u9875\u9700\u8F93\u5165\u6B64\u5BC6\u7801\u3002\u7559\u7A7A\u5219\u4E0D\u5F00\u542F\u9A8C\u8BC1\u3002", "\u4F8B\u5982: 123456", "text"],
+    ["UUID", "UUID (\u7528\u6237ID/\u5BC6\u7801)", "VLESS\u7684\u7528\u6237ID, \u4E5F\u662FTrojan/SS\u7684\u5BC6\u7801\u3002", "\u4F8B\u5982: 1234567", "text"],
+    ["KEY", "\u52A8\u6001UUID\u5BC6\u94A5", "\u7528\u4E8E\u751F\u6210\u52A8\u6001UUID, \u586B\u5199\u540E\u5C06\u8986\u76D6\u4E0A\u65B9\u9759\u6001UUID\u3002", "\u4F8B\u5982: my-secret-key", "text"],
+    ["TIME", "\u52A8\u6001UUID\u6709\u6548\u65F6\u95F4 (\u5929)", "\u52A8\u6001UUID\u7684\u6709\u6548\u5468\u671F, \u5355\u4F4D\u4E3A\u5929\u3002", "\u4F8B\u5982: 1 (\u8868\u793A1\u5929)", "number"],
+    ["UPTIME", "\u52A8\u6001UUID\u66F4\u65B0\u65F6\u95F4 (\u5C0F\u65F6)", "\u52A8\u6001UUID\u5728\u5468\u671F\u7684\u7B2C\u51E0\u4E2A\u5C0F\u65F6\u66F4\u65B0\u3002", "\u4F8B\u5982: 0 (\u8868\u793A0\u70B9)", "number"],
+    ["PROXYIP", "\u51FA\u7AD9\u4EE3\u7406IP (ProxyIP)", "Worker\u8BBF\u95EE\u76EE\u6807\u7F51\u7AD9\u65F6\u4F7F\u7528\u7684IP, \u591A\u4E2A\u7528\u9017\u53F7\u9694\u5F00\u3002", "\u4F8B\u5982: 1.2.3.4 \u6216 [2606::]", "text"],
+    ["SUBNAME", "\u8BA2\u9605\u6587\u4EF6\u540D (FileName)", "\u8BA2\u9605\u94FE\u63A5\u4E0B\u8F7D\u65F6\u7684\u6587\u4EF6\u540D\u524D\u7F00\u3002", "\u4F8B\u5982: sub.txt", "text"],
+    ["ADD.txt", "\u4F18\u9009IP\u5217\u8868 (ADD.txt)", "\u8BA2\u9605\u8282\u70B9\u4F7F\u7528\u7684\u5730\u5740\u5217\u8868, \u4E00\u884C\u4E00\u4E2A\u3002", "usa.visa.com#\u5907\u6CE8\n1.2.3.4:8443#\u5907\u6CE8\n[2606:4700::]:2053#IPv6", "textarea"],
+    ["ADDAPI", "\u4F18\u9009IP API (ADDAPI)", "\u8FDC\u7A0B\u4F18\u9009IP\u5217\u8868(TXT\u683C\u5F0F)\u7684\u4E0B\u8F7D\u94FE\u63A5\u3002", "https://example.com/ips.txt", "text"],
+    ["ADDNOTLS", "\u975ETLS\u8282\u70B9 (ADDNOTLS)", "\u624B\u52A8\u6DFB\u52A0\u975ETLS\u8282\u70B9(80\u7AEF\u53E3\u7B49)\u3002", "www.example.com:80#\u5907\u6CE8", "textarea"],
+    ["ADDNOTLSAPI", "\u975ETLS API (ADDNOTLSAPI)", "\u8FDC\u7A0B\u975ETLS\u8282\u70B9\u5217\u8868\u7684\u4E0B\u8F7D\u94FE\u63A5\u3002", "https://example.com/notls.txt", "text"],
+    ["ADDCSV", "CSV\u6D4B\u901F\u6587\u4EF6 (ADDCSV)", "CloudflareSpeedTest \u6D4B\u901F\u7ED3\u679C CSV \u6587\u4EF6\u7684\u94FE\u63A5\u3002", "https://example.com/result.csv", "text"],
+    ["CFPORTS", "CF\u7AEF\u53E3 (httpsPorts)", "Cloudflare\u652F\u6301\u7684TLS\u7AEF\u53E3, \u9017\u53F7\u9694\u5F00\u3002", "443,8443,2053,2083,2087,2096", "text"],
+    ["DIS", "\u7981\u7528\u534F\u8BAE", "\u586B\u5165\u9700\u8981\u5173\u95ED\u7684\u534F\u8BAE(VLESS, Trojan, XHTTP\u7B49), \u82F1\u6587\u9017\u53F7\u5206\u9694, \u4E0D\u533A\u5206\u5927\u5C0F\u5199\u3002\u9ED8\u8BA4\u5168\u90E8\u5F00\u542F\uFF0Cpages\u4E0D\u652F\u6301XHTTP\u3002", "\u4F8B\u5982: XHTTP, SOCKS5", "text"],
+    ["DNS64", "NAT64\u670D\u52A1\u5668", "\u7528\u4E8E\u5C06IPv4\u8F6C\u4E3AIPv6\u8BBF\u95EE (\u5982\u65E0\u53EF\u7559\u7A7A)\u3002", "\u4F8B\u5982: 64:ff9b::/96", "text"],
+    ["SOCKS5", "SOCKS5/HTTP\u4EE3\u7406", "Worker\u51FA\u7AD9\u65F6\u4F7F\u7528\u7684\u524D\u7F6E\u4EE3\u7406 (\u5982\u65E0\u53EF\u7559\u7A7A)\u3002", "user:pass@host:port \u6216 http://user:pass@host:port", "text"],
+    ["GO2SOCKS5", "SOCKS5\u5206\u6D41\u89C4\u5219", "\u54EA\u4E9B\u57DF\u540D\u8D70SOCKS5\u4EE3\u7406, \u9017\u53F7\u9694\u5F00\u3002", "*example.net,*example.com,all in", "text"],
+    ["BAN", "\u7981\u6B62\u8BBF\u95EE\u7684\u57DF\u540D", "\u7981\u6B62\u901A\u8FC7Worker\u4EE3\u7406\u8BBF\u95EE\u7684\u57DF\u540D, \u9017\u53F7\u9694\u5F00\u3002", "example.com,example.org", "text"],
+    ["URL302", "\u6839\u8DEF\u5F84\u8DF3\u8F6CURL (302)", "\u8BBF\u95EE\u6839\u8DEF\u5F84 / \u65F6\u8DF3\u8F6C\u5230\u7684\u5730\u5740\u3002", "https://github.com/", "text"],
+    ["URL", "\u6839\u8DEF\u5F84\u53CD\u4EE3URL", "\u8BBF\u95EE\u6839\u8DEF\u5F84 / \u65F6\u53CD\u4EE3\u7684\u5730\u5740 (302\u4F18\u5148)\u3002", "https://github.com/", "text"],
+    [
+      "BESTIP_SOURCES",
+      "BestIP IP\u6E90",
+      "\u81EA\u5B9A\u4E49BestIP\u9875\u9762\u7684IP\u6E90\u5217\u8868 (\u683C\u5F0F: \u540D\u79F0 \u7F51\u5740\uFF0C\u6BCF\u884C\u4E00\u4E2A)\u3002",
+      `CF\u5B98\u65B9 https://www.cloudflare.com/ips-v4/`,
+      "textarea"
+    ]
+  ];
+  if (request.method === "POST") {
+    try {
+      const formData = await request.formData();
+      const savePromises = [];
+      for (const [key] of configItems) {
+        const value = formData.get(key);
+        if (value !== null) {
+          if (value === "") {
+            savePromises.push(env.KV.delete(key));
+          } else {
+            if (key === "BESTIP_SOURCES") {
+              const lines = value.split("\n");
+              for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                const parts = line.split(/\s+/);
+                if (parts.length < 2) {
+                  return new Response(`\u4FDD\u5B58\u5931\u8D25: BestIP IP\u6E90 \u683C\u5F0F\u9519\u8BEF (\u7B2C${i + 1}\u884C)\u3002\u5E94\u4E3A: \u540D\u79F0 \u7F51\u5740`, { status: 400 });
+                }
+              }
+            }
+            savePromises.push(env.KV.put(key, value));
+          }
+        }
+      }
+      await Promise.all(savePromises);
+      cleanConfigCache();
+      try {
+        const appCtx = await initializeContext(request, env);
+        appCtx.waitUntil = ctx.waitUntil.bind(ctx);
+        ctx.waitUntil(executeWebDavPush(env, appCtx, true));
+      } catch (err) {
+        void(0);
+      }
+      return new Response("\u4FDD\u5B58\u6210\u529F", { status: 200 });
+    } catch (e) {
+      return new Response("\u4FDD\u5B58\u5931\u8D25: " + e.message, { status: 500 });
+    }
+  }
+  const remoteConfig = {};
+  const kvPromises = configItems.map((item) => env.KV.get(item[0]));
+  const kvValues = await Promise.all(kvPromises);
+  let formHtml = "";
+  configItems.forEach(([key, label, desc, placeholder, type], index) => {
+    const kvValue = kvValues[index];
+    const envValue = env[key];
+    let displayValue = kvValue ?? "";
+    if (kvValue === null) {
+      if (key === "BESTIP_SOURCES") displayValue = placeholder;
+    }
+    let envHint = "";
+    if (key !== "ADD.txt" && key !== "BESTIP_SOURCES") {
+      if (envValue) envHint = `<div class="env-hint">\u73AF\u5883\u53D8\u91CF: <code>${envValue}</code></div>`;
+    }
+    const escapeHtml = (str) => {
+      if (!str) return "";
+      return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    };
+    let inputField = "";
+    if (type === "textarea") {
+      const rows = key === "BESTIP_SOURCES" || key === "ADD.txt" || key === "ADDNOTLS" ? 8 : 4;
+      inputField = `<textarea class="form-control" id="${key}" name="${key}" rows="${rows}" placeholder="${escapeHtml(placeholder)}">${escapeHtml(displayValue)}</textarea>`;
+    } else {
+      inputField = `<input type="${type}" class="form-control" id="${key}" name="${key}" value="${escapeHtml(displayValue)}" placeholder="${escapeHtml(placeholder)}">`;
+    }
+    formHtml += `<div class="mb-3"><label for="${key}" class="form-label">${label}</label>${inputField}<div class="form-text">${desc} (\u7559\u7A7A\u5219\u4F7F\u7528\u73AF\u5883\u53D8\u91CF\u6216\u9ED8\u8BA4\u503C)</div>${envHint}</div><hr>`;
+  });
+  return new Response(getAdminConfigHtml(FileName, formHtml), { headers: { "Content-Type": "text/html;charset=utf-8" } });
+}
+async function handleBestIP(request, env) {
+  const url = new URL(request.url);
+  const txt = "ADD.txt";
+  if (url.searchParams.get("action") === "test") {
+    const ip = url.searchParams.get("ip");
+    const port = url.searchParams.get("port");
+    if (!ip || !port) {
+      return new Response(JSON.stringify({ error: "Missing ip or port" }), { status: 400, headers: { "Content-Type": "application/json" } });
+    }
+    const testUrl = "https://cloudflare.com/cdn-cgi/trace";
+    const startTime = Date.now();
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2e3);
+      const response = await fetch(testUrl, {
+        method: "GET",
+        headers: { "Accept": "text/plain" },
+        signal: controller.signal,
+        resolveOverride: ip
+      });
+      clearTimeout(timeoutId);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const traceText = await response.text();
+      const latency = Date.now() - startTime;
+      const coloMatch = traceText.match(/colo=([A-Z]{3})/);
+      const result = {
+        ip,
+        port,
+        latency,
+        colo: coloMatch ? coloMatch[1] : "N/A"
+      };
+      return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
+    } catch (e) {
+      return new Response(JSON.stringify({
+        ip,
+        port,
+        latency: 9999,
+        colo: "FAIL"
+      }), { headers: { "Content-Type": "application/json" } });
+    }
+  }
+  if (request.method === "POST") {
+    if (!env.KV) return new Response(JSON.stringify({ error: "\u672A\u7ED1\u5B9AKV\u7A7A\u95F4" }), { status: 400, headers: { "Content-Type": "application/json" } });
+    try {
+      const data = await request.json();
+      const action = url.searchParams.get("action") || "save";
+      if (action === "append") {
+        const existing = await env.KV.get(txt) || "";
+        const newContent = [...new Set([...existing.split("\n"), ...data.ips].filter(Boolean))].join("\n");
+        await env.KV.put(txt, newContent);
+        return new Response(JSON.stringify({ success: true, message: "\u8FFD\u52A0\u6210\u529F" }), { headers: { "Content-Type": "application/json" } });
+      } else {
+        await env.KV.put(txt, data.ips.join("\n"));
+        return new Response(JSON.stringify({ success: true, message: "\u4FDD\u5B58\u6210\u529F" }), { headers: { "Content-Type": "application/json" } });
+      }
+    } catch (e) {
+      return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+    }
+  }
+  const defaultIpSources = [
+    { "name": "CF\u5B98\u65B9", "url": "https://www.cloudflare.com/ips-v4/" }
+  ];
+  let ipSources = defaultIpSources;
+  if (env.KV) {
+    const kvData = await env.KV.get("BESTIP_SOURCES");
+    const remoteData = await getConfig(env, "BESTIP_SOURCES");
+    const sourceData = kvData || remoteData;
+    if (sourceData) {
+      try {
+        if (sourceData.trim().startsWith("[")) {
+          try {
+            const parsed = JSON.parse(sourceData);
+            if (Array.isArray(parsed)) ipSources = parsed;
+          } catch (e) {
+          }
+        } else {
+          const lines = sourceData.split("\n");
+          const parsedSources = [];
+          for (const line of lines) {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 2) {
+              const url2 = parts.pop();
+              const name = parts.join(" ");
+              if (url2 && name) parsedSources.push({ name, url: url2 });
+            }
+          }
+          if (parsedSources.length > 0) ipSources = parsedSources;
+        }
+      } catch (e) {
+        void(0);
+      }
+    }
+  }
+  const allIpSources = [...ipSources, { "name": "\u53CD\u4EE3IP\u5217\u8868", "url": "proxyip" }];
+  if (url.searchParams.has("loadIPs")) {
+    const ipSourceName = url.searchParams.get("loadIPs");
+    async function GetCFIPs(sourceName) {
+      try {
+        let response;
+        const source = allIpSources.find((s) => s.name === sourceName);
+        if (sourceName === "\u53CD\u4EE3IP\u5217\u8868") {
+          response = await fetch("https://raw.githubusercontent.com/cmliu/ACL4SSR/main/baipiao.txt");
+          const text2 = response.ok ? await response.text() : "";
+          return text2.split("\n").map((l) => l.trim()).filter(Boolean);
+        } else if (source) {
+          response = await fetch(source.url);
+        } else {
+          response = await fetch(allIpSources[0].url);
+        }
+        const text = response.ok ? await response.text() : "";
+        const cidrs = text.split("\n").filter((line) => line.trim() && !line.startsWith("#"));
+        const ips2 =   new Set();
+        while (ips2.size < 512 && cidrs.length > 0) {
+          const startSize = ips2.size;
+          for (const cidr of cidrs) {
+            if (ips2.size >= 512) break;
+            try {
+              if (!cidr.includes("/")) {
+                ips2.add(cidr);
+                continue;
+              }
+              const [network, prefixStr] = cidr.split("/");
+              if (network.includes(":")) {
+                if (network.endsWith("::")) {
+                  const rand = Math.floor(Math.random() * 65535).toString(16);
+                  ips2.add(network + rand);
+                } else {
+                  ips2.add(network);
+                }
+                continue;
+              }
+              const prefix = parseInt(prefixStr);
+              if (prefix < 12 || prefix > 31) continue;
+              const ipToInt = (ip) => ip.split(".").reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
+              const intToIp = (int) => [int >>> 24 & 255, int >>> 16 & 255, int >>> 8 & 255, int & 255].join(".");
+              const networkInt = ipToInt(network);
+              const hostBits = 32 - prefix;
+              const numHosts = 1 << hostBits;
+              if (numHosts > 2) {
+                const randomOffset = Math.floor(Math.random() * (numHosts - 2)) + 1;
+                ips2.add(intToIp(networkInt + randomOffset));
+              }
+            } catch (e) {
+            }
+          }
+          if (ips2.size === startSize) break;
+        }
+        return Array.from(ips2);
+      } catch (error) {
+        return [];
+      }
+    }
+    const ips = await GetCFIPs(ipSourceName);
+    return new Response(JSON.stringify({ ips }), { headers: { "Content-Type": "application/json" } });
+  }
+  const ipSourceOptions = allIpSources.map((s) => `<option value="${s.name}">${s.name}</option>`).join("\n");
+  return new Response(getBestIPHtml(ipSourceOptions), { headers: { "Content-Type": "text/html; charset=UTF-8" } });
+}
+
+var INLINE_CSS = `
+<style>
+:root{--bs-primary:#0d6efd;--bs-secondary:#6c757d;--bs-info:#0dcaf0;--bs-body-bg:#fff;--bs-body-color:#212529}
+body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background-color:var(--bs-body-bg);color:var(--bs-body-color);line-height:1.5;margin:0}
+.container{max-width:900px;margin:0 auto;padding:1.5rem}
+h1,h2,h3{margin-top:0;margin-bottom:.5rem;font-weight:500;line-height:1.2}
+h1{font-size:calc(1.375rem + 1.5vw)} h2{font-size:calc(1.325rem + .9vw);margin-top:2rem}
+hr{margin:1rem 0;color:inherit;border:0;border-top:1px solid;opacity:.25}
+.mb-2{margin-bottom:.5rem!important} .mt-4{margin-top:1.5rem!important} .mb-4{margin-bottom:1.5rem!important}
+.text-danger{color:#dc3545!important}
+.input-group{position:relative;display:flex;flex-wrap:nowrap;width:100%}
+.form-control{display:block;width:100%;padding:.2rem .5rem;font-size:1rem;font-weight:400;line-height:1.5;color:#212529;background-color:#fff;background-clip:padding-box;border:1px solid #ced4da;border-radius:.375rem;transition:border-color .15s ease-in-out,box-shadow .15s ease-in-out;min-width:100px}
+.form-control[readonly]{background-color:#e9ecef;opacity:1}
+.btn{display:inline-block;font-weight:400;line-height:1.5;color:#212529;text-align:center;text-decoration:none;vertical-align:middle;cursor:pointer;user-select:none;background-color:transparent;border:1px solid transparent;padding:.2rem .5rem;font-size:1rem;border-radius:.375rem;transition:color .15s ease-in-out,background-color .15s ease-in-out,border-color .15s ease-in-out,box-shadow .15s ease-in-out}
+.btn-primary{color:#fff;background-color:#0d6efd;border-color:#0d6efd} .btn-primary:hover{background-color:#0b5ed7;border-color:#0a58ca}
+.btn-secondary{color:#fff;background-color:#6c757d;border-color:#6c757d;border-top-left-radius:0;border-bottom-left-radius:0} .btn-secondary:hover{background-color:#5c636a;border-color:#565e64}
+.btn-info{color:#000;background-color:#0dcaf0;border-color:#0dcaf0} .btn-info:hover{background-color:#31d2f2;border-color:#25cff2}
+.input-group .form-control{border-top-right-radius:0;border-bottom-right-radius:0}
+a.btn{margin-right:5px}
+</style>`;
+var copyBtn = (val) => `<div class="input-group mb-2"><input type="text" class="form-control" value="${val}" readonly><button class="btn btn-secondary" onclick="copyToClipboard('${val}')">\u590D\u5236</button></div>`;
+function getHomePageHtml(FileName, mixedTitle, isWorkersDev, subs, nodeDetailsHtml, managementPath) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>\u8282\u70B9\u4FE1\u606F</title>${INLINE_CSS}</head><body><div class="container mt-4 mb-4"><h1>${FileName} \u4EE3\u7406\u8282\u70B9\u7BA1\u7406</h1><hr><h2>${mixedTitle}</h2><p class="text-danger"><b>(\u6CE8\u610F: \u8BA2\u9605\u94FE\u63A5\u5DF2\u5305\u542B\u8BBF\u95EE\u5BC6\u94A5\uFF0C\u8BF7\u52FF\u6CC4\u9732)</b></p>` + (isWorkersDev ? `<b>\u6240\u6709\u534F\u8BAE (\u542B\u65E0TLS):</b>${copyBtn(subs.all)}` : "") + `<b>\u901A\u7528\u8BA2\u9605 (\u63A8\u8350 TLS):</b>${copyBtn(subs.all_tls)}<b>Clash-Meta (TLS):</b>${copyBtn(subs.all_clash_tls)}<b>Sing-Box (TLS):</b>${copyBtn(subs.all_sb_tls)}<hr><h2>\u7BA1\u7406\u5DE5\u5177</h2><div class="mb-2"><a href="${managementPath}/edit" class="btn btn-primary">\u7F16\u8F91\u914D\u7F6E</a> <a href="${managementPath}/bestip" class="btn btn-info">\u5728\u7EBF\u4F18\u9009IP</a></div><hr><h2>\u8282\u70B9\u8BE6\u60C5</h2>` + nodeDetailsHtml + `</div><script>function copyToClipboard(text){navigator.clipboard.writeText(text).then(function(){alert("\u5DF2\u590D\u5236")}, function(err){alert("\u590D\u5236\u5931\u8D25")});}<\/script></body></html>`;
+}
+function getSectionHtml(title, content) {
+  return `<h3>${title}</h3>${content}`;
+}
+function getCopyBtnHtml(val) {
+  return copyBtn(val);
+}
+
+async function generateHomePage(env, ctx, hostName) {
+  const FileName = await env.KV?.get("SUBNAME") || env.SUBNAME || "sub";
+  const isWorkersDev = hostName.includes("workers.dev");
+  const httpsPorts = ctx.httpsPorts;
+  const path = "/?ed=2560";
+  const isEnabled = (p) => {
+    if (p === "socks5" && ctx.disabledProtocols.includes("socks")) return false;
+    return !ctx.disabledProtocols.includes(p);
+  };
+  const subPathNames = [
+    "all",
+    "all-tls",
+    "all-clash",
+    "all-clash-tls",
+    "all-sb",
+    "all-sb-tls",
+    "vless",
+    "vless-tls",
+    "vless-clash",
+    "vless-clash-tls",
+    "vless-sb",
+    "vless-sb-tls",
+    "trojan",
+    "trojan-tls",
+    "trojan-clash",
+    "trojan-clash-tls",
+    "trojan-sb",
+    "trojan-sb-tls",
+    "ss",
+    "ss-tls",
+    "ss-clash",
+    "ss-clash-tls",
+    "ss-sb",
+    "ss-sb-tls",
+    "socks",
+    "socks-tls",
+    "socks-clash",
+    "socks-clash-tls",
+    "socks-sb",
+    "socks-sb-tls",
+    "mandala-tls",
+    "xhttp-tls",
+    "xhttp-clash-tls",
+    "xhttp-sb-tls"
+  ];
+  const hashPromises = subPathNames.map((p) => sha1(p));
+  const hashes = (await Promise.all(hashPromises)).map((h) => h.toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH));
+  const subs = {};
+  const userHash = (await sha1(ctx.dynamicUUID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
+  const subPathPrefix = `/${userHash}`;
+  subPathNames.forEach((name, i) => {
+    const key = name.replace(/-/g, "_");
+    subs[key] = `https://${hostName}${subPathPrefix}${hashes[i]}`;
+  });
+  let nodeDetailsHtml = "";
+  const activeProtocols = [];
+  if (isEnabled("vless")) {
+    const vless_tls = `vless://${ctx.userID}@${hostName}:${httpsPorts[0]}?encryption=none&security=tls&sni=${hostName}&fp=random&type=ws&host=${hostName}&path=${encodeURIComponent(path)}#${hostName}-VLESS-TLS`;
+    nodeDetailsHtml += getSectionHtml("VLESS TLS", getCopyBtnHtml(vless_tls));
+    activeProtocols.push("VLESS");
+  }
+  if (isEnabled("trojan")) {
+    const trojan_tls = `trojan://${ctx.dynamicUUID}@${hostName}:${httpsPorts[0]}?security=tls&sni=${hostName}&fp=random&type=ws&host=${hostName}&path=${encodeURIComponent(path)}#${hostName}-TROJAN-TLS`;
+    nodeDetailsHtml += getSectionHtml("Trojan TLS", getCopyBtnHtml(trojan_tls));
+    activeProtocols.push("Trojan");
+  }
+  if (isEnabled("mandala")) {
+    const mandala_tls = `mandala://${ctx.dynamicUUID}@${hostName}:${httpsPorts[0]}?security=tls&sni=${hostName}&type=ws&host=${hostName}&path=${encodeURIComponent(path)}#${hostName}-MANDALA-TLS`;
+    nodeDetailsHtml += getSectionHtml("Mandala TLS", getCopyBtnHtml(mandala_tls));
+    activeProtocols.push("Mandala");
+  }
+  if (isEnabled("ss")) {
+    const ss_b64 = btoa(`none:${ctx.dynamicUUID}`);
+    const ss_tls = `ss://${ss_b64}@${hostName}:${httpsPorts[0]}/?plugin=${encodeURIComponent(`v2ray-plugin;tls;host=${hostName};sni=${hostName};path=${encodeURIComponent(path)}`)}#${hostName}-SS-TLS`;
+    nodeDetailsHtml += getSectionHtml("Shadowsocks TLS", getCopyBtnHtml(ss_tls));
+    activeProtocols.push("SS");
+  }
+  if (isEnabled("socks5")) {
+    const socks_auth = btoa(`${ctx.userID}:${ctx.dynamicUUID}`);
+    const socks_tls = `socks://${socks_auth}@${hostName}:${httpsPorts[0]}?transport=ws&security=tls&sni=${hostName}&path=${encodeURIComponent(path)}#${hostName}-SOCKS-TLS`;
+    nodeDetailsHtml += getSectionHtml("Socks5 TLS", getCopyBtnHtml(socks_tls));
+    activeProtocols.push("Socks5");
+  }
+  if (isEnabled("xhttp")) {
+    const xhttp_tls = `vless://${ctx.userID}@${hostName}:${httpsPorts[0]}?encryption=none&security=tls&sni=${hostName}&fp=random&allowInsecure=1&type=xhttp&host=${hostName}&path=${encodeURIComponent("/" + ctx.userID.substring(0, 8))}&mode=stream-one#${hostName}-XHTTP-TLS`;
+    const content = `<h3>Vless+xhttp+tls</h3><div class="input-group mb-3"><input type="text" class="form-control" value="${xhttp_tls}" readonly><button class="btn btn-outline-secondary" onclick="copyToClipboard('${xhttp_tls}')">\u590D\u5236</button></div>`;
+    nodeDetailsHtml += `<hr><h2 class="mt-4">XHTTP \u8282\u70B9 (VLESS)</h2>` + content;
+    activeProtocols.push("XHTTP");
+  }
+  const mixedTitle = `\u6DF7\u5408\u8BA2\u9605 (${activeProtocols.join("+")})`;
+  const managementPath = "/" + ctx.dynamicUUID.toLowerCase();
+  return getHomePageHtml(FileName, mixedTitle, isWorkersDev, subs, nodeDetailsHtml, managementPath);
+}
+
+function getPasswordSetupHtml() {
+  return `<!DOCTYPE html><html><head><title>\u521D\u59CB\u5316\u8BBE\u7F6E</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;background:#f4f4f4}.box{background:#fff;padding:2rem;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);width:300px}input,button{width:100%;padding:10px;margin:10px 0;box-sizing:border-box}button{background:#007bff;color:#fff;border:none;cursor:pointer}</style></head><body><div class="box"><h1>\u8BBE\u7F6E\u521D\u59CB\u5BC6\u7801</h1><p>\u8BF7\u8F93\u5165UUID\u6216\u5BC6\u7801\u4F5C\u4E3A\u60A8\u7684\u5BC6\u94A5\u3002</p><form method="POST" action="/"><input type="password" name="password" placeholder="\u8F93\u5165\u5BC6\u7801/UUID" required><button type="submit">\u4FDD\u5B58\u8BBE\u7F6E</button></form></div></body></html>`;
+}
+function getLoginHtml() {
+  return `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>\u540E\u53F0\u8BBF\u95EE\u9A8C\u8BC1</title>
+    <style>
+        :root {
+            --primary-color: #007bff;
+            --primary-hover: #0056b3;
+            --bg-color: #f0f2f5;
+            --card-bg: #ffffff;
+            --text-color: #333333;
+            --border-color: #dee2e6;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+        }
+        .card {
+            background: var(--card-bg);
+            padding: 2.5rem;
+            border-radius: 16px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.05);
+            width: 100%;
+            max-width: 380px;
+            text-align: center;
+            transition: transform 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-2px);
+        }
+        h3 {
+            margin-top: 0;
+            margin-bottom: 1.5rem;
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 16px;
+            box-sizing: border-box;
+            transition: all 0.3s ease;
+            outline: none;
+        }
+        input:focus {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s ease, transform 0.1s ease;
+        }
+        button:hover {
+            background-color: var(--primary-hover);
+        }
+        button:active {
+            transform: scale(0.98);
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h3>\u{1F512} \u8BBF\u95EE\u53D7\u9650</h3>
+        <p style="color:#666; margin-bottom: 1.5rem;">\u5F53\u524D\u9875\u9762\u9700\u8981\u7BA1\u7406\u5458\u6743\u9650</p>
+        <form method="POST" action="?auth=login">
+            <input type="password" name="password" placeholder="\u8BF7\u8F93\u5165\u8BBF\u95EE\u5BC6\u7801" required autofocus autocomplete="current-password">
+            <button type="submit">\u7ACB\u5373\u89E3\u9501</button>
+        </form>
+    </div>
+</body>
+</html>`;
+}
+
+var lastSavedDomain = "";
+function safeWaitUntil(ctx, promise) {
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(promise);
+  } else {
+    Promise.resolve(promise).catch((e) => void(0));
+  }
+}
+async function handlePasswordSetup(request, env, ctx) {
+  if (request.method === "POST") {
+    const formData = await request.formData();
+    const password = formData.get("password");
+    if (!password || password.length < 6) return new Response("\u5BC6\u7801\u592A\u77ED", { status: 400 });
+    if (!env.KV) return new Response("\u672A\u7ED1\u5B9A KV", { status: 500 });
+    await env.KV.put("UUID", password);
+    cleanConfigCache();
+    try {
+      const appCtx = await initializeContext(request, env);
+      appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
+      safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
+      void(0);
+    } catch (e) {
+      void(0);
+    }
+    return new Response("\u8BBE\u7F6E\u6210\u529F\uFF0C\u8BF7\u5237\u65B0\u9875\u9762", { status: 200, headers: { "Content-Type": "text/html;charset=utf-8" } });
+  }
+  return new Response(getPasswordSetupHtml(), { headers: { "Content-Type": "text/html;charset=utf-8" } });
+}
+async function proxyUrl(urlStr, targetUrlObj, request) {
+  if (!urlStr) return null;
+  try {
+    const proxyUrl2 = new URL(urlStr);
+    const path = proxyUrl2.pathname === "/" ? "" : proxyUrl2.pathname;
+    const newUrl = proxyUrl2.protocol + "//" + proxyUrl2.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
+    const newHeaders = new Headers(request.headers);
+    newHeaders.delete("Host");
+    newHeaders.delete("Referer");
+    return fetch(new Request(newUrl, {
+      method: request.method,
+      headers: newHeaders,
+      body: request.body,
+      redirect: "follow"
+    }));
+  } catch (e) {
+    return null;
+  }
+}
+var index_default = {
+  async fetch(request, env, ctx) {
+    try {
+      const context = await initializeContext(request, env);
+      context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
+      const url = new URL(request.url);
+      const path = url.pathname.toLowerCase();
+      const hostName = request.headers.get("Host");
+      const upgradeHeader = request.headers.get("Upgrade");
+      if (upgradeHeader && upgradeHeader.toLowerCase() === "websocket") {
+        if (!context.userID) return new Response("UUID not set", { status: 401 });
+        return await handleWebSocketRequest(request, context);
+      }
+      const rawUUID = await getConfig(env, "UUID");
+      const rawKey = await getConfig(env, "KEY");
+      const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
+      if (isUninitialized && env.KV && path === "/") {
+        return await handlePasswordSetup(request, env, ctx);
+      }
+      const superPassword = CONSTANTS.SUPER_PASSWORD;
+      const dynamicID = context.dynamicUUID.toLowerCase();
+      const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
+      const isSuperRoute = path.startsWith("/" + superPassword);
+      const isUserRoute = path.startsWith("/" + dynamicID);
+      const isSubRoute = path.startsWith("/" + userHash);
+      let subPath = "";
+      if (isSuperRoute) subPath = path.substring(("/" + superPassword).length);
+      else if (isUserRoute) subPath = path.substring(("/" + dynamicID).length);
+      else if (isSubRoute) subPath = path.substring(("/" + userHash).length);
+      const isManagementRoute = isSuperRoute || isUserRoute;
+      const isApiPostPath = isManagementRoute && (subPath === "/edit" || subPath === "/bestip");
+      if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes(".")) {
+        if (hostName !== lastSavedDomain) {
+          lastSavedDomain = hostName;
+          context.waitUntil(env.KV.put("SAVED_DOMAIN", hostName));
+          context.waitUntil(executeWebDavPush(env, context, false));
+        }
+      }
+      if (request.method === "POST" && context.enableXhttp && !isApiPostPath && url.searchParams.get("auth") !== "login" && path !== "/") {
+        const r = await handleXhttpClient(request, context);
+        if (r) {
+          context.waitUntil(r.closed);
+          return new Response(r.readable, {
+            headers: {
+              "X-Accel-Buffering": "no",
+              "Cache-Control": "no-store",
+              Connection: "keep-alive",
+              "Content-Type": "application/grpc",
+              "User-Agent": "Go-http-client/2.0"
+            }
+          });
+        }
+        if (!isManagementRoute) {
+          const contentType = request.headers.get("content-type") || "";
+          if (contentType.includes("application/x-www-form-urlencoded") || contentType.includes("multipart/form-data")) {
+            return new Response('Error: Detected Form submission on XHTTP path. Missing "?auth=login" param?', { status: 400 });
+          }
+          return new Response("Internal Server Error (XHTTP Handshake Failed)", { status: 500 });
+        }
+      }
+      if (isManagementRoute) {
+        if (!path.startsWith("/" + superPassword)) {
+          if (context.adminPass) {
+            const cookie = request.headers.get("Cookie") || "";
+            if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
+              if (request.method === "POST" && url.searchParams.get("auth") === "login") {
+                const formData = await request.formData();
+                if (formData.get("password") === context.adminPass) {
+                  return new Response(null, {
+                    status: 302,
+                    headers: {
+                      "Set-Cookie": `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
+                      "Location": url.pathname
+                    }
+                  });
+                }
+              }
+              return new Response(getLoginHtml(), { headers: { "Content-Type": "text/html;charset=utf-8" } });
+            }
+          }
+        }
+        if (subPath === "/edit") return await handleEditConfig(request, env, ctx);
+        if (subPath === "/bestip") return await handleBestIP(request, env);
+        const html = await generateHomePage(env, context, hostName);
+        return new Response(html, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+      }
+      if (isSubRoute) {
+        const response = await handleSubscription(request, env, context, subPath, hostName);
+        if (response) return response;
+      }
+      if (path === "/") {
+        const url302 = await getConfig(env, "URL302");
+        if (url302) return Response.redirect(url302, 302);
+        const urlProxy = await getConfig(env, "URL");
+        if (urlProxy) {
+          const resp = await proxyUrl(urlProxy, url, request);
+          if (resp) return resp;
+        }
+        return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { "Content-Type": "text/html;charset=utf-8" } });
+      }
+      return new Response("404 Not Found", { status: 404 });
+    } catch (e) {
+      return new Response(e.stack || e.toString(), { status: 500 });
+    }
+  },
+  async scheduled(event2, env, ctx) {
+  }
+};
+export {
+  index_default as default
+};
