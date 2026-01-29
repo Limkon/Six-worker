@@ -1,51 +1,71 @@
+// src/protocols/shadowsocks.js
 import { CONSTANTS } from '../constants.js';
 import { textDecoder } from '../utils/helpers.js';
-import { parseAddressAndPort } from './utils.js';
 
 export async function parseShadowsocksHeader(ssBuffer) {
-    // [优化] 避免不必要的 Uint8Array 包装
+    // [Optimization] 避免不必要的 Uint8Array 包装 (Zero-copy check)
     const buffer = ssBuffer instanceof Uint8Array ? ssBuffer : new Uint8Array(ssBuffer);
     
+    // 最小长度检查: ATYP(1) + ADDR(min 1) + PORT(2) = 4 bytes
     if (buffer.byteLength < 4) return { hasError: true, message: 'SS buffer too short' };
     
     const addrType = buffer[0];
-    let offset = 1;
-    
-    const addressInfo = parseAddressAndPort(buffer, offset, addrType);
-    if (addressInfo.hasError) return addressInfo;
-    
-    if (addressInfo.dataOffset + 2 > buffer.byteLength) return { hasError: true, message: 'SS buffer too short for port' };
-    
-    // [优化] 确保 DataView 使用正确的 offset (支持 buffer 为 subarray 的情况)
-    const dataView = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-    const port = dataView.getUint16(addressInfo.dataOffset, false);
-    
-    let addressRemote = "";
-    switch (addrType) {
-        case CONSTANTS.ATYP_SS_IPV4: 
-            addressRemote = addressInfo.targetAddrBytes.join('.'); 
-            break;
-        case CONSTANTS.ATYP_SS_DOMAIN: 
-            addressRemote = textDecoder.decode(addressInfo.targetAddrBytes); 
-            break;
-        case CONSTANTS.ATYP_SS_IPV6:
-            const ipv6 = [];
-            // [优化] 直接基于 targetAddrBytes 的 buffer 创建视图
-            const addrBytesView = new DataView(addressInfo.targetAddrBytes.buffer, addressInfo.targetAddrBytes.byteOffset, addressInfo.targetAddrBytes.byteLength);
-            for (let i = 0; i < 8; i++) ipv6.push(addrBytesView.getUint16(i * 2, false).toString(16));
-            addressRemote = '[' + ipv6.join(':') + ']';
-            break;
-        default: return { hasError: true, message: 'Invalid SS ATYP: ' + addrType };
+    let addressRemote = '';
+    let portRemote = 0;
+    let headersLength = 0;
+
+    try {
+        // [Optimization] 使用 DataView 进行大端序读取，避免手动位移操作
+        const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+
+        switch (addrType) {
+            case CONSTANTS.ATYP_SS_IPV4: {
+                // IPv4: 1(ATYP) + 4(IPv4) + 2(Port) = 7 bytes
+                if (buffer.byteLength < 7) return { hasError: true, message: 'SS buffer too short for IPv4' };
+                // [Optimization] 使用 subarray.join 避免内存分配
+                addressRemote = buffer.subarray(1, 5).join('.');
+                portRemote = view.getUint16(5, false); // Big-Endian
+                headersLength = 7;
+                break;
+            }
+            case CONSTANTS.ATYP_SS_DOMAIN: {
+                // Domain: 1(ATYP) + 1(Len) + Domain + 2(Port)
+                const domainLen = buffer[1];
+                headersLength = 1 + 1 + domainLen + 2;
+                if (buffer.byteLength < headersLength) return { hasError: true, message: 'SS buffer too short for Domain' };
+                // [Optimization] Zero-copy decode
+                addressRemote = textDecoder.decode(buffer.subarray(2, 2 + domainLen));
+                portRemote = view.getUint16(2 + domainLen, false);
+                break;
+            }
+            case CONSTANTS.ATYP_SS_IPV6: {
+                // IPv6: 1(ATYP) + 16(IPv6) + 2(Port) = 19 bytes
+                if (buffer.byteLength < 19) return { hasError: true, message: 'SS buffer too short for IPv6' };
+                const ipv6 = [];
+                // [Optimization] 使用 DataView 读取 8 个 16位整数
+                for (let i = 0; i < 8; i++) {
+                    ipv6.push(view.getUint16(1 + i * 2, false).toString(16));
+                }
+                addressRemote = '[' + ipv6.join(':') + ']';
+                portRemote = view.getUint16(17, false);
+                headersLength = 19;
+                break;
+            }
+            default:
+                return { hasError: true, message: `Invalid SS ATYP: ${addrType}` };
+        }
+    } catch (e) {
+        return { hasError: true, message: 'SS parse failed: ' + e.message };
     }
-    
+
     return { 
         hasError: false, 
         addressRemote, 
         addressType: addrType, 
-        portRemote: port, 
-        // [优化] 使用 subarray 返回剩余数据视图，极大减少内存复制开销
-        rawClientData: buffer.subarray(addressInfo.dataOffset + 2), 
+        portRemote, 
+        // [Optimization] 返回剩余数据的引用，完全零拷贝
+        rawClientData: buffer.subarray(headersLength), 
         isUDP: false, 
-        rawDataIndex: 0 
+        rawDataIndex: headersLength 
     };
 }
