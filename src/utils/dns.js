@@ -2,14 +2,17 @@
 /**
  * 文件名: src/utils/dns.js
  * 修复说明: 
- * 1. [Security Fix] 修复 NAT64 合成算法：现在将 IPv4 转换为 Hex 格式后再进行拼接，
- * 避免了简单字符串拼接在非标准前缀（如 /64）下可能产生的畸形地址风险。
- * 2. [Performance] 保留了 DNS 缓存限制。
+ * 1. [Optimization] 增加请求合并 (Request Coalescing) 机制，防止高并发下对同一域名的冗余查询。
+ * 2. [Refactor] 提取核心解析逻辑至 performResolve，分离缓存控制与网络请求。
+ * 3. [Security Fix] 保留原有的 NAT64 合成算法安全修复。
  */
 import { CONSTANTS } from '../constants.js';
 
-// DNS 缓存 Map
+// DNS 缓存 Map (存储结果)
 const dnsCache = new Map();
+
+// 正在进行的 DNS 请求 (存储 Promise，用于去重并发请求)
+const inflightRequests = new Map();
 
 /**
  * 解析 IPv6 字符串为 8 个 16 位整数的数组
@@ -113,20 +116,10 @@ export async function detectNat64Prefix(dnsServer) {
     return null;
 }
 
-export async function resolveToIPv6(domain, dnsServer) {
-    if (!dnsServer) return null;
-
-    // [新增] 缓存容量保护：防止 Worker 内存溢出
-    if (dnsCache.size > 1000) {
-        dnsCache.clear();
-    }
-
-    const cacheKey = `${domain}|${dnsServer}`;
-    const cached = dnsCache.get(cacheKey);
-    if (cached && Date.now() < cached.expires) {
-        return cached.ip;
-    }
-
+/**
+ * [Internal] 执行实际的 DNS 解析逻辑 (无缓存副作用)
+ */
+async function performResolve(domain, dnsServer) {
     let isDoH = false;
     try {
         const u = new URL(dnsServer);
@@ -155,9 +148,7 @@ export async function resolveToIPv6(domain, dnsServer) {
             if (data && data.Status === 0 && Array.isArray(data.Answer)) {
                 for (const rec of data.Answer) {
                     if (rec.type === 28 && rec.data) {
-                        const ip = rec.data;
-                        dnsCache.set(cacheKey, { ip, expires: Date.now() + 60000 });
-                        return ip;
+                        return rec.data; // 直接返回 IP，由外层处理缓存
                     }
                 }
             }
@@ -215,9 +206,52 @@ export async function resolveToIPv6(domain, dnsServer) {
         const part2 = ((parts[2] << 8) | parts[3]).toString(16).padStart(4, '0'); // 0201
         
         const synthesizedIP = `${prefix}${part1}:${part2}`;
-        dnsCache.set(cacheKey, { ip: synthesizedIP, expires: Date.now() + 60000 });
         return synthesizedIP;
     }
     
     return null;
+}
+
+export async function resolveToIPv6(domain, dnsServer) {
+    if (!dnsServer) return null;
+
+    // [新增] 缓存容量保护：防止 Worker 内存溢出
+    if (dnsCache.size > 1000) {
+        dnsCache.clear();
+    }
+
+    const cacheKey = `${domain}|${dnsServer}`;
+    
+    // 1. 查结果缓存
+    const cached = dnsCache.get(cacheKey);
+    if (cached && Date.now() < cached.expires) {
+        return cached.ip;
+    }
+
+    // 2. 查请求合并缓存 (Request Coalescing)
+    // 如果已经有相同的请求正在进行中，直接复用其 Promise
+    if (inflightRequests.has(cacheKey)) {
+        return await inflightRequests.get(cacheKey);
+    }
+
+    // 3. 发起新请求
+    // 使用 Promise 包装执行过程，并确保存入 inflightRequests
+    const promise = performResolve(domain, dnsServer).finally(() => {
+        // 无论成功失败，请求结束后都要从队列中移除
+        inflightRequests.delete(cacheKey);
+    });
+
+    inflightRequests.set(cacheKey, promise);
+
+    try {
+        const ip = await promise;
+        // 4. 存入结果缓存 (仅成功时)
+        if (ip) {
+            dnsCache.set(cacheKey, { ip, expires: Date.now() + 60000 });
+        }
+        return ip;
+    } catch (e) {
+        console.error(`[DNS] Resolve error:`, e);
+        return null;
+    }
 }
