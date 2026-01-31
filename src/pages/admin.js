@@ -2,13 +2,13 @@
 /**
  * 文件名: src/pages/admin.js
  * 修改说明:
- * 1. [优化] 引入 getKV 替代原生 env.KV.get，统一使用全局永久缓存 (L1/L2)，节省管理页面的 KV 消耗。
- * 2. [新增] 在 handleBestIP 中增加 cleanConfigCache 调用，确保通过 API 更新 IP 后清除旧缓存。
- * 3. [保留] 之前的 WebDAV 推送和循环检测修复。
+ * 1. [Revert] 采纳用户建议，恢复标准逻辑：当表单项为空时，执行 env.KV.delete(key)。
+ * 这样会触发 config.js 的回退机制，自动使用环境变量或默认值。
+ * 2. [保留] 引入 getKV 替代原生 env.KV.get，统一使用全局永久缓存 (L1/L2)。
+ * 3. [保留] handleBestIP 中的 cleanConfigCache 调用，确保 IP 更新后清除旧缓存。
  */
 import { getConfig, cleanConfigCache, initializeContext } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
-// [修改] 引入 getKV
 import { cleanList, getKV } from '../utils/helpers.js';
 import { getAdminConfigHtml, getBestIPHtml } from '../templates/admin.js';
 import { executeWebDavPush } from '../handlers/webdav.js';
@@ -57,6 +57,8 @@ export async function handleEditConfig(request, env, ctx) {
                 const value = formData.get(key);
                 if (value !== null) {
                     if (value === '') {
+                        // [修改] 恢复标准逻辑：为空时删除 KV 键
+                        // 这将触发 config.js 中的回退机制 (KV -> Env -> Default)
                         savePromises.push(env.KV.delete(key));
                     } else {
                         if (key === 'BESTIP_SOURCES') {
