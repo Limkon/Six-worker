@@ -1,8 +1,9 @@
+// src/utils/helpers.js
 /**
  * 文件名: src/utils/helpers.js
  * 修改内容: 
- * 1. 修复 getKV 中 L2 Cache 写入逻辑，移除无效的 event.waitUntil 检查。
- * 2. 改为显式 await cache.put，确保 Worker 结束前缓存已持久化。
+ * 1. [Fix] 补全 KNOWN_KV_KEYS 列表，包含 admin.js 中使用的所有配置项 (如 SUBNAME, ADD.txt 等)。
+ * 解决“保存配置后不生效”的 L2 缓存残留问题。
  */
 import { CONSTANTS } from '../constants.js';
 
@@ -222,11 +223,18 @@ const GLOBAL_KV_CACHE = new Map();
 const CACHE_API_PREFIX = 'http://kv-cache.local/';
 
 // 定义已知的 KV 键列表 (用于全量刷新时清理 Cache API)
-// 包含所有 config.js 中可能用到的 Key
+// [修复] 补全所有 admin.js 和 config.js 中使用的键，确保全量清理时能覆盖所有配置
 const KNOWN_KV_KEYS = [
-    'UUID', 'KEY', 'ADMIN_PASS', 'PROXYIP', 'SOCKS5', 'GO2SOCKS5', 
-    'DNS64', 'BAN', 'DIS', 'TIME', 'UPTIME', 'REMOTE_CONFIG', 
-    'REMOTE_CONFIG_URL', 'URL', 'URL302', 'SUPER_PASSWORD', 'SAVED_DOMAIN'
+    // 核心认证
+    'UUID', 'KEY', 'ADMIN_PASS', 'SUPER_PASSWORD',
+    // 核心配置
+    'PROXYIP', 'SOCKS5', 'GO2SOCKS5', 'DNS64', 'BAN', 'DIS', 
+    'TIME', 'UPTIME', 
+    // 文件与订阅
+    'SUBNAME', 'ADD.txt', 'ADDAPI', 'ADDNOTLS', 'ADDNOTLSAPI', 'ADDCSV', 
+    'CFPORTS', 'BESTIP_SOURCES',
+    // 系统与隐藏配置
+    'REMOTE_CONFIG', 'REMOTE_CONFIG_URL', 'URL', 'URL302', 'SAVED_DOMAIN'
 ];
 
 /**
@@ -285,8 +293,6 @@ export async function getKV(env, key) {
         
         try {
             // 修复: 显式 await 确保写入成功，防止 Worker 提前终止导致缓存丢失
-            // 在 ES Module Worker 中，event 全局变量不可用，无法使用 waitUntil。
-            // 使用 await 可能会增加一点延迟，但能保证缓存写入的可靠性。
             await cache.put(cacheKeyUrl, response);
             console.log(`[KV] Cached to API for ${key}`);
         } catch (e) {
@@ -313,7 +319,6 @@ export async function clearKVCache(keys) {
     }
 
     // 2. 清理 L2 Cache API
-    // Cache API 不支持批量删除，必须按 URL 逐个删除
     const deletePromises = targetKeys.map(key => {
         const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
         return cache.delete(cacheKeyUrl).catch(e => console.warn(`[KV] Failed to delete cache for ${key}`, e));
