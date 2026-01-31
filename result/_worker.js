@@ -257,6 +257,84 @@ function isHostBanned(hostname, banList) {
     return regex.test(hostname);
   });
 }
+var GLOBAL_KV_CACHE =   new Map();
+var CACHE_API_PREFIX = "http://kv-cache.local/";
+var KNOWN_KV_KEYS = [
+  "UUID",
+  "KEY",
+  "ADMIN_PASS",
+  "PROXYIP",
+  "SOCKS5",
+  "GO2SOCKS5",
+  "DNS64",
+  "BAN",
+  "DIS",
+  "TIME",
+  "UPTIME",
+  "REMOTE_CONFIG",
+  "REMOTE_CONFIG_URL",
+  "URL",
+  "URL302",
+  "SUPER_PASSWORD",
+  "SAVED_DOMAIN"
+];
+async function getKV(env, key) {
+  if (!env.KV || !key) return null;
+  if (GLOBAL_KV_CACHE.has(key)) {
+    return GLOBAL_KV_CACHE.get(key);
+  }
+  const cache = caches.default;
+  const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
+  try {
+    const match = await cache.match(cacheKeyUrl);
+    if (match) {
+      const val2 = await match.text();
+      GLOBAL_KV_CACHE.set(key, val2);
+      void(0);
+      return val2;
+    }
+  } catch (e) {
+    void(0);
+  }
+  void(0);
+  let val = null;
+  try {
+    val = await env.KV.get(key);
+  } catch (e) {
+    void(0);
+  }
+  if (val !== null) {
+    GLOBAL_KV_CACHE.set(key, val);
+    const response = new Response(val, {
+      headers: {
+        "Content-Type": "text/plain",
+        "Cache-Control": "max-age=2592000"
+      }
+    });
+    try {
+      await cache.put(cacheKeyUrl, response);
+      void(0);
+    } catch (e) {
+      void(0);
+    }
+  }
+  return val;
+}
+async function clearKVCache(keys) {
+  const cache = caches.default;
+  const targetKeys = keys && Array.isArray(keys) ? keys : KNOWN_KV_KEYS;
+  if (keys) {
+    keys.forEach((k) => GLOBAL_KV_CACHE.delete(k));
+  } else {
+    GLOBAL_KV_CACHE.clear();
+  }
+  const deletePromises = targetKeys.map((key) => {
+    const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
+    return cache.delete(cacheKeyUrl).catch((e) => void(0));
+  });
+  await Promise.all(deletePromises);
+  void(0);
+}
 
 var configCache = {};
 var remoteConfigCache = {
@@ -267,22 +345,24 @@ var proxyIPRemoteCache = {
   data: [],
   expires: 0
 };
-function cleanConfigCache(updatedKeys) {
+async function cleanConfigCache(updatedKeys) {
   if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes("REMOTE_CONFIG_URL")) {
     configCache = {};
     remoteConfigCache = { data: {}, lastFetch: 0 };
     proxyIPRemoteCache = { data: [], expires: 0 };
+    await clearKVCache();
     return;
   }
   for (const key of updatedKeys) {
     delete configCache[key];
   }
+  await clearKVCache(updatedKeys);
   if (updatedKeys.includes("PROXYIP")) {
     proxyIPRemoteCache = { data: [], expires: 0 };
   }
 }
 async function loadRemoteConfig(env, forceReload = false) {
-  const remoteConfigUrl = await env.KV.get("REMOTE_CONFIG_URL");
+  const remoteConfigUrl = await getKV(env, "REMOTE_CONFIG_URL");
   if (!forceReload && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
     return remoteConfigCache.data;
   }
@@ -338,10 +418,7 @@ async function getConfig(env, key, defaultValue = void 0) {
   }
   let val = void 0;
   if (env.KV) {
-    const kvVal = await env.KV.get(key);
-    if (kvVal !== null) {
-      val = kvVal;
-    }
+    val = await getKV(env, key);
   }
   if (!val && remoteConfigCache.data && remoteConfigCache.data[key]) {
     val = remoteConfigCache.data[key];
@@ -355,7 +432,11 @@ async function getConfig(env, key, defaultValue = void 0) {
 }
 async function initializeContext(request, env) {
   const url = new URL(request ? request.url : "http://localhost");
-  const forceReload = url.searchParams.has("flush");
+  const forceReload = url.searchParams.get("flush") === "1";
+  if (forceReload) {
+    void(0);
+    await cleanConfigCache();
+  }
   const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0");
   if (enableRemote === "1") {
     await loadRemoteConfig(env, forceReload);
@@ -1033,16 +1114,16 @@ async function resolveToIPv6(domain, dnsServer) {
     const ip = await promise;
     if (ip) {
       dnsCache.set(cacheKey, { ip, expires: Date.now() + 6e4 });
-      const cacheResponse = new Response(ip, {
-        headers: {
-          "Cache-Control": "max-age=60",
-          "Content-Type": "text/plain"
-        }
-      });
-      if (typeof event !== "undefined" && event.waitUntil) {
-        event.waitUntil(cache.put(cacheUrl, cacheResponse));
-      } else {
+      try {
+        const cacheResponse = new Response(ip, {
+          headers: {
+            "Cache-Control": "max-age=60",
+            "Content-Type": "text/plain"
+          }
+        });
         await cache.put(cacheUrl, cacheResponse);
+      } catch (cacheError) {
+        void(0);
       }
     }
     return ip;
@@ -1657,7 +1738,7 @@ async function handleWebSocketRequest(request, ctx) {
   let activeSocket = null;
   const MAX_HEADER_BUFFER = 4096;
   const DETECT_TIMEOUT_MS = 1e4;
-  const log = (info, event2) => void(0);
+  const log = (info, event) => void(0);
   const timeoutTimer = setTimeout(() => {
     if (!isConnected) {
       log("Timeout: Protocol detection took too long");
@@ -1867,9 +1948,9 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   let readableStreamCancel = false;
   return new ReadableStream({
     start(controller) {
-      webSocketServer.addEventListener("message", (event2) => {
+      webSocketServer.addEventListener("message", (event) => {
         if (readableStreamCancel) return;
-        const data = typeof event2.data === "string" ? new TextEncoder().encode(event2.data) : event2.data;
+        const data = typeof event.data === "string" ? new TextEncoder().encode(event.data) : event.data;
         controller.enqueue(data);
       });
       webSocketServer.addEventListener("close", () => {
@@ -2940,7 +3021,7 @@ async function handleEditConfig(request, env, ctx) {
         }
       }
       await Promise.all(savePromises);
-      cleanConfigCache();
+      await cleanConfigCache();
       try {
         const appCtx = await initializeContext(request, env);
         appCtx.waitUntil = ctx.waitUntil.bind(ctx);
@@ -2954,7 +3035,7 @@ async function handleEditConfig(request, env, ctx) {
     }
   }
   const remoteConfig = {};
-  const kvPromises = configItems.map((item) => env.KV.get(item[0]));
+  const kvPromises = configItems.map((item) => getKV(env, item[0]));
   const kvValues = await Promise.all(kvPromises);
   let formHtml = "";
   configItems.forEach(([key, label, desc, placeholder, type], index) => {
@@ -3030,12 +3111,14 @@ async function handleBestIP(request, env) {
       const data = await request.json();
       const action = url.searchParams.get("action") || "save";
       if (action === "append") {
-        const existing = await env.KV.get(txt) || "";
+        const existing = await getKV(env, txt) || "";
         const newContent = [...new Set([...existing.split("\n"), ...data.ips].filter(Boolean))].join("\n");
         await env.KV.put(txt, newContent);
+        await cleanConfigCache([txt]);
         return new Response(JSON.stringify({ success: true, message: "\u8FFD\u52A0\u6210\u529F" }), { headers: { "Content-Type": "application/json" } });
       } else {
         await env.KV.put(txt, data.ips.join("\n"));
+        await cleanConfigCache([txt]);
         return new Response(JSON.stringify({ success: true, message: "\u4FDD\u5B58\u6210\u529F" }), { headers: { "Content-Type": "application/json" } });
       }
     } catch (e) {
@@ -3047,7 +3130,7 @@ async function handleBestIP(request, env) {
   ];
   let ipSources = defaultIpSources;
   if (env.KV) {
-    const kvData = await env.KV.get("BESTIP_SOURCES");
+    const kvData = await getKV(env, "BESTIP_SOURCES");
     const remoteData = await getConfig(env, "BESTIP_SOURCES");
     const sourceData = kvData || remoteData;
     if (sourceData) {
@@ -3268,7 +3351,7 @@ async function generateHomePage(env, ctx, hostName) {
 }
 
 function getPasswordSetupHtml() {
-  return `<!DOCTYPE html><html><head><title>\u521D\u59CB\u5316\u8BBE\u7F6E</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;background:#f4f4f4}.box{background:#fff;padding:2rem;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);width:300px}input,button{width:100%;padding:10px;margin:10px 0;box-sizing:border-box}button{background:#007bff;color:#fff;border:none;cursor:pointer}</style></head><body><div class="box"><h1>\u8BBE\u7F6E\u521D\u59CB\u5BC6\u7801</h1><p>\u8BF7\u8F93\u5165UUID\u6216\u5BC6\u7801\u4F5C\u4E3A\u60A8\u7684\u5BC6\u94A5\u3002</p><form method="POST" action="/"><input type="password" name="password" placeholder="\u8F93\u5165\u5BC6\u7801/UUID" required><button type="submit">\u4FDD\u5B58\u8BBE\u7F6E</button></form></div></body></html>`;
+  return `<!DOCTYPE html><html><head><title>\u521D\u59CB\u5316\u8BBE\u7F6E</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;background:#f4f4f4;margin:0}.box{background:#fff;padding:2rem;border-radius:8px;box-shadow:0 0 10px rgba(0,0,0,0.1);width:300px;display:flex;flex-direction:column;align-items:center;text-align:center}h1{margin-top:0;font-size:1.5rem}p{color:#666;margin-bottom:1rem}form{width:100%}input,button{width:100%;padding:10px;margin:10px 0;box-sizing:border-box;border-radius:4px;border:1px solid #ccc}button{background:#007bff;color:#fff;border:none;cursor:pointer;font-weight:600}button:hover{background:#0056b3}</style></head><body><div class="box"><h1>\u8BBE\u7F6E\u521D\u59CB\u5BC6\u7801</h1><p>\u8BF7\u8F93\u5165UUID\u6216\u5BC6\u7801\u4F5C\u4E3A\u60A8\u7684\u5BC6\u94A5\u3002</p><form method="POST" action="/"><input type="password" name="password" placeholder="\u8F93\u5165\u5BC6\u7801/UUID" required><button type="submit">\u4FDD\u5B58\u8BBE\u7F6E</button></form></div></body></html>`;
 }
 function getLoginHtml() {
   return `
@@ -3384,7 +3467,7 @@ async function handlePasswordSetup(request, env, ctx) {
     if (!password || password.length < 6) return new Response("\u5BC6\u7801\u592A\u77ED", { status: 400 });
     if (!env.KV) return new Response("\u672A\u7ED1\u5B9A KV", { status: 500 });
     await env.KV.put("UUID", password);
-    cleanConfigCache();
+    await cleanConfigCache();
     try {
       const appCtx = await initializeContext(request, env);
       appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
@@ -3521,7 +3604,7 @@ var index_default = {
       return new Response(e.stack || e.toString(), { status: 500 });
     }
   },
-  async scheduled(event2, env, ctx) {
+  async scheduled(event, env, ctx) {
   }
 };
 export {

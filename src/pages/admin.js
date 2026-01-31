@@ -1,13 +1,15 @@
+// src/pages/admin.js
 /**
  * 文件名: src/pages/admin.js
- * 说明: 
- * 1. [新增] 引入 executeWebDavPush，实现配置变更后自动触发 WebDAV 推送。
- * 2. [修复] 修复 BestIP 在线优选功能中加载 IPv6 CIDR (如 Cloudflare 官方列表) 失败的问题。
- * 3. [修复] 增加循环检测机制，防止在 IP 生成耗尽时陷入死循环导致 Worker 超时。
+ * 修改说明:
+ * 1. [优化] 引入 getKV 替代原生 env.KV.get，统一使用全局永久缓存 (L1/L2)，节省管理页面的 KV 消耗。
+ * 2. [新增] 在 handleBestIP 中增加 cleanConfigCache 调用，确保通过 API 更新 IP 后清除旧缓存。
+ * 3. [保留] 之前的 WebDAV 推送和循环检测修复。
  */
 import { getConfig, cleanConfigCache, initializeContext } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
-import { cleanList } from '../utils/helpers.js';
+// [修改] 引入 getKV
+import { cleanList, getKV } from '../utils/helpers.js';
 import { getAdminConfigHtml, getBestIPHtml } from '../templates/admin.js';
 import { executeWebDavPush } from '../handlers/webdav.js';
 
@@ -74,7 +76,8 @@ export async function handleEditConfig(request, env, ctx) {
             }
             await Promise.all(savePromises);
             
-            cleanConfigCache();
+            // 保存后清理缓存 (cleanConfigCache 内部会清理 L1/L2)
+            await cleanConfigCache();
 
             // [新增] 配置变更后，触发 WebDAV 推送
             // 因为配置变了，订阅内容也会变，所以这里使用 force=true 强制推送
@@ -82,7 +85,6 @@ export async function handleEditConfig(request, env, ctx) {
                 const appCtx = await initializeContext(request, env);
                 appCtx.waitUntil = ctx.waitUntil.bind(ctx);
                 ctx.waitUntil(executeWebDavPush(env, appCtx, true));
-                // console.log('[Admin] Config updated, triggered WebDAV push.'); // 静默
             } catch (err) {
                 console.error('[Admin] Failed to trigger WebDAV push:', err);
             }
@@ -95,7 +97,8 @@ export async function handleEditConfig(request, env, ctx) {
     
     // 处理 GET 渲染页面
     const remoteConfig = {}; 
-    const kvPromises = configItems.map(item => env.KV.get(item[0]));
+    // [修改] 使用 getKV 替代 env.KV.get，走缓存读取数据
+    const kvPromises = configItems.map(item => getKV(env, item[0]));
     const kvValues = await Promise.all(kvPromises);
     let formHtml = '';
     
@@ -178,12 +181,17 @@ export async function handleBestIP(request, env) {
             const data = await request.json();
             const action = url.searchParams.get('action') || 'save';
             if (action === 'append') {
-                const existing = await env.KV.get(txt) || '';
+                // [修改] 使用 getKV 读取现有内容
+                const existing = await getKV(env, txt) || '';
                 const newContent = [...new Set([...existing.split('\n'), ...data.ips].filter(Boolean))].join('\n');
                 await env.KV.put(txt, newContent);
+                // [新增] 必须清理缓存，否则下次读取还是旧的
+                await cleanConfigCache([txt]);
                 return new Response(JSON.stringify({ success: true, message: '追加成功' }), { headers: { 'Content-Type': 'application/json' } });
             } else {
                 await env.KV.put(txt, data.ips.join('\n'));
+                // [新增] 清理缓存
+                await cleanConfigCache([txt]);
                 return new Response(JSON.stringify({ success: true, message: '保存成功' }), { headers: { 'Content-Type': 'application/json' } });
             }
         } catch (e) {
@@ -197,7 +205,8 @@ export async function handleBestIP(request, env) {
     ];
     let ipSources = defaultIpSources;
     if (env.KV) {
-        const kvData = await env.KV.get('BESTIP_SOURCES');
+        // [修改] 使用 getKV 读取源配置
+        const kvData = await getKV(env, 'BESTIP_SOURCES');
         const remoteData = await getConfig(env, 'BESTIP_SOURCES'); 
         const sourceData = kvData || remoteData;
 
@@ -246,9 +255,8 @@ export async function handleBestIP(request, env) {
                 const ips = new Set();
                 
                 // [修复] 防止无限循环：如果一轮循环后IP数量没有增加，强制退出
-                // 这解决了 IPv6 静态添加或 IPv4 无法生成新 IP 时导致的超时问题
                 while (ips.size < 512 && cidrs.length > 0) {
-                    const startSize = ips.size; // 记录循环开始时的数量
+                    const startSize = ips.size; 
                     
                     for (const cidr of cidrs) {
                         if (ips.size >= 512) break;
@@ -256,16 +264,12 @@ export async function handleBestIP(request, env) {
                             if (!cidr.includes('/')) { ips.add(cidr); continue; }
                             const [network, prefixStr] = cidr.split('/');
                             
-                            // [新增] IPv6 兼容逻辑
+                            // [IPv6 兼容]
                             if (network.includes(':')) {
-                                // 针对 :: 结尾的网段 (如 Cloudflare 官方列表 2400:cb00::/32)
-                                // 尝试追加随机 Hex 字符，这样可以让 Set 收集到不同的 IP，而不是永远只有一个
                                 if (network.endsWith('::')) {
-                                    // 生成 0-FFFF 之间的随机数
                                     const rand = Math.floor(Math.random() * 0xffff).toString(16);
                                     ips.add(network + rand);
                                 } else {
-                                    // 其他情况直接添加网络地址
                                     ips.add(network);
                                 }
                                 continue;
@@ -285,7 +289,6 @@ export async function handleBestIP(request, env) {
                         } catch (e) {}
                     }
                     
-                    // [关键] 如果这一轮没有新增任何 IP，退出循环，防止死锁
                     if (ips.size === startSize) break;
                 }
                 return Array.from(ips);

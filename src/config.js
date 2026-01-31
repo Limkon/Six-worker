@@ -2,15 +2,14 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [修复] 严格执行“单一连接只使用一个ProxyIP”策略。
- * 2. [优化] cleanConfigCache 支持按需更新变更的键值，避免全量清空缓存。
- * 3. [修复] 使用 finally 确保 fetch 超时定时器被正确清理 (避免资源泄露)。
- * 4. [确认] 行解析逻辑使用 indexOf+substring，已支持带 '=' 的值。
+ * 1. [优化] 引入 getKV 实现 KV 数据的内存级永久缓存 (L1+L2)，大幅降低 KV 读取消耗。
+ * 2. [新增] initializeContext 检测 ?flush=1 参数，触发全量缓存清理 (L1+L2)。
+ * 3. [Refactor] cleanConfigCache 升级为异步，确保 Cache API 清理完成。
  */
 import { CONSTANTS } from './constants.js';
-import { cleanList, generateDynamicUUID, isStrictV4UUID } from './utils/helpers.js';
+import { cleanList, generateDynamicUUID, isStrictV4UUID, getKV, clearKVCache } from './utils/helpers.js';
 
-// 内存缓存对象
+// 内存缓存对象 (处理后的配置)
 let configCache = {};
 
 // 远程配置缓存
@@ -29,12 +28,15 @@ let proxyIPRemoteCache = {
  * 清理配置缓存
  * @param {Array<string>} [updatedKeys] - 可选，仅清理指定的键名。如果不传或包含全局影响的键，则全量清空。
  */
-export function cleanConfigCache(updatedKeys) {
+export async function cleanConfigCache(updatedKeys) {
     // 如果变更了远程配置地址，或者没有提供具体的键列表，则执行全量清空（这是最安全的操作）
     if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes('REMOTE_CONFIG_URL')) {
         configCache = {};
         remoteConfigCache = { data: {}, lastFetch: 0 };
         proxyIPRemoteCache = { data: [], expires: 0 };
+        
+        // [新增] 同时也全量清空底层的 KV 原始数据缓存 (L1 Memory + L2 Cache API)
+        await clearKVCache();
         return;
     }
 
@@ -43,6 +45,9 @@ export function cleanConfigCache(updatedKeys) {
         delete configCache[key];
     }
 
+    // [新增] 清理对应的底层 KV 缓存
+    await clearKVCache(updatedKeys);
+
     // 特殊处理：如果 PROXYIP 变更，需要同时重置 IP 列表缓存
     if (updatedKeys.includes('PROXYIP')) {
         proxyIPRemoteCache = { data: [], expires: 0 };
@@ -50,7 +55,8 @@ export function cleanConfigCache(updatedKeys) {
 }
 
 export async function loadRemoteConfig(env, forceReload = false) {
-    const remoteConfigUrl = await env.KV.get('REMOTE_CONFIG_URL');
+    // [修改] 使用 getKV 读取远程配置 URL，利用缓存减少 KV 读取
+    const remoteConfigUrl = await getKV(env, 'REMOTE_CONFIG_URL');
     
     // 如果不是强制刷新(forceReload为false)，且缓存中有数据，直接返回缓存。
     if (!forceReload && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
@@ -90,7 +96,6 @@ export async function loadRemoteConfig(env, forceReload = false) {
                             return;
                         }
                         // [Verify] 现有逻辑使用 indexOf + substring，已能正确处理值中包含 '=' 的情况
-                        // 例如 "Key=Value=With=Equals" -> k="Key", v="Value=With=Equals"
                         const eqIndex = trimmedLine.indexOf('=');
                         if (eqIndex > 0) {
                             const k = trimmedLine.substring(0, eqIndex).trim();
@@ -120,10 +125,9 @@ export async function getConfig(env, key, defaultValue = undefined) {
     let val = undefined;
     
     if (env.KV) {
-        const kvVal = await env.KV.get(key);
-        if (kvVal !== null) {
-            val = kvVal;
-        }
+        // [修改] 使用 getKV 替代直接的 env.KV.get
+        // 自动处理 L1/L2 缓存，若缓存命中则不消耗 KV 额度
+        val = await getKV(env, key);
     }
 
     if (!val && remoteConfigCache.data && remoteConfigCache.data[key]) {
@@ -145,10 +149,18 @@ export async function getConfig(env, key, defaultValue = undefined) {
 export async function initializeContext(request, env) {
     // 解析 URL 以检查 flush 参数
     const url = new URL(request ? request.url : 'http://localhost');
-    const forceReload = url.searchParams.has('flush'); // 只要 URL 包含 ?flush 即可触发
+    // [新增] 只要 URL 包含 ?flush=1，立即等待缓存清理完成
+    const forceReload = url.searchParams.get('flush') === '1'; 
+
+    if (forceReload) {
+        console.log('[Config] Flush requested via URL parameter. Purging caches...');
+        await cleanConfigCache(); // 等待 L1 和 L2 缓存彻底清除
+    }
 
     const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0');
     if (enableRemote === '1') {
+        // 如果 forceReload 为 true，上面的 cleanConfigCache 已经清空了数据
+        // loadRemoteConfig 内部调用 getKV 时会自动去源 KV 拉取最新数据
         await loadRemoteConfig(env, forceReload);
     }
 

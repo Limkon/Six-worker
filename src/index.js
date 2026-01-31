@@ -1,12 +1,9 @@
 // src/index.js
 /**
  * 文件名: src/index.js
- * 审计与修复说明:
- * 1. [Critical Fix] 修复 proxyUrl 中的 Host 头传递 bug。
- * 旧代码直接复制请求头会导致目标服务器因 Host 不匹配而拒绝访问(403/404)。
- * 修复方案：显式删除 Host 头，由 fetch 自动生成。
- * 2. [Refactor] 扁平化 XHTTP 拦截逻辑，与 Five-worker 保持代码结构一致。
- * 3. [Optimization] 保留 Six-worker 特有的域名自动发现与 WebDAV 推送功能。
+ * 修改说明:
+ * 1. [Fix] handlePasswordSetup 中增加 await cleanConfigCache()，适配异步缓存清理接口。
+ * 2. [Check] 确认整体流程与新的 getKV/L2缓存 机制兼容。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -37,7 +34,8 @@ async function handlePasswordSetup(request, env, ctx) {
         if (!env.KV) return new Response('未绑定 KV', { status: 500 });
         await env.KV.put('UUID', password);
         
-        cleanConfigCache();
+        // [修改] 必须等待缓存清理完成，确保新密码立即生效
+        await cleanConfigCache();
 
         try {
             const appCtx = await initializeContext(request, env);
@@ -62,10 +60,9 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
         const newUrl = proxyUrl.protocol + '//' + proxyUrl.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
 
         // [Fix] 重建 Headers 对象并删除 Host 头
-        // 这是一个关键修复：如果不删除 Host，反代到不同域名的请求通常会被目标服务器拒绝 (403/404)
         const newHeaders = new Headers(request.headers);
         newHeaders.delete('Host');
-        newHeaders.delete('Referer'); // 可选：为了隐私也可以移除 Referer
+        newHeaders.delete('Referer'); 
 
         return fetch(new Request(newUrl, {
             method: request.method,
@@ -74,7 +71,6 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
             redirect: 'follow'
         }));
     } catch (e) { 
-        // 捕获 DNS 解析失败或其他网络错误，静默失败以回落到默认页面
         return null; 
     }
 }
@@ -98,6 +94,7 @@ export default {
             }
 
             // 2. 初始密码设置
+            // 这里使用 getConfig 会自动走缓存，不会浪费 KV
             const rawUUID = await getConfig(env, 'UUID');
             const rawKey = await getConfig(env, 'KEY');
             const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
@@ -133,8 +130,6 @@ export default {
             }
 
             // 5. XHTTP 协议拦截
-            // 逻辑说明：POST 请求 + 开启 XHTTP + 非 API + 非登录 + 非根路径
-            // 注意：根路径('/')被排除，因此不会影响 proxyUrl 的 POST 请求（如果有）
             if (request.method === 'POST' && context.enableXhttp && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
                 const r = await handleXhttpClient(request, context);
                 if (r) {
@@ -150,8 +145,6 @@ export default {
                     });
                 }
                 
-                // 握手失败处理
-                // 如果不是管理路由，则认为是错误请求（可能是误入的表单提交或无效的 XHTTP 包）
                 if (!isManagementRoute) {
                     const contentType = request.headers.get('content-type') || '';
                     if (contentType.includes('application/x-www-form-urlencoded') || contentType.includes('multipart/form-data')) {
@@ -197,7 +190,7 @@ export default {
                 if (response) return response;
             }
 
-            // 8. 根路径与回落 (反代逻辑)
+            // 8. 根路径与回落
             if (path === '/') {
                 const url302 = await getConfig(env, 'URL302');
                 if (url302) return Response.redirect(url302, 302);

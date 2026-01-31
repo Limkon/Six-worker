@@ -1,13 +1,10 @@
 // src/utils/dns.js
 /**
  * 文件名: src/utils/dns.js
- * 审计与修复说明: 
- * 1. [Feature] 引入 Cache API 持久化：将 DNS 结果存储至 Cloudflare 边缘缓存，解决冷启动导致的缓存丢失问题。
- * 2. [Optimization] 分级缓存策略：内存 Map (L1) + Cache API (L2)，兼顾极致响应速度与跨实例持久性。
- * 3. [Optimization] 增加请求合并 (Request Coalescing) 机制，防止高并发下对同一域名的冗余查询。
- * 4. [Refactor] 提取核心解析逻辑至 performResolve，分离缓存控制与网络请求。
- * 5. [Security Fix] 保留原有的 NAT64 合成算法安全修复。
- * 6. [Keep] 保留所有原始安全检查（如内存溢出保护）与详细注释。
+ * 修复说明:
+ * 1. [Critical Fix] 将 L2 Cache (Cache API) 的写入操作隔离在独立的 try-catch 块中。
+ * 防止因 Cache API 配额不足或写入错误导致整个 DNS 解析函数抛出异常并返回 null（即：缓存失败不应导致解析失败）。
+ * 2. [Reliability] 保持使用 await 确保 Worker 结束前尝试写入完成，但容忍写入错误。
  */
 import { CONSTANTS } from '../constants.js';
 
@@ -270,19 +267,21 @@ export async function resolveToIPv6(domain, dnsServer) {
             dnsCache.set(cacheKey, { ip, expires: Date.now() + 60000 });
             
             // 存入 L2 (Cache API)
-            const cacheResponse = new Response(ip, {
-                headers: { 
-                    'Cache-Control': 'max-age=60', // 边缘缓存 60 秒
-                    'Content-Type': 'text/plain' 
-                }
-            });
-            
-            // 使用 waitUntil 确保异步写入，不阻塞当前查询响应
-            // 兼容可能不存在 event 对象的环境
-            if (typeof event !== 'undefined' && event.waitUntil) {
-                event.waitUntil(cache.put(cacheUrl, cacheResponse));
-            } else {
+            // [Fix] 将 Cache API 写入包裹在独立的 try-catch 中
+            // 确保即使写入失败（如配额超限），也不影响 DNS 解析结果的返回
+            try {
+                const cacheResponse = new Response(ip, {
+                    headers: { 
+                        'Cache-Control': 'max-age=60', // 边缘缓存 60 秒
+                        'Content-Type': 'text/plain' 
+                    }
+                });
+                
+                // ES Modules Worker 必须使用 await，否则 Worker 结束时会中断未完成的 Promise
+                // 如果写入失败，catch 会捕获，不会影响 ip 的返回
                 await cache.put(cacheUrl, cacheResponse);
+            } catch (cacheError) {
+                console.warn(`[DNS] Cache put failed for ${domain}:`, cacheError);
             }
         }
         return ip;

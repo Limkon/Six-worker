@@ -1,3 +1,9 @@
+/**
+ * 文件名: src/utils/helpers.js
+ * 修改内容: 
+ * 1. 修复 getKV 中 L2 Cache 写入逻辑，移除无效的 event.waitUntil 检查。
+ * 2. 改为显式 await cache.put，确保 Worker 结束前缓存已持久化。
+ */
 import { CONSTANTS } from '../constants.js';
 
 export const textDecoder = new TextDecoder();
@@ -203,4 +209,116 @@ export function isHostBanned(hostname, banList) {
         let regex = new RegExp(`^${regexPattern}$`, 'i');
         return regex.test(hostname);
     });
+}
+
+// ==========================================
+// [New Feature] 双层永久缓存系统 (L1 Memory + L2 Cache API)
+// ==========================================
+
+// L1: 内存缓存 (Worker 热启动期间有效，速度最快)
+const GLOBAL_KV_CACHE = new Map();
+
+// Cache API 使用的虚拟前缀 (用于伪装 Request)
+const CACHE_API_PREFIX = 'http://kv-cache.local/';
+
+// 定义已知的 KV 键列表 (用于全量刷新时清理 Cache API)
+// 包含所有 config.js 中可能用到的 Key
+const KNOWN_KV_KEYS = [
+    'UUID', 'KEY', 'ADMIN_PASS', 'PROXYIP', 'SOCKS5', 'GO2SOCKS5', 
+    'DNS64', 'BAN', 'DIS', 'TIME', 'UPTIME', 'REMOTE_CONFIG', 
+    'REMOTE_CONFIG_URL', 'URL', 'URL302', 'SUPER_PASSWORD', 'SAVED_DOMAIN'
+];
+
+/**
+ * 智能 KV 读取函数 (L1 Memory -> L2 Cache API -> L3 KV)
+ * 实现 Worker 重启后仍保留缓存，不消耗 KV 额度
+ * @param {Object} env Cloudflare Env 对象
+ * @param {String} key KV 键名
+ */
+export async function getKV(env, key) {
+    if (!env.KV || !key) return null;
+
+    // 1. [L1] 检查内存缓存 (最快)
+    if (GLOBAL_KV_CACHE.has(key)) {
+        return GLOBAL_KV_CACHE.get(key);
+    }
+
+    // 2. [L2] 检查 Cache API (跨实例持久化)
+    const cache = caches.default;
+    const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
+    
+    try {
+        const match = await cache.match(cacheKeyUrl);
+        if (match) {
+            const val = await match.text();
+            // 命中 L2 后，回填到 L1
+            GLOBAL_KV_CACHE.set(key, val);
+            console.log(`[KV] Hit Cache API for ${key}`);
+            return val;
+        }
+    } catch (e) {
+        console.error(`[KV] Cache API error for ${key}:`, e);
+    }
+
+    // 3. [L3] 真实读取 KV (消耗额度)
+    console.log(`[KV] MISS - Reading real KV for ${key}`);
+    let val = null;
+    try {
+        val = await env.KV.get(key);
+    } catch (e) {
+        console.error(`[KV] Real KV get failed:`, e);
+    }
+
+    // 4. 回写缓存 (如果 KV 中有值)
+    if (val !== null) {
+        // 写回 L1
+        GLOBAL_KV_CACHE.set(key, val);
+
+        // 写回 L2 (Cache API)
+        // 设置超长过期时间 (例如 30 天)，依靠 flush 清理
+        const response = new Response(val, {
+            headers: {
+                'Content-Type': 'text/plain',
+                'Cache-Control': 'max-age=2592000' // 30天
+            }
+        });
+        
+        try {
+            // 修复: 显式 await 确保写入成功，防止 Worker 提前终止导致缓存丢失
+            // 在 ES Module Worker 中，event 全局变量不可用，无法使用 waitUntil。
+            // 使用 await 可能会增加一点延迟，但能保证缓存写入的可靠性。
+            await cache.put(cacheKeyUrl, response);
+            console.log(`[KV] Cached to API for ${key}`);
+        } catch (e) {
+            console.error('[KV] Cache API put error:', e);
+        }
+    }
+
+    return val;
+}
+
+/**
+ * 清空 KV 缓存 (同时清理 L1 和 L2)
+ * @param {Array<string>} [keys] 指定要清除的键。如果不传，则清除所有已知键。
+ */
+export async function clearKVCache(keys) {
+    const cache = caches.default;
+    const targetKeys = keys && Array.isArray(keys) ? keys : KNOWN_KV_KEYS;
+
+    // 1. 清理 L1 内存
+    if (keys) {
+        keys.forEach(k => GLOBAL_KV_CACHE.delete(k));
+    } else {
+        GLOBAL_KV_CACHE.clear();
+    }
+
+    // 2. 清理 L2 Cache API
+    // Cache API 不支持批量删除，必须按 URL 逐个删除
+    const deletePromises = targetKeys.map(key => {
+        const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
+        return cache.delete(cacheKeyUrl).catch(e => console.warn(`[KV] Failed to delete cache for ${key}`, e));
+    });
+
+    await Promise.all(deletePromises);
+    console.log(`[KV] Cache flushed for keys: ${targetKeys.join(', ')}`);
 }
