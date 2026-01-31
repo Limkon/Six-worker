@@ -2,9 +2,8 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [优化] 引入 getKV 实现 KV 数据的内存级永久缓存 (L1+L2)，大幅降低 KV 读取消耗。
- * 2. [新增] initializeContext 检测 ?flush=1 参数，触发全量缓存清理 (L1+L2)。
- * 3. [Refactor] cleanConfigCache 升级为异步，确保 Cache API 清理完成。
+ * 1. [Fix] 修复 getConfig 在 KV 返回 null (未找到 Key) 时无法正确回退到 defaultValue 的问题。
+ * 导致 admin 页面 FileName 显示为 "null"。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID, getKV, clearKVCache } from './utils/helpers.js';
@@ -139,7 +138,9 @@ export async function getConfig(env, key, defaultValue = undefined) {
     if (!val && key === 'UUID') val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
     if (!val && key === 'KEY') val = env.KEY || env.TOKEN;
     
-    const finalVal = val !== undefined ? val : defaultValue;
+    // [修复] 增加对 null 的判断。如果 KV 中未找到(null)，则使用 defaultValue。
+    // 之前的逻辑 (val !== undefined) 会导致 null 被直接返回。
+    const finalVal = (val !== undefined && val !== null) ? val : defaultValue;
 
     configCache[key] = finalVal;
 
