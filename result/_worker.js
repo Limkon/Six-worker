@@ -259,10 +259,12 @@ function isHostBanned(hostname, banList) {
 }
 var GLOBAL_KV_CACHE =   new Map();
 var CACHE_API_PREFIX = "http://kv-cache.local/";
+var CACHE_NULL_SENTINEL = "##NULL##";
 var KNOWN_KV_KEYS = [
   "UUID",
   "KEY",
   "ADMIN_PASS",
+  "SUPER_PASSWORD",
   "PROXYIP",
   "SOCKS5",
   "GO2SOCKS5",
@@ -271,11 +273,18 @@ var KNOWN_KV_KEYS = [
   "DIS",
   "TIME",
   "UPTIME",
+  "SUBNAME",
+  "ADD.txt",
+  "ADDAPI",
+  "ADDNOTLS",
+  "ADDNOTLSAPI",
+  "ADDCSV",
+  "CFPORTS",
+  "BESTIP_SOURCES",
   "REMOTE_CONFIG",
   "REMOTE_CONFIG_URL",
   "URL",
   "URL302",
-  "SUPER_PASSWORD",
   "SAVED_DOMAIN"
 ];
 async function getKV(env, key) {
@@ -289,6 +298,11 @@ async function getKV(env, key) {
     const match = await cache.match(cacheKeyUrl);
     if (match) {
       const val2 = await match.text();
+      if (val2 === CACHE_NULL_SENTINEL) {
+        void(0);
+        GLOBAL_KV_CACHE.set(key, null);
+        return null;
+      }
       GLOBAL_KV_CACHE.set(key, val2);
       void(0);
       return val2;
@@ -303,20 +317,19 @@ async function getKV(env, key) {
   } catch (e) {
     void(0);
   }
-  if (val !== null) {
-    GLOBAL_KV_CACHE.set(key, val);
-    const response = new Response(val, {
-      headers: {
-        "Content-Type": "text/plain",
-        "Cache-Control": "max-age=2592000"
-      }
-    });
-    try {
-      await cache.put(cacheKeyUrl, response);
-      void(0);
-    } catch (e) {
-      void(0);
+  GLOBAL_KV_CACHE.set(key, val);
+  const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
+  const response = new Response(cacheVal, {
+    headers: {
+      "Content-Type": "text/plain",
+      "Cache-Control": "max-age=2592000"
     }
+  });
+  try {
+    await cache.put(cacheKeyUrl, response);
+    void(0);
+  } catch (e) {
+    void(0);
   }
   return val;
 }
@@ -420,13 +433,17 @@ async function getConfig(env, key, defaultValue = void 0) {
   if (env.KV) {
     val = await getKV(env, key);
   }
-  if (!val && remoteConfigCache.data && remoteConfigCache.data[key]) {
+  if ((val === null || val === void 0) && remoteConfigCache.data && remoteConfigCache.data[key]) {
     val = remoteConfigCache.data[key];
   }
-  if (!val && env[key]) val = env[key];
-  if (!val && key === "UUID") val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
+  if ((val === null || val === void 0) && env[key]) {
+    val = env[key];
+  }
+  if (!val && key === "UUID") {
+    val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
+  }
   if (!val && key === "KEY") val = env.KEY || env.TOKEN;
-  const finalVal = val !== void 0 ? val : defaultValue;
+  const finalVal = val !== void 0 && val !== null ? val : defaultValue;
   configCache[key] = finalVal;
   return finalVal;
 }
@@ -3533,8 +3550,11 @@ var index_default = {
       if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes(".")) {
         if (hostName !== lastSavedDomain) {
           lastSavedDomain = hostName;
-          context.waitUntil(env.KV.put("SAVED_DOMAIN", hostName));
-          context.waitUntil(executeWebDavPush(env, context, false));
+          context.waitUntil(Promise.all([
+            env.KV.put("SAVED_DOMAIN", hostName),
+            cleanConfigCache(["SAVED_DOMAIN"]),
+            executeWebDavPush(env, context, false)
+          ]));
         }
       }
       if (request.method === "POST" && context.enableXhttp && !isApiPostPath && url.searchParams.get("auth") !== "login" && path !== "/") {
