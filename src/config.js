@@ -3,6 +3,7 @@
  * 文件名: src/config.js
  * 修改说明:
  * 1. [Fix] getConfig 逻辑优化：严格区分 null(不存在) 和 ""(空字符串)，防止 KV 中显式设置的空值被 Remote/Env 覆盖。
+ * (UUID/KEY 除外，它们不能为空，仍会尝试回退)
  * 2. [Check] 配合 helpers.js 的 KNOWN_KV_KEYS 补全，确保缓存清理有效。
  */
 import { CONSTANTS } from './constants.js';
@@ -128,13 +129,9 @@ export async function getConfig(env, key, defaultValue = undefined) {
         val = await getKV(env, key);
     }
 
-    // 此时 val 可能是:
-    // 1. string (包括 ""): KV 中有值
-    // 2. null: KV 中无值
-    // 3. undefined: 没有 KV 绑定
-
-    // [Fix] 仅当 val 为 null/undefined (即 KV 中未定义) 时才查找后续源
-    // 之前使用 !val 会导致 KV 中显式设置的空字符串 "" 被 Remote/Env 覆盖
+    // [Fix] 逻辑核心修正：
+    // 仅当 val 为 null/undefined (即 KV 中未定义) 时才查找后续源。
+    // 之前使用 !val 会导致 KV 中显式设置的空字符串 "" 被 Remote/Env 覆盖。
     if ((val === null || val === undefined) && remoteConfigCache.data && remoteConfigCache.data[key]) {
         val = remoteConfigCache.data[key];
     }
@@ -143,15 +140,15 @@ export async function getConfig(env, key, defaultValue = undefined) {
         val = env[key];
     }
     
-    // 特殊回退逻辑：UUID 允许为空字符串吗？通常不允许，但如果用户强制设空，这里也会保留空。
-    // 不过 admin.js 保存时会删除空 key，所以通常 val 为 null，这里依然能正常回退。
+    // 特殊回退逻辑：UUID/KEY 必须有值，不能是空字符串。
+    // 如果 KV 显式设为空串，这里仍然允许回退到 Env，防止服务不可用。
     if (!val && key === 'UUID') {
          val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
     }
     if (!val && key === 'KEY') val = env.KEY || env.TOKEN;
     
     // [修复] 增加对 null 的判断。如果 KV 中未找到(null)，则使用 defaultValue。
-    // 注意：空字符串 "" 被视为有效值，不会回退到 defaultValue
+    // 注意：空字符串 "" 被视为有效值，不会回退到 defaultValue (除非 defaultValue 也是)
     const finalVal = (val !== undefined && val !== null) ? val : defaultValue;
 
     configCache[key] = finalVal;
