@@ -1,9 +1,9 @@
-// src/utils/helpers.js
 /**
  * 文件名: src/utils/helpers.js
  * 修改内容: 
- * 1. [Fix] 补全 KNOWN_KV_KEYS 列表，包含 admin.js 中使用的所有配置项 (如 SUBNAME, ADD.txt 等)。
- * 解决“保存配置后不生效”的 L2 缓存残留问题。
+ * 1. [Fix] 补全 KNOWN_KV_KEYS 列表，包含 admin.js 中使用的所有配置项。
+ * 2. [New] 引入 CACHE_NULL_SENTINEL 实现空值(null)缓存，防止缓存穿透。
+ * 3. [Opt] getKV 逻辑增强，支持识别和存储空值标记。
  */
 import { CONSTANTS } from '../constants.js';
 
@@ -222,6 +222,9 @@ const GLOBAL_KV_CACHE = new Map();
 // Cache API 使用的虚拟前缀 (用于伪装 Request)
 const CACHE_API_PREFIX = 'http://kv-cache.local/';
 
+// [新增] 定义空值缓存的特殊标记
+const CACHE_NULL_SENTINEL = "##NULL##"; 
+
 // 定义已知的 KV 键列表 (用于全量刷新时清理 Cache API)
 // [修复] 补全所有 admin.js 和 config.js 中使用的键，确保全量清理时能覆盖所有配置
 const KNOWN_KV_KEYS = [
@@ -239,6 +242,7 @@ const KNOWN_KV_KEYS = [
 
 /**
  * 智能 KV 读取函数 (L1 Memory -> L2 Cache API -> L3 KV)
+ * [修复] 增加对 null 值的缓存，防止缓存穿透导致 KV 读额度耗尽
  * 实现 Worker 重启后仍保留缓存，不消耗 KV 额度
  * @param {Object} env Cloudflare Env 对象
  * @param {String} key KV 键名
@@ -247,6 +251,7 @@ export async function getKV(env, key) {
     if (!env.KV || !key) return null;
 
     // 1. [L1] 检查内存缓存 (最快)
+    // Map 可以存储 null 值，如果 key 存在且值为 null，直接返回 null
     if (GLOBAL_KV_CACHE.has(key)) {
         return GLOBAL_KV_CACHE.get(key);
     }
@@ -259,7 +264,15 @@ export async function getKV(env, key) {
         const match = await cache.match(cacheKeyUrl);
         if (match) {
             const val = await match.text();
-            // 命中 L2 后，回填到 L1
+            
+            // [新增] 检测是否为缓存的空值标记
+            if (val === CACHE_NULL_SENTINEL) {
+                console.log(`[KV] Hit Cache API (NULL) for ${key}`);
+                GLOBAL_KV_CACHE.set(key, null);
+                return null;
+            }
+
+            // 命中有效值，回填到 L1
             GLOBAL_KV_CACHE.set(key, val);
             console.log(`[KV] Hit Cache API for ${key}`);
             return val;
@@ -277,27 +290,27 @@ export async function getKV(env, key) {
         console.error(`[KV] Real KV get failed:`, e);
     }
 
-    // 4. 回写缓存 (如果 KV 中有值)
-    if (val !== null) {
-        // 写回 L1
-        GLOBAL_KV_CACHE.set(key, val);
+    // 4. 回写缓存 (包括有效值 和 空值)
+    // [修复] 无论 val 是否为 null，都写入缓存
+    
+    // 写回 L1 (L1 Map 可以直接存 null)
+    GLOBAL_KV_CACHE.set(key, val);
 
-        // 写回 L2 (Cache API)
-        // 设置超长过期时间 (例如 30 天)，依靠 flush 清理
-        const response = new Response(val, {
-            headers: {
-                'Content-Type': 'text/plain',
-                'Cache-Control': 'max-age=2592000' // 30天
-            }
-        });
-        
-        try {
-            // 修复: 显式 await 确保写入成功，防止 Worker 提前终止导致缓存丢失
-            await cache.put(cacheKeyUrl, response);
-            console.log(`[KV] Cached to API for ${key}`);
-        } catch (e) {
-            console.error('[KV] Cache API put error:', e);
+    // 写回 L2 (Cache API 只能存 Response，null 需转为特殊标记)
+    const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
+    const response = new Response(cacheVal, {
+        headers: {
+            'Content-Type': 'text/plain',
+            'Cache-Control': 'max-age=2592000' // 30天
         }
+    });
+    
+    try {
+        // 修复: 显式 await 确保写入成功，防止 Worker 提前终止导致缓存丢失
+        await cache.put(cacheKeyUrl, response);
+        console.log(`[KV] Cached ${val === null ? 'NULL' : 'VALUE'} to API for ${key}`);
+    } catch (e) {
+        console.error('[KV] Cache API put error:', e);
     }
 
     return val;
@@ -319,6 +332,7 @@ export async function clearKVCache(keys) {
     }
 
     // 2. 清理 L2 Cache API
+    // Cache API 不支持批量删除，必须按 URL 逐个删除
     const deletePromises = targetKeys.map(key => {
         const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
         return cache.delete(cacheKeyUrl).catch(e => console.warn(`[KV] Failed to delete cache for ${key}`, e));
