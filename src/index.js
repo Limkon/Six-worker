@@ -2,8 +2,8 @@
 /**
  * 文件名: src/index.js
  * 修改说明:
- * 1. [Fix] handlePasswordSetup 中增加 await cleanConfigCache()，适配异步缓存清理接口。
- * 2. [Check] 确认整体流程与新的 getKV/L2缓存 机制兼容。
+ * 1. [Fix] 域名自动发现 (Step 4) 增加 cleanConfigCache(['SAVED_DOMAIN'])，确保新域名写入 KV 后立即清理缓存。
+ * 2. [Check] 保持 handlePasswordSetup 中的缓存清理逻辑。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -124,8 +124,13 @@ export default {
             if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     lastSavedDomain = hostName; 
-                    context.waitUntil(env.KV.put('SAVED_DOMAIN', hostName));
-                    context.waitUntil(executeWebDavPush(env, context, false));
+                    // [Fix] 并发执行 KV 写入、缓存清理和 WebDAV 推送
+                    // 必须清理 SAVED_DOMAIN 缓存，否则其他 Worker 仍会读取旧域名
+                    context.waitUntil(Promise.all([
+                        env.KV.put('SAVED_DOMAIN', hostName),
+                        cleanConfigCache(['SAVED_DOMAIN']),
+                        executeWebDavPush(env, context, false)
+                    ]));
                 }
             }
 
