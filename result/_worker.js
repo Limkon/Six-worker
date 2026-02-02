@@ -2283,7 +2283,7 @@ function generateBase64Subscription(protocol, id, hostName, tlsOnly, ctx, noLink
     const remark = match[3] || `${hostName}-${protocol.toUpperCase()}`;
     if (protocol === "xhttp") {
       const xhttpPath = "/" + id.substring(0, 8);
-      finalLinks.push(`vless://${id}@${ip}:${port}?encryption=none&security=tls&sni=${hostName}&fp=random&allowInsecure=1&type=xhttp&host=${hostName}&path=${encodeURIComponent(xhttpPath)}&mode=stream-one#${encodeURIComponent(remark)}`);
+      finalLinks.push(`vless://${id}@${ip}:${port}?encryption=none&security=tls&sni=${hostName}&fp=random&type=xhttp&host=${hostName}&path=${encodeURIComponent(xhttpPath)}&mode=stream-one#${encodeURIComponent(remark)}`);
     } else if (protocol === "vless") {
       const security = useTls ? `&security=tls&sni=${hostName}&fp=random` : "&security=none";
       finalLinks.push(`vless://${id}@${ip}:${port}?encryption=none${security}&type=ws&host=${hostName}&path=${encodeURIComponent(path)}#${encodeURIComponent(remark)}`);
