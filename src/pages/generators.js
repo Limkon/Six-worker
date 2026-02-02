@@ -4,6 +4,7 @@
  * 1. 修改混合订阅生成逻辑 (Clash/SingBox)，根据 ctx.disabledProtocols 过滤协议。
  * 2. 修复了 XHTTP 协议的 Headers 和 Path 生成。
  * 3. 保持了 Base64 链接生成的原有逻辑。
+ * 4. [本次修复] 移除了 XHTTP 链接中的 allowInsecure=1 参数，强制开启证书验证。
  */
 import { CONSTANTS } from '../constants.js';
 
@@ -25,7 +26,8 @@ export function generateBase64Subscription(protocol, id, hostName, tlsOnly, ctx,
         
         if (protocol === 'xhttp') {
              const xhttpPath = '/' + id.substring(0, 8);
-             finalLinks.push(`vless://${id}@${ip}:${port}?encryption=none&security=tls&sni=${hostName}&fp=random&allowInsecure=1&type=xhttp&host=${hostName}&path=${encodeURIComponent(xhttpPath)}&mode=stream-one#${encodeURIComponent(remark)}`);
+             // [修复] 移除 allowInsecure=1，确保安全
+             finalLinks.push(`vless://${id}@${ip}:${port}?encryption=none&security=tls&sni=${hostName}&fp=random&type=xhttp&host=${hostName}&path=${encodeURIComponent(xhttpPath)}&mode=stream-one#${encodeURIComponent(remark)}`);
         } else if (protocol === 'vless') {
              const security = useTls ? `&security=tls&sni=${hostName}&fp=random` : '&security=none';
              finalLinks.push(`vless://${id}@${ip}:${port}?encryption=none${security}&type=ws&host=${hostName}&path=${encodeURIComponent(path)}#${encodeURIComponent(remark)}`);
