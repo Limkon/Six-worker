@@ -1150,6 +1150,18 @@ async function resolveToIPv6(domain, dnsServer) {
   }
 }
 
+var IPV4_PRIVATE_REGEX = /^(?:127\.|10\.|172\.(?:1[6-9]|2\d|3[0-1])\.|192\.168\.|169\.254\.|0\.0\.0\.0|localhost)/;
+var IPV4_CGNAT_REGEX = /^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./;
+var IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/i;
+function isPrivateIP(address) {
+  if (!address) return true;
+  if (IPV4_PRIVATE_REGEX.test(address)) return true;
+  if (IPV4_CGNAT_REGEX.test(address)) return true;
+  if (address.includes(":")) {
+    if (IPV6_PRIVATE_REGEX.test(address.toLowerCase())) return true;
+  }
+  return false;
+}
 var CACHE_TTL = 10 * 60 * 1e3;
 var MAX_CACHE_SIZE3 = 500;
 var DirectFailureCache = class {
@@ -1579,7 +1591,8 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
   });
 }
 async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-  if (isHostBanned(addressRemote, ctx.banHosts)) {
+  if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) {
+    log(`[Block] TCP request blocked: ${addressRemote} is private or banned.`);
     safeCloseWebSocket(webSocket);
     return;
   }
@@ -1651,7 +1664,8 @@ async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressR
   }
 }
 async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-  if (isHostBanned(addressRemote, ctx.banHosts)) {
+  if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) {
+    log(`[Block] UDP request blocked: ${addressRemote} is private or banned.`);
     safeCloseWebSocket(webSocket);
     return;
   }
@@ -3470,6 +3484,8 @@ function getLoginHtml() {
 }
 
 var lastSavedDomain = "";
+var lastPushTime = 0;
+var PUSH_COOLDOWN = 24 * 60 * 60 * 1e3;
 function safeWaitUntil(ctx, promise) {
   if (ctx && typeof ctx.waitUntil === "function") {
     ctx.waitUntil(promise);
@@ -3484,6 +3500,9 @@ async function handlePasswordSetup(request, env, ctx) {
     if (!password || password.length < 6) return new Response("\u5BC6\u7801\u592A\u77ED", { status: 400 });
     if (!env.KV) return new Response("\u672A\u7ED1\u5B9A KV", { status: 500 });
     await env.KV.put("UUID", password);
+    const now = Date.now();
+    await env.KV.put("LAST_PUSH_TIME", now.toString());
+    lastPushTime = now;
     await cleanConfigCache();
     try {
       const appCtx = await initializeContext(request, env);
@@ -3549,12 +3568,28 @@ var index_default = {
       const isApiPostPath = isManagementRoute && (subPath === "/edit" || subPath === "/bestip");
       if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes(".")) {
         if (hostName !== lastSavedDomain) {
-          lastSavedDomain = hostName;
-          context.waitUntil(Promise.all([
-            env.KV.put("SAVED_DOMAIN", hostName),
-            cleanConfigCache(["SAVED_DOMAIN"]),
-            executeWebDavPush(env, context, false)
-          ]));
+          const now = Date.now();
+          if (now - lastPushTime > PUSH_COOLDOWN) {
+            let kvPushTimeStr = await env.KV.get("LAST_PUSH_TIME");
+            let kvPushTime = kvPushTimeStr ? parseInt(kvPushTimeStr) || 0 : 0;
+            lastPushTime = kvPushTime;
+            if (now - kvPushTime > PUSH_COOLDOWN) {
+              const currentRealDomain = await env.KV.get("SAVED_DOMAIN");
+              if (hostName !== currentRealDomain) {
+                void(0);
+                lastSavedDomain = hostName;
+                lastPushTime = now;
+                context.waitUntil(Promise.all([
+                  env.KV.put("SAVED_DOMAIN", hostName),
+                  env.KV.put("LAST_PUSH_TIME", now.toString()),
+                  cleanConfigCache(["SAVED_DOMAIN"]),
+                  executeWebDavPush(env, context, false)
+                ]));
+              } else {
+                lastSavedDomain = hostName;
+              }
+            }
+          }
         }
       }
       if (request.method === "POST" && context.enableXhttp && !isApiPostPath && url.searchParams.get("auth") !== "login" && path !== "/") {
