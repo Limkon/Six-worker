@@ -1,9 +1,8 @@
 /**
  * 文件名: src/handlers/webdav.js
- * 审计确认: 
- * 1. [Hardcode] 账号信息已硬编码，无需环境变量。
- * 2. [Default On] 功能默认关闭，配合硬编码凭据。
- * 3. [Auto Domain] 自动使用当前访问域名，解决 scheduled 事件无 Host 问题。
+ * 审计与修复: 
+ * 1. [Fix] 增加凭据非空检查，防止空配置导致 Fetch 异常。
+ * 2. [Optimization] 延长推送超时时间至 10s，适应网络波动。
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
@@ -12,29 +11,33 @@ import { CONSTANTS } from '../constants.js';
 
 export async function executeWebDavPush(env, ctx, force = false) {
     try {
-        // [修改] WebDAV 功能开关
-        // 默认值改为 '1' (开启)，因为既然已经硬编码了账号，通常意味着需要直接使用。
-        // 你依然可以在环境变量中设置 WEBDAV = 0 来强制关闭。
+        // WebDAV 功能开关 (默认关闭，除非环境变量设为 1 或强制执行)
         const enableWebdav = await getConfig(env, 'WEBDAV', '0');
         if (enableWebdav !== '1' && !force) {
             return;
         }
 
-        // 1. [硬编码] WebDAV 配置信息
-        // 直接使用指定的账号密码，不再读取环境变量
-        const rawWebdavUrl = '';
-        const webdavUser = '';
-        const webdavPass = '';
+        // 1. [配置区] 必须在此处填写您的坚果云/WebDAV 信息
+        // 注意：如果不填写，脚本会自动跳过 WebDAV 推送，不会报错
+        const rawWebdavUrl = ''; // 示例: https://dav.jianguoyun.com/dav/
+        const webdavUser = '';   // 示例: your_email@example.com
+        const webdavPass = '';   // 示例: 应用专用密码
 
-        // 标准化 URL，确保以 / 结尾
+        // [Security Fix] 检查凭据是否已配置
+        if (!rawWebdavUrl || !webdavUser || !webdavPass) {
+            // 仅在显式开启或强制推送时才警告，避免日志噪音
+            if (enableWebdav === '1' || force) {
+                console.warn('[WebDAV] Credentials missing! Please configure rawWebdavUrl/User/Pass in src/handlers/webdav.js');
+            }
+            return;
+        }
+
         const webdavUrl = rawWebdavUrl.endsWith('/') ? rawWebdavUrl : `${rawWebdavUrl}/`;
-
         console.log(`[WebDAV] Starting push to ${webdavUrl}`);
 
         // 2. 准备请求上下文 (自动域名发现逻辑)
         // 优先读取环境变量 -> 其次读取 KV 自动保存的域名
         let hostName = await getConfig(env, 'WORKER_DOMAIN');
-        
         if (!hostName && env.KV) {
             hostName = await env.KV.get('SAVED_DOMAIN');
             if (hostName) {
@@ -43,9 +46,7 @@ export async function executeWebDavPush(env, ctx, force = false) {
         }
 
         if (!hostName) {
-            // 如果既没有环境变量，KV 里也没存过（说明从未访问过），则无法生成有效订阅链接
-            console.warn('[WebDAV] Warning: Domain not found! Please access your Worker url at least once to auto-detect domain.');
-            // 回退到本地占位符，避免程序崩溃，但生成的链接将不可用
+            console.warn('[WebDAV] Warning: Domain not found! Please access your Worker url at least once.');
             hostName = 'worker.local';
         }
 
@@ -56,8 +57,6 @@ export async function executeWebDavPush(env, ctx, force = false) {
         // 4. 调用 handleSubscription 生成订阅内容
         // 构造模拟请求对象
         const mockRequest = new Request(`https://${hostName}/${ctx.dynamicUUID}/${allPathHash}`);
-        
-        // 生成订阅内容
         const response = await handleSubscription(mockRequest, env, ctx, allPathHash, hostName);
 
         if (!response || !response.ok) {
@@ -71,16 +70,13 @@ export async function executeWebDavPush(env, ctx, force = false) {
             // 尝试将 Base64 订阅内容解码为明文，方便在网盘直接查看
             const decoded = atob(content);
             content = decoded;
-        } catch (e) {
-            // 如果不是 Base64，保持原样
-        }
+        } catch (e) {}
 
         // 6. 简单的去重处理
         const uniqueLines = [...new Set(content.split('\n'))].filter(line => line.trim() !== '');
         const finalContent = uniqueLines.join('\n');
 
         // 7. 检查内容 Hash (防重复推送)
-        // 只有在非强制模式(force=false)下才检查，手动触发或配置变更(force=true)时跳过检查
         if (env.KV && !force) {
             const currentHash = await sha1(finalContent);
             const lastHash = await env.KV.get('WEBDAV_HASH');
@@ -104,9 +100,9 @@ export async function executeWebDavPush(env, ctx, force = false) {
         const targetUrl = `${webdavUrl}${fileName}`;
         const auth = btoa(`${webdavUser}:${webdavPass}`);
         
-        // 9. 执行推送 (带 5s 超时控制)
+        // 9. 执行推送 (带 10s 超时控制)
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // [Opt] 延长至 10s
 
         const pushRequest = fetch(targetUrl, {
             method: 'PUT',
