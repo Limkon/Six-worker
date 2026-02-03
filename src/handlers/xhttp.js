@@ -1,19 +1,15 @@
 /**
  * 文件名: src/handlers/xhttp.js
  * 修正说明:
- * 1. [Optimization] 优化 UUID 校验，复用 stringifyUUID，避免重复解析配置字符串。
- * 2. [Optimization] 优化 IPv6 解析逻辑，移除低效的 reduce，使用循环 + DataView。
- * 3. [Refactor] 统一使用 DataView 读取端口，与 VLESS/Trojan 保持代码风格一致。
+ * 1. [Fix] 移除 reader.read() 的无效参数，避免无意义的内存分配。
+ * 2. [Refactor] 移除未使用的死代码 (get_xhttp_buffer)。
+ * 3. [Fix] Header 解析失败时显式 cancel reader，防止资源泄漏。
+ * 4. [Feat] 增加 Header 解析错误的日志记录，便于排查。
+ * 5. [Fix] 保留对客户端主动断开连接的异常捕获。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
-import { isHostBanned, stringifyUUID, textDecoder } from '../utils/helpers.js'; // 引入通用工具
-
-const XHTTP_BUFFER_SIZE = 128 * 1024;
-
-function get_xhttp_buffer(size) {
-    return new Uint8Array(new ArrayBuffer(size || XHTTP_BUFFER_SIZE));
-}
+import { isHostBanned, stringifyUUID, textDecoder } from '../utils/helpers.js';
 
 function concat_typed_arrays(first, ...args) {
     let len = first.length;
@@ -33,9 +29,8 @@ async function read_at_least(reader, minBytes, initialBuffer) {
     let currentBuffer = initialBuffer || new Uint8Array(0);
     
     while (currentBuffer.length < minBytes) {
-        const needed = minBytes - currentBuffer.length;
-        const bufferSize = Math.max(needed, 4096); 
-        const { value, done } = await reader.read(new Uint8Array(bufferSize));
+        // [Fix] reader.read() 不接受参数，移除无用的 new Uint8Array 分配
+        const { value, done } = await reader.read();
         
         if (done) return { value: currentBuffer, done: true };
         
@@ -48,45 +43,49 @@ async function read_at_least(reader, minBytes, initialBuffer) {
 
 async function read_xhttp_header(readable, ctx) {
     const reader = readable.getReader(); 
+    
+    // 内部辅助：失败时清理流并返回错误信息
+    const fail = async (msg) => {
+        try { await reader.cancel(msg); } catch (_) {}
+        return msg;
+    };
+
     try {
         // 1. 读取基础头部结构：Version(1) + UUID(16) + PBLen(1) = 18字节
         let { value: cache, done } = await read_at_least(reader, 18);
-        if (cache.length < 18) return 'header too short';
+        if (cache.length < 18) return fail('header too short');
 
         const version = cache[0];
         
-        // [Optimization] 使用 stringifyUUID 进行字符串比对，避免每次手动解析 Hex
+        // [Optimization] 使用 stringifyUUID 进行字符串比对
         const uuidStr = stringifyUUID(cache.subarray(1, 17));
         const expectedID = ctx.userID;
         const expectedIDLow = ctx.userIDLow;
 
-        // 简单的字符串比较（不区分大小写）
         if (uuidStr !== expectedID && (!expectedIDLow || uuidStr !== expectedIDLow)) {
-            return 'invalid UUID';
+            return fail('invalid UUID');
         }
         
         const pb_len = cache[17];
-        // 计算直到 Address Type 结束需要的最小长度
         // Base(18) + PB(pb_len) + Cmd(1) + Port(2) + Atyp(1) = 22 + pb_len
         const min_len_until_atyp = 22 + pb_len;
         
         if (cache.length < min_len_until_atyp) {
             const r = await read_at_least(reader, min_len_until_atyp, cache);
             cache = r.value;
-            if (cache.length < min_len_until_atyp) return 'header too short for metadata';
+            if (cache.length < min_len_until_atyp) return fail('header too short for metadata');
         }
 
         const cmdIndex = 18 + pb_len;
         const cmd = cache[cmdIndex];
-        if (cmd !== 1) return 'unsupported command: ' + cmd;
+        if (cmd !== 1) return fail('unsupported command: ' + cmd);
         
         const portIndex = cmdIndex + 1;
-        // [Optimization] 使用 DataView 读取端口
         const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
         const port = view.getUint16(portIndex, false); // Big-Endian
         
         const atype = cache[portIndex + 2];
-        const addr_body_idx = portIndex + 3; // 指向地址具体内容的开始
+        const addr_body_idx = portIndex + 3; 
 
         let header_len = -1;
         
@@ -98,18 +97,18 @@ async function read_xhttp_header(readable, ctx) {
             if (cache.length < addr_body_idx + 1) {
                  const r = await read_at_least(reader, addr_body_idx + 1, cache);
                  cache = r.value;
-                 if (cache.length < addr_body_idx + 1) return 'header too short for domain len';
+                 if (cache.length < addr_body_idx + 1) return fail('header too short for domain len');
             }
             const domain_len = cache[addr_body_idx];
             header_len = addr_body_idx + 1 + domain_len;
         } else {
-            return 'read address type failed: ' + atype;
+            return fail('read address type failed: ' + atype);
         }
         
         if (cache.length < header_len) {
             const r = await read_at_least(reader, header_len, cache);
             cache = r.value;
-            if (cache.length < header_len) return 'header too short for full address';
+            if (cache.length < header_len) return fail('header too short for full address');
         }
         
         // 解析地址
@@ -119,7 +118,6 @@ async function read_xhttp_header(readable, ctx) {
         try {
             switch (atype) {
                 case CONSTANTS.ADDRESS_TYPE_IPV4:
-                    // [Optimization] 使用 join
                     hostname = cache.subarray(addr_val_idx, addr_val_idx + 4).join('.');
                     break;
                 case CONSTANTS.ADDRESS_TYPE_URL:
@@ -129,9 +127,7 @@ async function read_xhttp_header(readable, ctx) {
                     );
                     break;
                 case CONSTANTS.ADDRESS_TYPE_IPV6:
-                    // [Optimization] 使用高效循环 + DataView (仿照 VLESS)
                     const ipv6 = [];
-                    // 复用 view (注意偏移量需要累加)
                     for (let i = 0; i < 8; i++) {
                         ipv6.push(view.getUint16(addr_val_idx + i * 2, false).toString(16));
                     }
@@ -139,10 +135,10 @@ async function read_xhttp_header(readable, ctx) {
                     break;
             }
         } catch (e) {
-            return 'failed to parse hostname: ' + e.message;
+            return fail('failed to parse hostname: ' + e.message);
         }
         
-        if (!hostname) return 'failed to parse hostname';
+        if (!hostname) return fail('failed to parse hostname');
         
         const data = cache.subarray(header_len);
         
@@ -234,6 +230,8 @@ export async function handleXhttpClient(request, ctx) {
     try {
         const result = await read_xhttp_header(request.body, ctx);
         if (typeof result === 'string') {
+            // [Log] 记录具体的解析错误，方便排查
+            console.warn('[XHTTP Error] Header parsing failed:', result);
             return null;
         }
         
@@ -252,6 +250,9 @@ export async function handleXhttpClient(request, ctx) {
                 const writer = remoteSocket.writable.getWriter();
                 try {
                     await upload_to_remote_xhttp(writer, httpx);
+                } catch (e) {
+                    // [Fix] 捕获客户端断开连接导致的读取错误，避免触发 Worker 异常日志
+                    // 这是一个预期内的网络行为（如用户关闭页面），不需要抛出错误
                 } finally {
                     try { await writer.close(); } catch (_) {}
                 }
