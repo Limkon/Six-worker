@@ -3,8 +3,8 @@
  * 文件名: src/index.js
  * 修改说明:
  * 1. [Feature] 实现 24 小时“冷静期”机制。
- * 2. [Opt] 引入 LAST_PUSH_TIME 持久化存储，防止 Worker 重启导致防抖失效。
- * 3. [Logic] 仅当距离上次推送超过 24 小时且域名发生变化时，才触发 WebDAV 同步。
+ * 2. [Optimization] 重启后增加 KV 值比对，避免伪变更触发推送。
+ * 3. [Logic] 仅当距离上次推送超过 24 小时且域名发生真实变化时，才触发同步。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -18,7 +18,7 @@ import { CONSTANTS } from './constants.js';
 import { getPasswordSetupHtml, getLoginHtml } from './templates/auth.js';
 
 // --- 全局内存缓存 ---
-let lastSavedDomain = ''; // 上次保存的域名
+let lastSavedDomain = ''; // 上次保存的域名 (内存缓存)
 let lastPushTime = 0;     // 上次推送的时间戳 (内存缓存)
 const PUSH_COOLDOWN = 24 * 60 * 60 * 1000; // 冷却时间：24小时
 
@@ -132,34 +132,42 @@ export default {
                 if (hostName !== lastSavedDomain) {
                     const now = Date.now();
                     
-                    // A. 内存快速检查：如果内存记录显示还在冷却期，直接跳过 (节省 KV 读操作)
+                    // A. 内存快速检查 (如果内存还在冷却期，跳过)
                     if (now - lastPushTime > PUSH_COOLDOWN) {
-                        // B. KV 权威检查：内存可能因为重启而清零，需从 KV 获取上次真实推送时间
-                        // 注意：这里用 waitUntil 异步读取可能来不及阻断，所以需要 await
-                        // 但为了性能，我们可以接受第一次请求的延迟，或者快速读取
-                        let kvPushTimeStr = await env.KV.get('LAST_PUSH_TIME');
-                        let kvPushTime = kvPushTimeStr ? parseInt(kvPushTimeStr) : 0;
                         
-                        // 更新内存缓存
+                        // B. KV 权威检查 (防止重启后内存丢失导致的误判)
+                        // 读取上次推送时间
+                        let kvPushTimeStr = await env.KV.get('LAST_PUSH_TIME');
+                        let kvPushTime = kvPushTimeStr ? (parseInt(kvPushTimeStr) || 0) : 0;
+                        
+                        // 更新内存时间戳
                         lastPushTime = kvPushTime;
 
                         if (now - kvPushTime > PUSH_COOLDOWN) {
-                            console.log(`[Auto-Discovery] Cooldown passed. Updating domain to ${hostName}`);
-                            lastSavedDomain = hostName;
-                            lastPushTime = now; // 更新内存时间
+                            // [Optimization] 关键修复: 读取 KV 里的真实域名进行比对
+                            // 如果 Worker 刚重启，lastSavedDomain 为空，但 KV 可能已经是最新域名
+                            // 此时若不比对 KV，会误认为域名变更而触发推送
+                            const currentRealDomain = await env.KV.get('SAVED_DOMAIN');
                             
-                            // 并发执行：保存域名 + 保存时间戳 + 清理缓存 + WebDAV 推送
-                            context.waitUntil(Promise.all([
-                                env.KV.put('SAVED_DOMAIN', hostName),
-                                env.KV.put('LAST_PUSH_TIME', now.toString()), // 持久化新的推送时间
-                                cleanConfigCache(['SAVED_DOMAIN']),
-                                executeWebDavPush(env, context, false)
-                            ]));
-                        } else {
-                             // console.log(`[Auto-Discovery] Ignored change (KV Cooldown): ${hostName}`);
+                            if (hostName !== currentRealDomain) {
+                                console.log(`[Auto-Discovery] Cooldown passed. Updating domain to ${hostName}`);
+                                
+                                lastSavedDomain = hostName;
+                                lastPushTime = now;
+                                
+                                // 并发执行
+                                context.waitUntil(Promise.all([
+                                    env.KV.put('SAVED_DOMAIN', hostName),
+                                    env.KV.put('LAST_PUSH_TIME', now.toString()), 
+                                    cleanConfigCache(['SAVED_DOMAIN']),
+                                    executeWebDavPush(env, context, false)
+                                ]));
+                            } else {
+                                // 域名其实没变，只是内存丢失了。静默更新内存即可。
+                                lastSavedDomain = hostName;
+                                // console.log(`[Auto-Discovery] Domain matches KV. Syncing memory only.`);
+                            }
                         }
-                    } else {
-                        // console.log(`[Auto-Discovery] Ignored change (Memory Cooldown): ${hostName}`);
                     }
                 }
             }
