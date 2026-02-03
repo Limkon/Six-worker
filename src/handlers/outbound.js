@@ -1,39 +1,40 @@
 /**
  * 文件名: src/handlers/outbound.js
- * 审计与修复说明:
- * 1. [Fix] 修复 SOCKS5 UDP BND.ADDR 为 0.0.0.0 时连接失败的问题 (Fallback to Proxy IP)。
- * 2. [Refactor] 提取 handleSocks5UDPFlow 通用逻辑，同时支持 Direct SOCKS5 和 ProxyIP SOCKS5。
- * 3. [Fix] 解决 ProxyIP 链路无法进行 UDP 转发的问题 (尝试 UDP Associate)。
- * 4. [Robustness] 增强 stripSocks5UdpHeader 健壮性，防止无效数据包破坏 WebSocket流。
- * 5. [Security] 新增 isPrivateIP 检查，强制阻断对内网 IP 的连接请求，防止 Cloudflare 滥用封号。
+ * 核心功能: 处理出站连接 (TCP/UDP)，支持 Direct, ProxyIP, SOCKS5, NAT64。
+ * 包含修复: 
+ * 1. SOCKS5 UDP Associate (BND.ADDR 0.0.0.0 Fix).
+ * 2. 严格的 Cloudflare 防风控机制 (禁止内网 IP).
+ * 3. 增强的正则匹配性能.
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
 import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned, textEncoder } from '../utils/helpers.js';
 
-// --- 安全检查：私有 IP 阻断 (防止 Cloudflare 风控核心逻辑) ---
+// --- [Security] 安全检查：私有 IP 阻断 (防止风控核心) ---
+// 使用预编译正则提高性能，严格匹配小数点防止误杀公网 IP (如 10.x vs 104.x)
+const IPV4_PRIVATE_REGEX = /^(?:127\.|10\.|172\.(?:1[6-9]|2\d|3[0-1])\.|192\.168\.|169\.254\.|0\.0\.0\.0|localhost)/;
+const IPV4_CGNAT_REGEX = /^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./; // 100.64.0.0/10
+const IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/i; // fc00::, fe80::, ::1
+
 function isPrivateIP(address) {
     if (!address) return true; // 空地址视为风险
-
-    // IPv4 Private Ranges & Localhost
-    // 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 192.168.0.0/16
-    if (/^(?:10|127|169\.254|192\.168|localhost)/.test(address)) return true;
     
-    // 172.16.0.0/12 (172.16.x.x - 172.31.x.x)
-    if (/^172\.(?:1[6-9]|2\d|3[0-1])\./.test(address)) return true;
+    // 检查 IPv4 私有网段
+    if (IPV4_PRIVATE_REGEX.test(address)) return true;
     
-    // Carrier Grade NAT (100.64.0.0/10) - 通常不应通过公网代理访问
-    if (/^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./.test(address)) return true;
+    // 检查 Carrier Grade NAT (通常不应通过公网代理访问)
+    if (IPV4_CGNAT_REGEX.test(address)) return true;
 
-    // IPv6 Private/Local Ranges
-    // ::1 (Loopback), fc00::/7 (Unique Local), fe80::/10 (Link Local)
-    if (/^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):/.test(address.toLowerCase())) return true;
+    // 检查 IPv6 (Unique Local, Link Local, Loopback)
+    if (address.includes(':')) {
+        if (IPV6_PRIVATE_REGEX.test(address.toLowerCase())) return true;
+    }
 
     return false;
 }
 
-// --- 熔断缓存机制 (保持不变) ---
+// --- 熔断缓存机制 ---
 const CACHE_TTL = 10 * 60 * 1000;
 const MAX_CACHE_SIZE = 500; 
 
@@ -107,8 +108,7 @@ function shouldUseSocks5(addressRemote, go2socks5) {
 
 function parseSocks5Config(address) {
     if (!address) return null;
-    // 支持直接传入对象 (ProxyIP场景)
-    if (typeof address === 'object') return address;
+    if (typeof address === 'object') return address; // 支持直接传入对象
 
     const cleanAddr = address.includes('://') ? address.split('://')[1] : address;
     const lastAtIndex = cleanAddr.lastIndexOf("@");
@@ -229,8 +229,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
         socket.isUdpControl = true;
         socket.bndAddr = bndAddr;
         socket.bndPort = bndPort;
-        // 保存原始配置的 Hostname，用于 BND.ADDR = 0.0.0.0 时的 Fallback
-        socket.originalHost = hostname; 
+        socket.originalHost = hostname; // 用于 BND.ADDR 0.0.0.0 的 Fallback
         
         return socket;
     }
@@ -314,7 +313,6 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     if (proxyIP) {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(proxyIP, portRemote);
         try {
-            // 注意：此处仅做 TCP 连接测试或基础连接。SOCKS5 UDP 逻辑已移至 handleUDPOutBound 的 proxyIPRetry 中
             return await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, PROXY_TIMEOUT, log);
         } catch (err2) {
             log(`[connect] Phase 2 (ProxyIP: ${proxyHost}) failed: ${err2.message}`);
@@ -362,8 +360,6 @@ function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
     return new Uint8Array([...rsvFrag, atyp, ...addrBytes, ...portBytes]);
 }
 
-// [Fix] 更加鲁棒的 Header 移除逻辑
-// 如果数据不足以包含 Header，则返回 null，调用者应丢弃或等待（此处简化为丢弃）
 function stripSocks5UdpHeader(buffer) {
     if (buffer.length < 4) return null; // Invalid packet
     let offset = 4;
@@ -449,12 +445,10 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
 }
 
 // [Refactor] 提取通用 SOCKS5 UDP 流量处理
-// 包含: Relay 连接 + Header 封装 + Header 解封装
 async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, finalizeConnectionCallback) {
     const { bndAddr, bndPort, originalHost } = controlSocket;
     
     // [Fix] 处理 BND.ADDR 为 0.0.0.0 或 :: 的情况
-    // RFC 1928: If BND.ADDR is 0.0.0.0, sending to the IP that originated the TCP connection.
     let targetHost = bndAddr;
     const isZeroIP = bndAddr === '0.0.0.0' || bndAddr === '::' || bndAddr.startsWith('0:0:0:0') || bndAddr === '[::]';
     if (isZeroIP && originalHost) {
@@ -512,7 +506,7 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
 }
 
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-    // [Security] 强制阻断私有 IP 或 违禁 Host
+    // [Security] 强制阻断私有 IP 或 违禁 Host (核心安全修复)
     if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) { 
         log(`[Block] TCP request blocked: ${addressRemote} is private or banned.`);
         safeCloseWebSocket(webSocket); 
