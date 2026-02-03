@@ -1796,7 +1796,6 @@ async function handleWebSocketRequest(request, ctx) {
             try {
               activeWriter = activeSocket.writable.getWriter();
             } catch (e) {
-              log("Failed to get writer for new socket", e);
               safeCloseWebSocket(webSocket);
               return;
             }
@@ -1812,7 +1811,7 @@ async function handleWebSocketRequest(request, ctx) {
       headerBuffer = concatUint8(headerBuffer, chunkArr);
       if (headerBuffer.length > MAX_HEADER_BUFFER) {
         clearTimeout(timeoutTimer);
-        throw new Error(`Header buffer limit exceeded (${headerBuffer.length} > ${MAX_HEADER_BUFFER})`);
+        throw new Error(`Header buffer limit exceeded`);
       }
       if (socks5State < 2) {
         const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
@@ -1835,10 +1834,10 @@ async function handleWebSocketRequest(request, ctx) {
         const pName = result.protocol;
         const isSocksDisabled = pName === "socks5" && ctx.disabledProtocols.includes("socks");
         if (ctx.disabledProtocols.includes(pName) || isSocksDisabled) {
-          throw new Error(`Protocol ${pName.toUpperCase()} is disabled by admin`);
+          throw new Error(`Protocol ${pName} is disabled`);
         }
         const { protocol, addressRemote, portRemote, addressType, rawDataIndex, isUDP } = result;
-        log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote} (UDP: ${isUDP})`);
+        log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote}`);
         if (isHostBanned(addressRemote, ctx.banHosts)) {
           throw new Error(`Blocked: ${addressRemote}`);
         }
@@ -1885,7 +1884,6 @@ async function handleWebSocketRequest(request, ctx) {
         } catch (e) {
         }
       }
-      log("Client WebSocket closed");
     },
     abort(reason) {
       if (activeWriter) {
@@ -1900,7 +1898,6 @@ async function handleWebSocketRequest(request, ctx) {
         } catch (e) {
         }
       }
-      log("WebSocket aborted", reason);
       safeCloseWebSocket(webSocket);
     }
   })).catch((err) => {
@@ -1917,7 +1914,6 @@ async function handleWebSocketRequest(request, ctx) {
       } catch (e) {
       }
     }
-    log("Stream processing failed", err.toString());
     safeCloseWebSocket(webSocket);
   });
   if (ctx.waitUntil) ctx.waitUntil(streamPromise);
@@ -1989,7 +1985,6 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
         if (!readableStreamCancel) controller.close();
       });
       webSocketServer.addEventListener("error", (err) => {
-        log("WebSocket server error");
         controller.error(err);
       });
       const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
@@ -2920,6 +2915,12 @@ async function executeWebDavPush(env, ctx, force = false) {
     const rawWebdavUrl = "";
     const webdavUser = "";
     const webdavPass = "";
+    if (!rawWebdavUrl || !webdavUser || !webdavPass) {
+      if (enableWebdav === "1" || force) {
+        void(0);
+      }
+      return;
+    }
     const webdavUrl = rawWebdavUrl.endsWith("/") ? rawWebdavUrl : `${rawWebdavUrl}/`;
     void(0);
     let hostName = await getConfig(env, "WORKER_DOMAIN");
@@ -2967,7 +2968,7 @@ async function executeWebDavPush(env, ctx, force = false) {
     const targetUrl = `${webdavUrl}${fileName}`;
     const auth = btoa(`${webdavUser}:${webdavPass}`);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5e3);
+    const timeoutId = setTimeout(() => controller.abort(), 1e4);
     const pushRequest = fetch(targetUrl, {
       method: "PUT",
       headers: {
