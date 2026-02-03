@@ -5,11 +5,33 @@
  * 2. [Refactor] 提取 handleSocks5UDPFlow 通用逻辑，同时支持 Direct SOCKS5 和 ProxyIP SOCKS5。
  * 3. [Fix] 解决 ProxyIP 链路无法进行 UDP 转发的问题 (尝试 UDP Associate)。
  * 4. [Robustness] 增强 stripSocks5UdpHeader 健壮性，防止无效数据包破坏 WebSocket流。
+ * 5. [Security] 新增 isPrivateIP 检查，强制阻断对内网 IP 的连接请求，防止 Cloudflare 滥用封号。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
 import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned, textEncoder } from '../utils/helpers.js';
+
+// --- 安全检查：私有 IP 阻断 (防止 Cloudflare 风控核心逻辑) ---
+function isPrivateIP(address) {
+    if (!address) return true; // 空地址视为风险
+
+    // IPv4 Private Ranges & Localhost
+    // 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 192.168.0.0/16
+    if (/^(?:10|127|169\.254|192\.168|localhost)/.test(address)) return true;
+    
+    // 172.16.0.0/12 (172.16.x.x - 172.31.x.x)
+    if (/^172\.(?:1[6-9]|2\d|3[0-1])\./.test(address)) return true;
+    
+    // Carrier Grade NAT (100.64.0.0/10) - 通常不应通过公网代理访问
+    if (/^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./.test(address)) return true;
+
+    // IPv6 Private/Local Ranges
+    // ::1 (Loopback), fc00::/7 (Unique Local), fe80::/10 (Link Local)
+    if (/^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):/.test(address.toLowerCase())) return true;
+
+    return false;
+}
 
 // --- 熔断缓存机制 (保持不变) ---
 const CACHE_TTL = 10 * 60 * 1000;
@@ -490,7 +512,12 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
 }
 
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-    if (isHostBanned(addressRemote, ctx.banHosts)) { safeCloseWebSocket(webSocket); return; }
+    // [Security] 强制阻断私有 IP 或 违禁 Host
+    if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) { 
+        log(`[Block] TCP request blocked: ${addressRemote} is private or banned.`);
+        safeCloseWebSocket(webSocket); 
+        return; 
+    }
 
     const prepareRetry = () => { remoteSocketWrapper.value = null; remoteSocketWrapper.isConnecting = true; };
     const finalizeConnection = (socket) => { remoteSocketWrapper.value = socket; remoteSocketWrapper.isConnecting = false; };
@@ -552,7 +579,12 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
 }
 
 export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-    if (isHostBanned(addressRemote, ctx.banHosts)) { safeCloseWebSocket(webSocket); return; }
+    // [Security] 强制阻断私有 IP 或 违禁 Host
+    if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) { 
+        log(`[Block] UDP request blocked: ${addressRemote} is private or banned.`);
+        safeCloseWebSocket(webSocket); 
+        return; 
+    }
     
     const prepareRetry = () => { remoteSocketWrapper.value = null; remoteSocketWrapper.isConnecting = true; };
     const finalizeConnection = (socket) => { remoteSocketWrapper.value = socket; remoteSocketWrapper.isConnecting = false; };
