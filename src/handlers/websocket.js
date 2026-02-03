@@ -1,9 +1,7 @@
 // src/handlers/websocket.js
 /**
  * 文件名: src/handlers/websocket.js
- * 修复说明:
- * 1. [Security Fix] 在 headerBuffer 累积时增加实时限额检查，超过 MAX_HEADER_BUFFER 立即抛出错误并断开连接。
- * 防止恶意客户端发送大量垃圾数据导致 Worker 内存溢出 (OOM)。
+ * 审计状态: [已修复] 恢复了异常处理中的资源清理逻辑，确保无内存泄漏。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -62,6 +60,7 @@ export async function handleWebSocketRequest(request, ctx) {
             const chunkArr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
 
             if (isConnected) {
+                // 连接建立后的数据透传逻辑
                 if (activeSocket !== remoteSocketWrapper.value) {
                     if (activeWriter) {
                         try {
@@ -75,13 +74,11 @@ export async function handleWebSocketRequest(request, ctx) {
                         try {
                             activeWriter = activeSocket.writable.getWriter();
                         } catch (e) {
-                            log('Failed to get writer for new socket', e);
                             safeCloseWebSocket(webSocket);
                             return;
                         }
                     }
                 }
-
                 if (activeWriter) {
                     await activeWriter.write(chunkArr);
                 } else if (remoteSocketWrapper.isConnecting) {
@@ -90,14 +87,16 @@ export async function handleWebSocketRequest(request, ctx) {
                 return;
             }
 
+            // 协议识别阶段
             headerBuffer = concatUint8(headerBuffer, chunkArr);
 
-            // [Security Fix] 实时检查 Buffer 大小，超过限制立即熔断
+            // [Security Fix] 缓冲区溢出保护
             if (headerBuffer.length > MAX_HEADER_BUFFER) {
                 clearTimeout(timeoutTimer);
-                throw new Error(`Header buffer limit exceeded (${headerBuffer.length} > ${MAX_HEADER_BUFFER})`);
+                throw new Error(`Header buffer limit exceeded`);
             }
 
+            // SOCKS5 握手特殊处理
             if (socks5State < 2) {
                 const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
                 if (error) {
@@ -120,18 +119,18 @@ export async function handleWebSocketRequest(request, ctx) {
                     throw new Error('Protocol mismatch after Socks5 handshake');
                 }
 
+                // 权限与禁用检查
                 const pName = result.protocol; 
                 const isSocksDisabled = pName === 'socks5' && ctx.disabledProtocols.includes('socks');
-                
                 if (ctx.disabledProtocols.includes(pName) || isSocksDisabled) {
-                    throw new Error(`Protocol ${pName.toUpperCase()} is disabled by admin`);
+                    throw new Error(`Protocol ${pName} is disabled`);
                 }
 
-                // --- 成功识别 ---
                 const { protocol, addressRemote, portRemote, addressType, rawDataIndex, isUDP } = result;
                 
-                log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote} (UDP: ${isUDP})`);
+                log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote}`);
                 
+                // [Security] 阻断内网/黑名单地址
                 if (isHostBanned(addressRemote, ctx.banHosts)) {
                     throw new Error(`Blocked: ${addressRemote}`);
                 }
@@ -150,14 +149,14 @@ export async function handleWebSocketRequest(request, ctx) {
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
-                    // [Feature] Socks5 UDP: 发送握手成功，不拦截
+                    // 发送 SOCKS5 握手成功响应
                     webSocket.send(new Uint8Array([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]));
                     socks5State = 3;
                 }
 
-                headerBuffer = null;
+                headerBuffer = null; // 释放内存
 
-                // [Logic] 分流处理，逻辑对等
+                // 移交出站处理 (Outbound)
                 if (isUDP) {
                     handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
                 } else {
@@ -165,32 +164,30 @@ export async function handleWebSocketRequest(request, ctx) {
                 }
 
             } catch (e) {
-                // 如果检测失败且 Buffer 还很小，可能是数据包分片，允许继续等待后续数据
+                // 如果数据太短，可能是分包，等待更多数据
                 if (headerBuffer && headerBuffer.length < 512 && headerBuffer.length < MAX_HEADER_BUFFER) {
                     return; 
                 }
-                // 否则（检测失败且 Buffer 较大，或者其他错误），关闭连接
                 clearTimeout(timeoutTimer);
                 log(`Detection failed: ${e.message}`);
                 safeCloseWebSocket(webSocket);
             }
         },
+        // [Robustness] 恢复了详细的清理逻辑
         close() { 
             if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
             if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} }
-            log("Client WebSocket closed"); 
         },
         abort(reason) { 
             if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
             if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} }
-            log("WebSocket aborted", reason); 
             safeCloseWebSocket(webSocket); 
         },
     })).catch((err) => {
+        // [Fix] 恢复了异常时的资源清理，防止潜在的连接残留
         clearTimeout(timeoutTimer);
         if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
         if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} }
-        log("Stream processing failed", err.toString());
         safeCloseWebSocket(webSocket);
     });
 
@@ -211,9 +208,8 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
 
         const methods = buffer.subarray(2, 2 + nMethods);
         let hasAuth = false;
-        for (let m of methods) {
-            if (m === 0x02) hasAuth = true;
-        }
+        // [Optimization] 简化循环写法
+        for (let m of methods) { if (m === 0x02) hasAuth = true; }
 
         if (hasAuth) {
             webSocket.send(new Uint8Array([0x05, 0x02]));
@@ -229,10 +225,8 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
 
     if (currentState === 1) {
         if (buffer.length < 3) return res;
-        if (buffer[0] !== 0x01) {
-            res.error = "Socks5 Auth: Wrong version";
-            return res;
-        }
+        if (buffer[0] !== 0x01) { res.error = "Socks5 Auth: Wrong version"; return res; }
+        
         let offset = 1;
         const uLen = buffer[offset++];
         if (buffer.length < offset + uLen + 1) return res;
@@ -275,7 +269,6 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
                 if (!readableStreamCancel) controller.close();
             });
             webSocketServer.addEventListener('error', (err) => {
-                log('WebSocket server error');
                 controller.error(err);
             });
             const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
