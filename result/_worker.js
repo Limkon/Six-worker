@@ -402,16 +402,12 @@ async function loadRemoteConfig(env, forceReload = false) {
           const newData = {};
           lines.forEach((line) => {
             const trimmedLine = line.trim();
-            if (!trimmedLine || trimmedLine.startsWith("#") || trimmedLine.startsWith("//")) {
-              return;
-            }
+            if (!trimmedLine || trimmedLine.startsWith("#") || trimmedLine.startsWith("//")) return;
             const eqIndex = trimmedLine.indexOf("=");
             if (eqIndex > 0) {
               const k = trimmedLine.substring(0, eqIndex).trim();
               const v = trimmedLine.substring(eqIndex + 1).trim();
-              if (k && v) {
-                newData[k] = v;
-              }
+              if (k && v) newData[k] = v;
             }
           });
           remoteConfigCache.data = newData;
@@ -457,32 +453,29 @@ async function initializeContext(request, env) {
   const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0");
   if (enableRemote === "1") {
     await loadRemoteConfig(env, forceReload);
+  } else {
+    if (remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
+      void(0);
+      remoteConfigCache.data = {};
+      remoteConfigCache.lastFetch = 0;
+      configCache = {};
+    }
   }
-  const [
-    adminPass,
-    rawUUID,
-    rawKey,
-    timeDaysStr,
-    updateHourStr,
-    proxyIPStr,
-    dns64,
-    socks5Addr,
-    go2socksStr,
-    banStr,
-    disStrRaw
-  ] = await Promise.all([
+  const [adminPass, rawUUID, rawKey, timeDaysStr, updateHourStr] = await Promise.all([
     getConfig(env, "ADMIN_PASS"),
     getConfig(env, "UUID"),
     getConfig(env, "KEY"),
     getConfig(env, "TIME"),
-    getConfig(env, "UPTIME"),
+    getConfig(env, "UPTIME")
+  ]);
+  const [proxyIPStr, dns64, socks5Addr, go2socksStr, banStr] = await Promise.all([
     getConfig(env, "PROXYIP"),
     getConfig(env, "DNS64"),
     getConfig(env, "SOCKS5"),
     getConfig(env, "GO2SOCKS5"),
-    getConfig(env, "BAN"),
-    getConfig(env, "DIS", "")
+    getConfig(env, "BAN")
   ]);
+  const disStrRaw = await getConfig(env, "DIS", "");
   const ctx = {
     userID: "",
     dynamicUUID: "",
