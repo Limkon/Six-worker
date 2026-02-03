@@ -1991,7 +1991,6 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   });
 }
 
-var XHTTP_BUFFER_SIZE = 128 * 1024;
 function concat_typed_arrays(first, ...args) {
   let len = first.length;
   for (let a of args) len += a.length;
@@ -2007,9 +2006,7 @@ function concat_typed_arrays(first, ...args) {
 async function read_at_least(reader, minBytes, initialBuffer) {
   let currentBuffer = initialBuffer || new Uint8Array(0);
   while (currentBuffer.length < minBytes) {
-    const needed = minBytes - currentBuffer.length;
-    const bufferSize = Math.max(needed, 4096);
-    const { value, done } = await reader.read(new Uint8Array(bufferSize));
+    const { value, done } = await reader.read();
     if (done) return { value: currentBuffer, done: true };
     if (value) {
       currentBuffer = concat_typed_arrays(currentBuffer, value);
@@ -2019,26 +2016,33 @@ async function read_at_least(reader, minBytes, initialBuffer) {
 }
 async function read_xhttp_header(readable, ctx) {
   const reader = readable.getReader();
+  const fail = async (msg) => {
+    try {
+      await reader.cancel(msg);
+    } catch (_) {
+    }
+    return msg;
+  };
   try {
     let { value: cache, done } = await read_at_least(reader, 18);
-    if (cache.length < 18) return "header too short";
+    if (cache.length < 18) return fail("header too short");
     const version = cache[0];
     const uuidStr = stringifyUUID(cache.subarray(1, 17));
     const expectedID = ctx.userID;
     const expectedIDLow = ctx.userIDLow;
     if (uuidStr !== expectedID && (!expectedIDLow || uuidStr !== expectedIDLow)) {
-      return "invalid UUID";
+      return fail("invalid UUID");
     }
     const pb_len = cache[17];
     const min_len_until_atyp = 22 + pb_len;
     if (cache.length < min_len_until_atyp) {
       const r = await read_at_least(reader, min_len_until_atyp, cache);
       cache = r.value;
-      if (cache.length < min_len_until_atyp) return "header too short for metadata";
+      if (cache.length < min_len_until_atyp) return fail("header too short for metadata");
     }
     const cmdIndex = 18 + pb_len;
     const cmd = cache[cmdIndex];
-    if (cmd !== 1) return "unsupported command: " + cmd;
+    if (cmd !== 1) return fail("unsupported command: " + cmd);
     const portIndex = cmdIndex + 1;
     const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
     const port = view.getUint16(portIndex, false);
@@ -2053,17 +2057,17 @@ async function read_xhttp_header(readable, ctx) {
       if (cache.length < addr_body_idx + 1) {
         const r = await read_at_least(reader, addr_body_idx + 1, cache);
         cache = r.value;
-        if (cache.length < addr_body_idx + 1) return "header too short for domain len";
+        if (cache.length < addr_body_idx + 1) return fail("header too short for domain len");
       }
       const domain_len = cache[addr_body_idx];
       header_len = addr_body_idx + 1 + domain_len;
     } else {
-      return "read address type failed: " + atype;
+      return fail("read address type failed: " + atype);
     }
     if (cache.length < header_len) {
       const r = await read_at_least(reader, header_len, cache);
       cache = r.value;
-      if (cache.length < header_len) return "header too short for full address";
+      if (cache.length < header_len) return fail("header too short for full address");
     }
     let hostname = "";
     const addr_val_idx = addr_body_idx;
@@ -2087,9 +2091,9 @@ async function read_xhttp_header(readable, ctx) {
           break;
       }
     } catch (e) {
-      return "failed to parse hostname: " + e.message;
+      return fail("failed to parse hostname: " + e.message);
     }
-    if (!hostname) return "failed to parse hostname";
+    if (!hostname) return fail("failed to parse hostname");
     const data = cache.subarray(header_len);
     return {
       hostname,
@@ -2184,6 +2188,7 @@ async function handleXhttpClient(request, ctx) {
   try {
     const result = await read_xhttp_header(request.body, ctx);
     if (typeof result === "string") {
+      void(0);
       return null;
     }
     const { hostname, port, atype, data, resp, reader, done } = result;
@@ -2198,6 +2203,7 @@ async function handleXhttpClient(request, ctx) {
         const writer = remoteSocket.writable.getWriter();
         try {
           await upload_to_remote_xhttp(writer, httpx);
+        } catch (e) {
         } finally {
           try {
             await writer.close();
