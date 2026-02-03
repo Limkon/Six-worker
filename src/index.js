@@ -2,8 +2,9 @@
 /**
  * 文件名: src/index.js
  * 修改说明:
- * 1. [Fix] 域名自动发现 (Step 4) 增加 cleanConfigCache(['SAVED_DOMAIN'])，确保新域名写入 KV 后立即清理缓存。
- * 2. [Check] 保持 handlePasswordSetup 中的缓存清理逻辑。
+ * 1. [Feature] 实现 24 小时“冷静期”机制。
+ * 2. [Opt] 引入 LAST_PUSH_TIME 持久化存储，防止 Worker 重启导致防抖失效。
+ * 3. [Logic] 仅当距离上次推送超过 24 小时且域名发生变化时，才触发 WebDAV 同步。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -16,7 +17,10 @@ import { sha1 } from './utils/helpers.js';
 import { CONSTANTS } from './constants.js';
 import { getPasswordSetupHtml, getLoginHtml } from './templates/auth.js';
 
-let lastSavedDomain = '';
+// --- 全局内存缓存 ---
+let lastSavedDomain = ''; // 上次保存的域名
+let lastPushTime = 0;     // 上次推送的时间戳 (内存缓存)
+const PUSH_COOLDOWN = 24 * 60 * 60 * 1000; // 冷却时间：24小时
 
 function safeWaitUntil(ctx, promise) {
     if (ctx && typeof ctx.waitUntil === 'function') {
@@ -34,7 +38,11 @@ async function handlePasswordSetup(request, env, ctx) {
         if (!env.KV) return new Response('未绑定 KV', { status: 500 });
         await env.KV.put('UUID', password);
         
-        // [修改] 必须等待缓存清理完成，确保新密码立即生效
+        // 初始设置时，强制更新时间戳，确保立即推送
+        const now = Date.now();
+        await env.KV.put('LAST_PUSH_TIME', now.toString());
+        lastPushTime = now;
+
         await cleanConfigCache();
 
         try {
@@ -59,7 +67,6 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
         const path = proxyUrl.pathname === '/' ? '' : proxyUrl.pathname;
         const newUrl = proxyUrl.protocol + '//' + proxyUrl.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
 
-        // [Fix] 重建 Headers 对象并删除 Host 头
         const newHeaders = new Headers(request.headers);
         newHeaders.delete('Host');
         newHeaders.delete('Referer'); 
@@ -94,7 +101,6 @@ export default {
             }
 
             // 2. 初始密码设置
-            // 这里使用 getConfig 会自动走缓存，不会浪费 KV
             const rawUUID = await getConfig(env, 'UUID');
             const rawKey = await getConfig(env, 'KEY');
             const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
@@ -120,17 +126,41 @@ export default {
             const isManagementRoute = isSuperRoute || isUserRoute;
             const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
-            // 4. 域名自动发现 (Six-worker 特性)
+            // 4. 域名自动发现 (24小时冷静期逻辑)
             if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
+                // 仅当域名变化时才尝试进行后续检查
                 if (hostName !== lastSavedDomain) {
-                    lastSavedDomain = hostName; 
-                    // [Fix] 并发执行 KV 写入、缓存清理和 WebDAV 推送
-                    // 必须清理 SAVED_DOMAIN 缓存，否则其他 Worker 仍会读取旧域名
-                    context.waitUntil(Promise.all([
-                        env.KV.put('SAVED_DOMAIN', hostName),
-                        cleanConfigCache(['SAVED_DOMAIN']),
-                        executeWebDavPush(env, context, false)
-                    ]));
+                    const now = Date.now();
+                    
+                    // A. 内存快速检查：如果内存记录显示还在冷却期，直接跳过 (节省 KV 读操作)
+                    if (now - lastPushTime > PUSH_COOLDOWN) {
+                        // B. KV 权威检查：内存可能因为重启而清零，需从 KV 获取上次真实推送时间
+                        // 注意：这里用 waitUntil 异步读取可能来不及阻断，所以需要 await
+                        // 但为了性能，我们可以接受第一次请求的延迟，或者快速读取
+                        let kvPushTimeStr = await env.KV.get('LAST_PUSH_TIME');
+                        let kvPushTime = kvPushTimeStr ? parseInt(kvPushTimeStr) : 0;
+                        
+                        // 更新内存缓存
+                        lastPushTime = kvPushTime;
+
+                        if (now - kvPushTime > PUSH_COOLDOWN) {
+                            console.log(`[Auto-Discovery] Cooldown passed. Updating domain to ${hostName}`);
+                            lastSavedDomain = hostName;
+                            lastPushTime = now; // 更新内存时间
+                            
+                            // 并发执行：保存域名 + 保存时间戳 + 清理缓存 + WebDAV 推送
+                            context.waitUntil(Promise.all([
+                                env.KV.put('SAVED_DOMAIN', hostName),
+                                env.KV.put('LAST_PUSH_TIME', now.toString()), // 持久化新的推送时间
+                                cleanConfigCache(['SAVED_DOMAIN']),
+                                executeWebDavPush(env, context, false)
+                            ]));
+                        } else {
+                             // console.log(`[Auto-Discovery] Ignored change (KV Cooldown): ${hostName}`);
+                        }
+                    } else {
+                        // console.log(`[Auto-Discovery] Ignored change (Memory Cooldown): ${hostName}`);
+                    }
                 }
             }
 
