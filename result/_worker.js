@@ -3607,6 +3607,11 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
   if (!urlStr) return null;
   try {
     const proxyUrl2 = new URL(urlStr);
+    const currentUrl = new URL(request.url);
+    if (proxyUrl2.hostname === currentUrl.hostname) {
+      void(0);
+      return null;
+    }
     const path = proxyUrl2.pathname === "/" ? "" : proxyUrl2.pathname;
     const newUrl = proxyUrl2.protocol + "//" + proxyUrl2.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
     const newHeaders = new Headers(request.headers);
