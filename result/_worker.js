@@ -435,6 +435,25 @@ async function cleanConfigCache(updatedKeys) {
     proxyIPRemoteCache = { data: [], expires: 0 };
   }
 }
+async function fetchTextSafe(url, timeoutMs = 5e3, maxSizeChar = 5e5) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+    const len = response.headers.get("Content-Length");
+    if (len && parseInt(len) > maxSizeChar * 2) {
+      throw new Error("Content too large");
+    }
+    const text = await response.text();
+    if (text.length > maxSizeChar) {
+      throw new Error("Response body too large");
+    }
+    return text;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 async function loadRemoteConfig(env, forceReload = false) {
   const remoteConfigUrl = await getKV(env, "REMOTE_CONFIG_URL");
   if (!forceReload && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
@@ -442,39 +461,30 @@ async function loadRemoteConfig(env, forceReload = false) {
   }
   if (remoteConfigUrl) {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5e3);
-      const response = await fetch(remoteConfigUrl, {
-        signal: controller.signal
-      }).finally(() => {
-        clearTimeout(timeoutId);
-      });
-      if (response.ok) {
-        const text = await response.text();
-        const now = Date.now();
-        try {
-          const newData = JSON.parse(text);
-          remoteConfigCache.data = newData;
-          remoteConfigCache.lastFetch = now;
-          configCache = {};
-        } catch (e) {
-          void(0);
-          const lines = text.split("\n");
-          const newData = {};
-          lines.forEach((line) => {
-            const trimmedLine = line.trim();
-            if (!trimmedLine || trimmedLine.startsWith("#") || trimmedLine.startsWith("//")) return;
-            const eqIndex = trimmedLine.indexOf("=");
-            if (eqIndex > 0) {
-              const k = trimmedLine.substring(0, eqIndex).trim();
-              const v = trimmedLine.substring(eqIndex + 1).trim();
-              if (k && v) newData[k] = v;
-            }
-          });
-          remoteConfigCache.data = newData;
-          remoteConfigCache.lastFetch = now;
-          configCache = {};
-        }
+      const text = await fetchTextSafe(remoteConfigUrl);
+      const now = Date.now();
+      try {
+        const newData = JSON.parse(text);
+        remoteConfigCache.data = newData;
+        remoteConfigCache.lastFetch = now;
+        configCache = {};
+      } catch (e) {
+        void(0);
+        const lines = text.split("\n");
+        const newData = {};
+        lines.forEach((line) => {
+          const trimmedLine = line.trim();
+          if (!trimmedLine || trimmedLine.startsWith("#") || trimmedLine.startsWith("//")) return;
+          const eqIndex = trimmedLine.indexOf("=");
+          if (eqIndex > 0) {
+            const k = trimmedLine.substring(0, eqIndex).trim();
+            const v = trimmedLine.substring(eqIndex + 1).trim();
+            if (k && v) newData[k] = v;
+          }
+        });
+        remoteConfigCache.data = newData;
+        remoteConfigCache.lastFetch = now;
+        configCache = {};
       }
     } catch (e) {
       void(0);
@@ -487,13 +497,13 @@ async function getConfig(env, key, defaultValue = void 0) {
     return configCache[key];
   }
   let val = void 0;
-  if (env.KV) {
+  if (env && env.KV) {
     val = await getKV(env, key);
   }
   if ((val === null || val === void 0) && remoteConfigCache.data && remoteConfigCache.data[key]) {
     val = remoteConfigCache.data[key];
   }
-  if ((val === null || val === void 0) && env[key]) {
+  if ((val === null || val === void 0) && env && env[key]) {
     val = env[key];
   }
   if (!val && key === "UUID") {
@@ -505,6 +515,7 @@ async function getConfig(env, key, defaultValue = void 0) {
   return finalVal;
 }
 async function initializeContext(request, env) {
+  if (!env) env = {};
   const url = new URL(request ? request.url : "http://localhost");
   const forceReload = url.searchParams.get("flush") === "1";
   if (forceReload) {
@@ -595,22 +606,11 @@ async function initializeContext(request, env) {
         rawList = proxyIPRemoteCache.data;
       } else {
         try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 5e3);
-          const response = await fetch(rawProxyIP, {
-            signal: controller.signal
-          }).finally(() => {
-            clearTimeout(timeoutId);
-          });
-          if (response.ok) {
-            const text = await response.text();
-            const list = await cleanList(text);
-            rawList = list;
-            proxyIPRemoteCache.data = list;
-            proxyIPRemoteCache.expires = Date.now() + 6e5;
-          } else {
-            throw new Error(`ProxyIP fetch failed: ${response.status}`);
-          }
+          const text = await fetchTextSafe(rawProxyIP);
+          const list = await cleanList(text);
+          rawList = list;
+          proxyIPRemoteCache.data = list;
+          proxyIPRemoteCache.expires = Date.now() + 6e5;
         } catch (e) {
           void(0);
           const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
