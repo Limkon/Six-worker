@@ -2,9 +2,7 @@
 /**
  * 文件名: src/index.js
  * 修改说明:
- * 1. [Feature] 实现 24 小时“冷静期”机制。
- * 2. [Optimization] 重启后增加 KV 值比对，避免伪变更触发推送。
- * 3. [Logic] 仅当距离上次推送超过 24 小时且域名发生真实变化时，才触发同步。
+ * 1. [Fix] proxyUrl: 增加防回环检测，防止因配置错误导致 Worker 请求自己引发 loadShed 崩溃。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -64,6 +62,15 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
     if (!urlStr) return null;
     try {
         const proxyUrl = new URL(urlStr);
+
+        // [Fix] 安全检查：防止回环代理 (Self-Loop Prevention)
+        // 如果配置的 URL 域名与当前请求的域名相同，会导致无限递归 fetch，引发 loadShed 错误
+        const currentUrl = new URL(request.url);
+        if (proxyUrl.hostname === currentUrl.hostname) {
+            console.warn(`[Proxy] Loop detected: URL config points to self (${urlStr}). Aborting proxy to prevent crash.`);
+            return null;
+        }
+
         const path = proxyUrl.pathname === '/' ? '' : proxyUrl.pathname;
         const newUrl = proxyUrl.protocol + '//' + proxyUrl.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
 
