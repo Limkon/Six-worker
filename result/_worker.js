@@ -2053,23 +2053,46 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
 }
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   let readableStreamCancel = false;
+  let isStreamClosed = false;
   return new ReadableStream({
     start(controller) {
+      const safeEnqueue = (chunk) => {
+        if (readableStreamCancel || isStreamClosed) return;
+        try {
+          controller.enqueue(chunk);
+        } catch (e) {
+        }
+      };
+      const safeClose = () => {
+        if (readableStreamCancel || isStreamClosed) return;
+        try {
+          controller.close();
+          isStreamClosed = true;
+        } catch (e) {
+        }
+      };
+      const safeError = (e) => {
+        if (readableStreamCancel || isStreamClosed) return;
+        try {
+          controller.error(e);
+          isStreamClosed = true;
+        } catch (err) {
+        }
+      };
       webSocketServer.addEventListener("message", (event) => {
-        if (readableStreamCancel) return;
         const data = typeof event.data === "string" ? new TextEncoder().encode(event.data) : event.data;
-        controller.enqueue(data);
+        safeEnqueue(data);
       });
       webSocketServer.addEventListener("close", () => {
         safeCloseWebSocket(webSocketServer);
-        if (!readableStreamCancel) controller.close();
+        safeClose();
       });
       webSocketServer.addEventListener("error", (err) => {
-        controller.error(err);
+        safeError(err);
       });
       const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
-      if (error) controller.error(error);
-      else if (earlyData) controller.enqueue(earlyData);
+      if (error) safeError(error);
+      else if (earlyData) safeEnqueue(earlyData);
     },
     cancel() {
       readableStreamCancel = true;
