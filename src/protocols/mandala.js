@@ -1,6 +1,6 @@
 // src/protocols/mandala.js
 import { CONSTANTS } from '../constants.js';
-import { textDecoder, textEncoder, sha224Hash } from '../utils/helpers.js';
+import { textDecoder, textEncoder, sha224Hash, StreamCipher } from '../utils/helpers.js';
 
 // Password Hash Cache
 const passwordHashCache = new Map();
@@ -23,17 +23,23 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
 
     const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
 
-    // 1. 异或解密 (必须分配新内存)
+    // 1. 读取 Salt (明文，前4字节)
     const salt = buffer.subarray(0, 4);
-    const decrypted = new Uint8Array(buffer.byteLength - 4);
     
-    // 简单的循环更有利于 V8 优化
-    const len = decrypted.length;
-    for (let i = 0; i < len; i++) {
-        decrypted[i] = buffer[i + 4] ^ salt[i & 3];
-    }
+    // 2. 准备解密 (复制剩余数据，避免修改原始 buffer)
+    // 密文部分从第 4 字节开始
+    const ciphertext = buffer.subarray(4);
+    const decrypted = new Uint8Array(ciphertext); 
+    
+    // 3. 初始化流加密并执行解密
+    // 使用 Password + Salt 初始化状态机
+    const passwordBytes = textEncoder.encode(password);
+    const cipher = new StreamCipher(passwordBytes, salt);
+    
+    // 原地解密 decrypted 数组
+    cipher.process(decrypted);
 
-    // 2. 验证哈希 (Offset 0-56)
+    // 4. 验证哈希 (Offset 0-56 in decrypted buffer)
     let expectedHashBytes = passwordHashCache.get(password);
     if (!expectedHashBytes) {
         const hashHex = sha224Hash(String(password));
@@ -49,8 +55,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         return { hasError: true, message: 'Invalid Mandala Auth' };
     }
 
-    // 3. 解析剩余头部
-    // [Optimization] 使用 DataView 操作 decrypted buffer
+    // 5. 解析剩余头部
     const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
     
     const padLen = decrypted[56]; 
@@ -107,7 +112,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         return { hasError: true, message: 'Address parse failed' };
     }
     
-    // 4. 验证 CRLF
+    // 6. 验证 CRLF
     if (headerEnd + 2 > decrypted.byteLength) return { hasError: true, message: 'Missing CRLF data' };
     if (decrypted[headerEnd] !== 0x0D || decrypted[headerEnd + 1] !== 0x0A) {
         return { hasError: true, message: 'Missing CRLF' };
@@ -119,7 +124,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         portRemote,
         addressType: atyp,
         isUDP: isUDP, 
-        // [Optimization] Zero-copy return
+        // [Important] 返回解密后的载荷数据
         rawClientData: decrypted.subarray(headerEnd + 2),
         protocol: 'mandala'
     };
