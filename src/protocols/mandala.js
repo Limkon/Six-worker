@@ -2,8 +2,10 @@
 import { CONSTANTS } from '../constants.js';
 import { textDecoder, textEncoder, sha224Hash, StreamCipher } from '../utils/helpers.js';
 
-// Password Hash Cache
+// Cache System
 const passwordHashCache = new Map();
+// [Optimization] 增加 Bytes 缓存，避免每次 new StreamCipher 都进行 TextEncode
+const passwordBytesCache = new Map();
 const MAX_CACHE_SIZE = 100;
 
 function constantTimeEqual(a, b) {
@@ -21,25 +23,34 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         return { hasError: true, message: 'Mandala buffer too short' };
     }
 
+    // 1. 获取输入视图
     const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
 
-    // 1. 读取 Salt (明文，前4字节)
+    // 2. 读取 Salt (明文，前4字节)
     const salt = buffer.subarray(0, 4);
     
-    // 2. 准备解密 (复制剩余数据，避免修改原始 buffer)
+    // 3. 准备解密 (复制剩余数据，避免修改原始 buffer 导致影响其他协议探测)
     // 密文部分从第 4 字节开始
     const ciphertext = buffer.subarray(4);
     const decrypted = new Uint8Array(ciphertext); 
     
-    // 3. 初始化流加密并执行解密
-    // 使用 Password + Salt 初始化状态机
-    const passwordBytes = textEncoder.encode(password);
-    const cipher = new StreamCipher(passwordBytes, salt);
-    
-    // 原地解密 decrypted 数组
-    cipher.process(decrypted);
+    // 4. 获取密码 Bytes (带缓存)
+    let passwordBytes = passwordBytesCache.get(password);
+    if (!passwordBytes) {
+        passwordBytes = textEncoder.encode(password);
+        if (passwordBytesCache.size >= MAX_CACHE_SIZE) {
+            const first = passwordBytesCache.keys().next().value;
+            passwordBytesCache.delete(first);
+        }
+        passwordBytesCache.set(password, passwordBytes);
+    }
 
-    // 4. 验证哈希 (Offset 0-56 in decrypted buffer)
+    // 5. 初始化流加密并执行解密
+    // 使用 Password + Salt 初始化状态机
+    const cipher = new StreamCipher(passwordBytes, salt);
+    cipher.process(decrypted); // 原地解密 decrypted 数组
+
+    // 6. 验证哈希 (Offset 0-56 in decrypted buffer)
     let expectedHashBytes = passwordHashCache.get(password);
     if (!expectedHashBytes) {
         const hashHex = sha224Hash(String(password));
@@ -51,11 +62,12 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         passwordHashCache.set(password, expectedHashBytes);
     }
 
+    // [Security] 必须验证解密后的数据是否符合签名
     if (!constantTimeEqual(decrypted.subarray(0, 56), expectedHashBytes)) {
         return { hasError: true, message: 'Invalid Mandala Auth' };
     }
 
-    // 5. 解析剩余头部
+    // 7. 解析剩余头部 (使用 DataView 操作 decrypted buffer)
     const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
     
     const padLen = decrypted[56]; 
@@ -112,19 +124,21 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         return { hasError: true, message: 'Address parse failed' };
     }
     
-    // 6. 验证 CRLF
+    // 8. 验证 CRLF
     if (headerEnd + 2 > decrypted.byteLength) return { hasError: true, message: 'Missing CRLF data' };
     if (decrypted[headerEnd] !== 0x0D || decrypted[headerEnd + 1] !== 0x0A) {
         return { hasError: true, message: 'Missing CRLF' };
     }
 
+    // 9. 返回结果
+    // 注意: rawClientData 是解密后的数据，意味着后续处理管道将传输明文。
+    // 这符合 Header-Only Obfuscation 的设计。
     return {
         hasError: false,
         addressRemote,
         portRemote,
         addressType: atyp,
         isUDP: isUDP, 
-        // [Important] 返回解密后的载荷数据
         rawClientData: decrypted.subarray(headerEnd + 2),
         protocol: 'mandala'
     };
