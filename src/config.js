@@ -4,6 +4,7 @@
  * 修改说明:
  * 1. [Fix] 修复远程配置关闭后 (REMOTE_CONFIG=0) 仍然读取脏缓存的 Bug。
  * 2. [Optimization] 保持并发限制 (5+5+1) 以避免 CPU 超时。
+ * 3. [Fix] 增加对远程内容获取的大小限制和异常捕获，防止 internal error/loadShed。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID, getKV, clearKVCache } from './utils/helpers.js';
@@ -45,6 +46,30 @@ export async function cleanConfigCache(updatedKeys) {
     }
 }
 
+// [Fix] 辅助函数：安全获取文本，限制大小防止 OOM
+async function fetchTextSafe(url, timeoutMs = 5000, maxSizeChar = 500000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+        
+        // 检查 Content-Length (如果存在)
+        const len = response.headers.get('Content-Length');
+        if (len && parseInt(len) > maxSizeChar * 2) {
+             throw new Error('Content too large');
+        }
+
+        const text = await response.text();
+        if (text.length > maxSizeChar) {
+            throw new Error('Response body too large');
+        }
+        return text;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 export async function loadRemoteConfig(env, forceReload = false) {
     const remoteConfigUrl = await getKV(env, 'REMOTE_CONFIG_URL');
     
@@ -54,41 +79,32 @@ export async function loadRemoteConfig(env, forceReload = false) {
     
     if (remoteConfigUrl) {
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            // [Fix] 使用安全获取方法
+            const text = await fetchTextSafe(remoteConfigUrl);
             
-            const response = await fetch(remoteConfigUrl, {
-                signal: controller.signal
-            }).finally(() => {
-                clearTimeout(timeoutId);
-            });
-
-            if (response.ok) {
-                const text = await response.text();
-                const now = Date.now();
-                try {
-                    const newData = JSON.parse(text);
-                    remoteConfigCache.data = newData;
-                    remoteConfigCache.lastFetch = now;
-                    configCache = {}; // 远程配置更新，强制让 getConfig 重新计算
-                } catch (e) {
-                    console.warn('Remote config is not JSON, trying line parse');
-                    const lines = text.split('\n');
-                    const newData = {};
-                    lines.forEach(line => {
-                        const trimmedLine = line.trim();
-                        if (!trimmedLine || trimmedLine.startsWith('#') || trimmedLine.startsWith('//')) return;
-                        const eqIndex = trimmedLine.indexOf('=');
-                        if (eqIndex > 0) {
-                            const k = trimmedLine.substring(0, eqIndex).trim();
-                            const v = trimmedLine.substring(eqIndex + 1).trim();
-                            if (k && v) newData[k] = v;
-                        }
-                    });
-                    remoteConfigCache.data = newData;
-                    remoteConfigCache.lastFetch = now;
-                    configCache = {}; 
-                }
+            const now = Date.now();
+            try {
+                const newData = JSON.parse(text);
+                remoteConfigCache.data = newData;
+                remoteConfigCache.lastFetch = now;
+                configCache = {}; // 远程配置更新，强制让 getConfig 重新计算
+            } catch (e) {
+                console.warn('Remote config is not JSON, trying line parse');
+                const lines = text.split('\n');
+                const newData = {};
+                lines.forEach(line => {
+                    const trimmedLine = line.trim();
+                    if (!trimmedLine || trimmedLine.startsWith('#') || trimmedLine.startsWith('//')) return;
+                    const eqIndex = trimmedLine.indexOf('=');
+                    if (eqIndex > 0) {
+                        const k = trimmedLine.substring(0, eqIndex).trim();
+                        const v = trimmedLine.substring(eqIndex + 1).trim();
+                        if (k && v) newData[k] = v;
+                    }
+                });
+                remoteConfigCache.data = newData;
+                remoteConfigCache.lastFetch = now;
+                configCache = {}; 
             }
         } catch (e) {
             console.error('Failed to load remote config', e);
@@ -104,7 +120,8 @@ export async function getConfig(env, key, defaultValue = undefined) {
 
     let val = undefined;
     
-    if (env.KV) {
+    // [Fix] 确保 env.KV 存在再调用
+    if (env && env.KV) {
         val = await getKV(env, key);
     }
 
@@ -113,7 +130,7 @@ export async function getConfig(env, key, defaultValue = undefined) {
         val = remoteConfigCache.data[key];
     }
     
-    if ((val === null || val === undefined) && env[key]) {
+    if ((val === null || val === undefined) && env && env[key]) {
         val = env[key];
     }
     
@@ -128,6 +145,9 @@ export async function getConfig(env, key, defaultValue = undefined) {
 }
 
 export async function initializeContext(request, env) {
+    // [Fix] 确保 env 存在
+    if (!env) env = {};
+
     const url = new URL(request ? request.url : 'http://localhost');
     const forceReload = url.searchParams.get('flush') === '1'; 
 
@@ -238,24 +258,12 @@ export async function initializeContext(request, env) {
                  rawList = proxyIPRemoteCache.data;
              } else {
                  try {
-                     const controller = new AbortController();
-                     const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-                     const response = await fetch(rawProxyIP, {
-                        signal: controller.signal
-                     }).finally(() => {
-                         clearTimeout(timeoutId);
-                     });
-
-                     if (response.ok) {
-                         const text = await response.text();
-                         const list = await cleanList(text); 
-                         rawList = list;
-                         proxyIPRemoteCache.data = list;
-                         proxyIPRemoteCache.expires = Date.now() + 600000;
-                     } else {
-                         throw new Error(`ProxyIP fetch failed: ${response.status}`);
-                     }
+                     // [Fix] 使用 fetchTextSafe 代替直接 fetch，防止 OOM
+                     const text = await fetchTextSafe(rawProxyIP);
+                     const list = await cleanList(text); 
+                     rawList = list;
+                     proxyIPRemoteCache.data = list;
+                     proxyIPRemoteCache.expires = Date.now() + 600000;
                  } catch (e) {
                      console.error('Failed to fetch remote ProxyIP:', e);
                      const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
