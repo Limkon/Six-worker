@@ -5,6 +5,7 @@
  * 1. 包含内存溢出保护 (Header Buffer Limit)。
  * 2. 包含 SOCKS5 状态机修复。
  * 3. 包含完整的资源锁释放逻辑 (Writer Release Lock)。
+ * 4. [Fix] 修复 "This ReadableStream is closed" 竞态报错。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -62,6 +63,8 @@ export async function handleWebSocketRequest(request, ctx) {
 
     // 处理 Early Data (VLESS over WS 0-RTT)
     const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
+    
+    // [Fix] 使用修复后的流创建函数
     const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
 
     const streamPromise = readableWebSocketStream.pipeTo(new WritableStream({
@@ -219,7 +222,7 @@ export async function handleWebSocketRequest(request, ctx) {
     return new Response(null, { status: 101, webSocket: client });
 }
 
-// SOCKS5 握手辅助函数 (保持不变，简化了循环写法)
+// SOCKS5 握手辅助函数
 function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
     const res = { consumed: 0, newState: currentState, error: null };
     if (buffer.length === 0) return res;
@@ -278,28 +281,64 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
     return res;
 }
 
+// [Fix] 健壮的 ReadableStream 包装器，防止 "closed" 报错
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
     let readableStreamCancel = false;
+    let isStreamClosed = false; // [Fix] 新增内部状态，追踪流是否已关闭
+
     return new ReadableStream({
         start(controller) {
+            // [Fix] 包装 enqueue，防止向已关闭流写入
+            const safeEnqueue = (chunk) => {
+                if (readableStreamCancel || isStreamClosed) return;
+                try {
+                    controller.enqueue(chunk);
+                } catch (e) {
+                    // 忽略 "closed" 错误，但这通常不应该发生，因为我们有 isStreamClosed 检查
+                }
+            };
+            
+            // [Fix] 包装 close
+            const safeClose = () => {
+                if (readableStreamCancel || isStreamClosed) return;
+                try {
+                    controller.close();
+                    isStreamClosed = true;
+                } catch (e) { }
+            };
+
+             // [Fix] 包装 error
+            const safeError = (e) => {
+                if (readableStreamCancel || isStreamClosed) return;
+                try {
+                    controller.error(e);
+                    isStreamClosed = true;
+                } catch (err) { }
+            };
+
             webSocketServer.addEventListener('message', (event) => {
-                if (readableStreamCancel) return;
                 const data = typeof event.data === 'string' 
                     ? new TextEncoder().encode(event.data) 
                     : event.data;
-                controller.enqueue(data);
+                safeEnqueue(data);
             });
+            
             webSocketServer.addEventListener('close', () => {
                 safeCloseWebSocket(webSocketServer);
-                if (!readableStreamCancel) controller.close();
+                safeClose();
             });
+            
             webSocketServer.addEventListener('error', (err) => {
-                controller.error(err);
+                safeError(err);
             });
+            
             const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
-            if (error) controller.error(error);
-            else if (earlyData) controller.enqueue(earlyData);
+            if (error) safeError(error);
+            else if (earlyData) safeEnqueue(earlyData);
         },
-        cancel() { readableStreamCancel = true; safeCloseWebSocket(webSocketServer); }
+        cancel() { 
+            readableStreamCancel = true; 
+            safeCloseWebSocket(webSocketServer); 
+        }
     });
 }
