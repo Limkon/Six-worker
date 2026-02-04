@@ -258,6 +258,7 @@ function isHostBanned(hostname, banList) {
   });
 }
 var GLOBAL_KV_CACHE =   new Map();
+var MAX_KV_CACHE_SIZE = 200;
 var CACHE_API_PREFIX = "http://kv-cache.local/";
 var CACHE_NULL_SENTINEL = "##NULL##";
 var KNOWN_KV_KEYS = [
@@ -303,6 +304,7 @@ async function getKV(env, key) {
         GLOBAL_KV_CACHE.set(key, null);
         return null;
       }
+      if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
       GLOBAL_KV_CACHE.set(key, val2);
       void(0);
       return val2;
@@ -317,6 +319,7 @@ async function getKV(env, key) {
   } catch (e) {
     void(0);
   }
+  if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
   GLOBAL_KV_CACHE.set(key, val);
   const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
   const response = new Response(cacheVal, {
@@ -359,8 +362,12 @@ function fmix32(h) {
 var StreamCipher = class {
   constructor(keyBytes, saltBytes) {
     let s1 = 0, s2 = 0, s3 = 0, s4 = 0;
-    for (let i = 0; i < keyBytes.length; i++) s1 = s1 + keyBytes[i] | 0;
-    for (let i = 0; i < saltBytes.length; i++) s2 = s2 + saltBytes[i] | 0;
+    for (let i = 0; i < keyBytes.length; i++) {
+      s1 = Math.imul(s1, 31) + keyBytes[i] | 0;
+    }
+    for (let i = 0; i < saltBytes.length; i++) {
+      s2 = Math.imul(s2, 31) + saltBytes[i] | 0;
+    }
     s3 = fmix32(s1 ^ 305419896);
     s4 = fmix32(s2 ^ 2271560481);
     s1 = fmix32(s1);
@@ -841,25 +848,7 @@ function constantTimeEqual2(a, b) {
   }
   return mismatch === 0;
 }
-async function parseMandalaHeader(mandalaBuffer, password) {
-  if (mandalaBuffer.byteLength < 67) {
-    return { hasError: true, message: "Mandala buffer too short" };
-  }
-  const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
-  const salt = buffer.subarray(0, 4);
-  const ciphertext = buffer.subarray(4);
-  const decrypted = new Uint8Array(ciphertext);
-  let passwordBytes = passwordBytesCache.get(password);
-  if (!passwordBytes) {
-    passwordBytes = textEncoder.encode(password);
-    if (passwordBytesCache.size >= MAX_CACHE_SIZE2) {
-      const first = passwordBytesCache.keys().next().value;
-      passwordBytesCache.delete(first);
-    }
-    passwordBytesCache.set(password, passwordBytes);
-  }
-  const cipher = new StreamCipher(passwordBytes, salt);
-  cipher.process(decrypted);
+function getCachedPasswordHashBytes(password) {
   let expectedHashBytes = passwordHashCache.get(password);
   if (!expectedHashBytes) {
     const hashHex = sha224Hash(String(password));
@@ -870,19 +859,51 @@ async function parseMandalaHeader(mandalaBuffer, password) {
     }
     passwordHashCache.set(password, expectedHashBytes);
   }
+  return expectedHashBytes;
+}
+function getCachedPasswordBytes(password) {
+  let passwordBytes = passwordBytesCache.get(password);
+  if (!passwordBytes) {
+    passwordBytes = textEncoder.encode(password);
+    if (passwordBytesCache.size >= MAX_CACHE_SIZE2) {
+      const first = passwordBytesCache.keys().next().value;
+      passwordBytesCache.delete(first);
+    }
+    passwordBytesCache.set(password, passwordBytes);
+  }
+  return passwordBytes;
+}
+async function parseMandalaHeader(mandalaBuffer, password) {
+  if (!password) {
+    return { hasError: true, message: "Password is required" };
+  }
+  if (mandalaBuffer.byteLength < 67) {
+    return { hasError: true, message: "Mandala buffer too short" };
+  }
+  const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
+  const salt = buffer.subarray(0, 4);
+  const ciphertext = buffer.subarray(4);
+  const decrypted = new Uint8Array(ciphertext);
+  const passwordBytes = getCachedPasswordBytes(password);
+  const cipher = new StreamCipher(passwordBytes, salt);
+  cipher.process(decrypted);
+  const expectedHashBytes = getCachedPasswordHashBytes(password);
   if (!constantTimeEqual2(decrypted.subarray(0, 56), expectedHashBytes)) {
     return { hasError: true, message: "Invalid Mandala Auth" };
   }
   const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
   const padLen = decrypted[56];
   let cursor = 57 + padLen;
-  if (cursor >= decrypted.length) return { hasError: true, message: "Buffer too short after padding" };
+  if (cursor >= decrypted.length) {
+    return { hasError: true, message: "Buffer too short after padding" };
+  }
   const cmd = decrypted[cursor];
   const isUDP = cmd === 3;
   if (cmd !== 1 && !isUDP) {
     return { hasError: true, message: "Unsupported Mandala CMD: " + cmd };
   }
   cursor++;
+  if (cursor >= decrypted.length) return { hasError: true, message: "Buffer ended unexpectedly" };
   const atyp = decrypted[cursor];
   cursor++;
   let addressRemote = "";
@@ -915,19 +936,22 @@ async function parseMandalaHeader(mandalaBuffer, password) {
     cursor += 2;
     headerEnd = cursor;
   } catch (e) {
-    return { hasError: true, message: "Address parse failed" };
+    return { hasError: true, message: "Address parse failed: " + e.message };
   }
-  if (headerEnd + 2 > decrypted.byteLength) return { hasError: true, message: "Missing CRLF data" };
+  if (headerEnd + 2 > decrypted.byteLength) {
+    return { hasError: true, message: "Missing CRLF data" };
+  }
   if (decrypted[headerEnd] !== 13 || decrypted[headerEnd + 1] !== 10) {
     return { hasError: true, message: "Missing CRLF" };
   }
+  const rawClientData = ciphertext.subarray(headerEnd + 2);
   return {
     hasError: false,
     addressRemote,
     portRemote,
     addressType: atyp,
     isUDP,
-    rawClientData: decrypted.subarray(headerEnd + 2),
+    rawClientData,
     protocol: "mandala"
   };
 }
