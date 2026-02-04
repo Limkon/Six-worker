@@ -1,146 +1,132 @@
-// src/protocols/mandala.js
 import { CONSTANTS } from '../constants.js';
-import { textDecoder, textEncoder, sha224Hash, StreamCipher } from '../utils/helpers.js';
 
-// Cache System
-const passwordHashCache = new Map();
-const passwordBytesCache = new Map();
-const MAX_CACHE_SIZE = 100;
+// --- 配置常量 ---
+const ALGORITHM = 'AES-GCM';
+const KEY_LENGTH = 256;
+const SALT_STRING = 'mandala-protocol-salt-v1'; 
+const IV_LENGTH = 12;
+const ITERATIONS = 1000; // 遵循您的指令：1000次迭代
 
-/**
- * 恒定时间比较两个 Uint8Array 是否相等，防止时序攻击
- */
-function constantTimeEqual(a, b) {
-    if (a.byteLength !== b.byteLength) return false;
-    let mismatch = 0;
-    for (let i = 0; i < a.byteLength; i++) {
-        mismatch |= a[i] ^ b[i];
+// --- 全局缓存 (优化性能) ---
+let GLOBAL_CACHED_KEY = null;
+let GLOBAL_PASSWORD_HASH = null;
+
+// --- 内部辅助函数：初始化密钥 ---
+async function _getDerivedKey(password) {
+    if (!password) password = 'default-mandala-secret';
+
+    // 1. 命中全局缓存
+    if (GLOBAL_CACHED_KEY && GLOBAL_PASSWORD_HASH === password) {
+        return GLOBAL_CACHED_KEY;
     }
-    return mismatch === 0;
+
+    // 2. 计算新密钥
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+        'raw',
+        enc.encode(password),
+        { name: 'PBKDF2' },
+        false,
+        ['deriveKey']
+    );
+
+    const derivedKey = await crypto.subtle.deriveKey(
+        {
+            name: 'PBKDF2',
+            salt: enc.encode(SALT_STRING),
+            iterations: ITERATIONS,
+            hash: 'SHA-256',
+        },
+        keyMaterial,
+        { name: ALGORITHM, length: KEY_LENGTH },
+        false,
+        ['encrypt', 'decrypt']
+    );
+
+    // 3. 更新缓存
+    GLOBAL_CACHED_KEY = derivedKey;
+    GLOBAL_PASSWORD_HASH = password;
+    return derivedKey;
 }
 
 /**
- * 获取或缓存密码的 Hash 字节 (SHA-224 Hex String -> Bytes)
+ * 核心处理函数：解析 Mandala 协议头 (重构为支持 AES-GCM)
+ * 保持了原有的参数签名，确保兼容性。
  */
-function getCachedPasswordHashBytes(password) {
-    let expectedHashBytes = passwordHashCache.get(password);
-    if (!expectedHashBytes) {
-        // 注意：协议设计为将 SHA224 的 Hex 字符串转换为 Bytes 传输
-        const hashHex = sha224Hash(String(password));
-        expectedHashBytes = textEncoder.encode(hashHex);
-        
-        if (passwordHashCache.size >= MAX_CACHE_SIZE) {
-            const firstKey = passwordHashCache.keys().next().value;
-            passwordHashCache.delete(firstKey);
-        }
-        passwordHashCache.set(password, expectedHashBytes);
-    }
-    return expectedHashBytes;
-}
-
-/**
- * 获取或缓存密码的原始字节
- */
-function getCachedPasswordBytes(password) {
-    let passwordBytes = passwordBytesCache.get(password);
-    if (!passwordBytes) {
-        passwordBytes = textEncoder.encode(password);
-        
-        if (passwordBytesCache.size >= MAX_CACHE_SIZE) {
-            const first = passwordBytesCache.keys().next().value;
-            passwordBytesCache.delete(first);
-        }
-        passwordBytesCache.set(password, passwordBytes);
-    }
-    return passwordBytes;
-}
-
 export async function parseMandalaHeader(mandalaBuffer, password) {
     if (!password) {
         return { hasError: true, message: 'Password is required' };
     }
 
-    // 基础长度检查 (Salt(4) + Hash(56) + PadLen(1) + Cmd(1) + Atyp(1) + Port(2) + CRLF(2) = 67字节)
-    if (mandalaBuffer.byteLength < 67) {
-        return { hasError: true, message: 'Mandala buffer too short' };
-    }
-
-    // 1. 获取输入视图 (确保是 Uint8Array)
+    // 转换为 Uint8Array
     const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
 
-    // 2. 读取 Salt (明文，前4字节)
-    const salt = buffer.subarray(0, 4);
-    
-    // 3. 准备解密 
-    // ciphertext 是原始数据的引用（包含 [加密头部] + [明文Body]）
-    const ciphertext = buffer.subarray(4);
-    
-    // 创建一个副本用于解密，避免修改原始 buffer。
-    // 重要：Mandala 协议只加密了头部，Body 是明文。
-    // StreamCipher 会解密整个流，导致副本中的 Body 变成乱码，但这不影响我们稍后从 ciphertext 中提取正确的 Body。
-    const decrypted = new Uint8Array(ciphertext); 
-    
-    // 4. 获取密码 Bytes
-    const passwordBytes = getCachedPasswordBytes(password);
-
-    // 5. 初始化流加密并执行解密
-    const cipher = new StreamCipher(passwordBytes, salt);
-    cipher.process(decrypted); 
-
-    // 6. 验证哈希 (Offset 0-56 in decrypted buffer)
-    const expectedHashBytes = getCachedPasswordHashBytes(password);
-
-    if (!constantTimeEqual(decrypted.subarray(0, 56), expectedHashBytes)) {
-        return { hasError: true, message: 'Invalid Mandala Auth' };
+    // 长度检查 (IV + Tag 至少 28 字节)
+    if (buffer.byteLength < IV_LENGTH + 16) {
+        return { hasError: true, message: 'Mandala buffer too short (Invalid)' };
     }
-
-    // 7. 解析剩余头部
-    const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
-    
-    const padLen = decrypted[56]; 
-    let cursor = 57 + padLen;     
-
-    // 确保 Padding 后还有数据 (Cmd, Atyp, Port 等)
-    if (cursor >= decrypted.length) {
-        return { hasError: true, message: 'Buffer too short after padding' };
-    }
-
-    const cmd = decrypted[cursor];
-    const isUDP = (cmd === 3);
-
-    // 仅支持 TCP(1) 和 UDP(3)
-    if (cmd !== 1 && !isUDP) {
-        return { hasError: true, message: 'Unsupported Mandala CMD: ' + cmd };
-    }
-    cursor++;
-
-    // 检查 cursor 是否越界 (需要读取 atyp)
-    if (cursor >= decrypted.length) return { hasError: true, message: 'Buffer ended unexpectedly' };
-
-    const atyp = decrypted[cursor];
-    cursor++;
-    
-    let addressRemote = "";
-    let portRemote = 0;
-    let headerEnd = 0;
 
     try {
+        // 1. 获取密钥
+        const key = await _getDerivedKey(password);
+
+        // 2. 提取 IV 和 密文
+        const iv = buffer.subarray(0, IV_LENGTH);
+        const ciphertext = buffer.subarray(IV_LENGTH);
+
+        // 3. 执行 AES-GCM 解密 (这一步同时验证了完整性，替代了原来的 Hash 校验)
+        // 注意：这里解密的是整个包（Payload），不再只是头部
+        const decryptedBuffer = await crypto.subtle.decrypt(
+            {
+                name: ALGORITHM,
+                iv: iv,
+            },
+            key,
+            ciphertext
+        );
+
+        const decrypted = new Uint8Array(decryptedBuffer);
+        const view = new DataView(decrypted.buffer);
+        let cursor = 0;
+
+        // 4. 解析 Payload 结构
+        // 新协议结构建议: [CMD(1)] [ATYP(1)] [ADDR_VAR] [PORT(2)] [DATA...]
+        // 不需要 Padding 和 CRLF，因为 AES-GCM 已经界定了边界
+
+        if (cursor >= decrypted.length) return { hasError: true, message: 'Empty payload' };
+
+        const cmd = decrypted[cursor];
+        cursor++;
+        
+        const isUDP = (cmd === 3); // 保留 UDP 判断逻辑
+        if (cmd !== 1 && !isUDP) {
+             // 兼容性尝试：如果解密出的第一个字节不是 1 或 3，可能是旧协议数据或干扰
+            return { hasError: true, message: 'Unsupported CMD: ' + cmd };
+        }
+
+        const atyp = decrypted[cursor];
+        cursor++;
+
+        let addressRemote = "";
+        let portRemote = 0;
+
+        // 解析地址 (逻辑与原版保持一致)
         switch (atyp) {
             case CONSTANTS.ADDRESS_TYPE_IPV4:
                 addressRemote = decrypted.subarray(cursor, cursor + 4).join('.');
                 cursor += 4;
                 break;
-            case CONSTANTS.ATYP_SS_DOMAIN: 
+            case CONSTANTS.ATYP_SS_DOMAIN:
                 const domainLen = decrypted[cursor];
-                cursor++; 
-                addressRemote = textDecoder.decode(decrypted.subarray(cursor, cursor + domainLen));
+                cursor++;
+                // 使用 TextDecoder 替代 helpers 中的 textDecoder，避免依赖
+                addressRemote = new TextDecoder().decode(decrypted.subarray(cursor, cursor + domainLen));
                 cursor += domainLen;
                 break;
-            case CONSTANTS.ATYP_SS_IPV6: 
+            case CONSTANTS.ATYP_SS_IPV6:
                 const ipv6 = [];
-                // IPv6 长度 16 字节，每组 2 字节
                 for (let i = 0; i < 8; i++) {
-                    ipv6.push(view.getUint16(cursor + i * 2, false).toString(16)); // false = Big Endian
+                    ipv6.push(view.getUint16(cursor + i * 2, false).toString(16));
                 }
                 addressRemote = '[' + ipv6.join(':') + ']';
                 cursor += 16;
@@ -148,36 +134,28 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
             default:
                 return { hasError: true, message: 'Unknown ATYP: ' + atyp };
         }
-        
-        // 读取 Port (2字节, Big Endian)
-        portRemote = view.getUint16(cursor, false);
+
+        // 解析端口
+        portRemote = view.getUint16(cursor, false); // Big Endian
         cursor += 2;
-        headerEnd = cursor;
+
+        // 5. 提取剩余数据作为 rawClientData
+        // 此时 decrypted 已经是明文，直接截取剩余部分
+        const rawClientData = decrypted.subarray(cursor);
+
+        return {
+            hasError: false,
+            addressRemote,
+            portRemote,
+            addressType: atyp,
+            isUDP: isUDP,
+            rawClientData: rawClientData, // 这是解密后的 Body
+            protocol: 'mandala'
+        };
 
     } catch (e) {
-        return { hasError: true, message: 'Address parse failed: ' + e.message };
+        // AES-GCM 解密失败会抛出错误（如密码错误或数据篡改）
+        console.error('Mandala Decrypt Error:', e);
+        return { hasError: true, message: 'Decryption failed (Invalid Password or Tampered Data)' };
     }
-    
-    // 8. 验证 CRLF (协议尾部标记)
-    if (headerEnd + 2 > decrypted.byteLength) {
-        return { hasError: true, message: 'Missing CRLF data' };
-    }
-    if (decrypted[headerEnd] !== 0x0D || decrypted[headerEnd + 1] !== 0x0A) {
-        return { hasError: true, message: 'Missing CRLF' };
-    }
-
-    // 9. 返回结果
-    // 这里的关键是从原始 ciphertext 中提取 Body，因为 Body 是明文传输的。
-    // headerEnd 是头部结束位置（不含 CRLF），CRLF 占2字节，所以数据从 headerEnd + 2 开始。
-    const rawClientData = ciphertext.subarray(headerEnd + 2);
-
-    return {
-        hasError: false,
-        addressRemote,
-        portRemote,
-        addressType: atyp,
-        isUDP: isUDP, 
-        rawClientData: rawClientData,
-        protocol: 'mandala'
-    };
 }
