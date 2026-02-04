@@ -4,7 +4,6 @@ import { textDecoder, textEncoder, sha224Hash, StreamCipher } from '../utils/hel
 
 // Cache System
 const passwordHashCache = new Map();
-// [Optimization] 增加 Bytes 缓存，避免每次 new StreamCipher 都进行 TextEncode
 const passwordBytesCache = new Map();
 const MAX_CACHE_SIZE = 100;
 
@@ -29,9 +28,11 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     // 2. 读取 Salt (明文，前4字节)
     const salt = buffer.subarray(0, 4);
     
-    // 3. 准备解密 (复制剩余数据，避免修改原始 buffer 导致影响其他协议探测)
-    // 密文部分从第 4 字节开始
+    // 3. 准备解密 
+    // ciphertext 是原始数据的引用（包含 [加密头部] + [明文Body]）
     const ciphertext = buffer.subarray(4);
+    
+    // 创建一个副本用于解密，避免修改原始 buffer 导致 Body 被破坏
     const decrypted = new Uint8Array(ciphertext); 
     
     // 4. 获取密码 Bytes (带缓存)
@@ -46,9 +47,9 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     }
 
     // 5. 初始化流加密并执行解密
-    // 使用 Password + Salt 初始化状态机
+    // 注意：这里会解密整个缓冲区。头部被正确解密，但后面的 Body (原文本就是明文) 会被错误地异或。
     const cipher = new StreamCipher(passwordBytes, salt);
-    cipher.process(decrypted); // 原地解密 decrypted 数组
+    cipher.process(decrypted); 
 
     // 6. 验证哈希 (Offset 0-56 in decrypted buffer)
     let expectedHashBytes = passwordHashCache.get(password);
@@ -62,12 +63,12 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         passwordHashCache.set(password, expectedHashBytes);
     }
 
-    // [Security] 必须验证解密后的数据是否符合签名
     if (!constantTimeEqual(decrypted.subarray(0, 56), expectedHashBytes)) {
         return { hasError: true, message: 'Invalid Mandala Auth' };
     }
 
     // 7. 解析剩余头部 (使用 DataView 操作 decrypted buffer)
+    // 我们需要在 decrypted 中找到头部的结束位置
     const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
     
     const padLen = decrypted[56]; 
@@ -93,13 +94,12 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     try {
         switch (atyp) {
             case CONSTANTS.ADDRESS_TYPE_IPV4:
-                // 4 bytes IPv4
                 addressRemote = decrypted.subarray(cursor, cursor + 4).join('.');
                 cursor += 4;
                 break;
             case CONSTANTS.ATYP_SS_DOMAIN: 
                 const domainLen = decrypted[cursor];
-                cursor++; // skip len byte
+                cursor++; 
                 addressRemote = textDecoder.decode(decrypted.subarray(cursor, cursor + domainLen));
                 cursor += domainLen;
                 break;
@@ -130,16 +130,19 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         return { hasError: true, message: 'Missing CRLF' };
     }
 
-    // 9. 返回结果
-    // 注意: rawClientData 是解密后的数据，意味着后续处理管道将传输明文。
-    // 这符合 Header-Only Obfuscation 的设计。
+    // 9. 返回结果 (关键修复)
+    // [Fix] 必须从原始的 ciphertext 中截取 Body，而不是从 decrypted 中截取。
+    // 因为客户端只加密了 Header，后面的 Body 是明文发送的。
+    // decrypted 中的 Body 是被我们错误异或过的乱码，而 ciphertext 中的 Body 是原始明文。
     return {
         hasError: false,
         addressRemote,
         portRemote,
         addressType: atyp,
         isUDP: isUDP, 
-        rawClientData: decrypted.subarray(headerEnd + 2),
+        // ❌ 错误写法: rawClientData: decrypted.subarray(headerEnd + 2)
+        // ✅ 正确写法: 从原始数据中提取后续明文流
+        rawClientData: ciphertext.subarray(headerEnd + 2),
         protocol: 'mandala'
     };
 }
