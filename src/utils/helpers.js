@@ -1,11 +1,13 @@
+// src/utils/helpers.js
 /**
  * 文件名: src/utils/helpers.js
  * 修改内容: 
- * 1. [Restore] 恢复原有 SHA-224 和 KV Cache 的完整格式与注释，方便对比。
- * 2. [New] 在文件末尾添加 StreamCipher 类 (包含 Uint32Array 性能优化)。
+ * 1. [Fix] StreamCipher: 修复种子生成算法，解决不同顺序 Key 生成相同 Seed 的安全隐患。
+ * 2. [Refactor] KV Cache: 增加 MAX_KV_CACHE_SIZE 限制，防止内存无界增长。
+ * 3. [Clean] 移除未使用的 CONSTANTS 引用。
  */
-import { CONSTANTS } from '../constants.js';
 
+// 全局编解码器实例
 export const textDecoder = new TextDecoder();
 export const textEncoder = new TextEncoder();
 
@@ -217,6 +219,7 @@ export function isHostBanned(hostname, banList) {
 
 // L1: 内存缓存 (Worker 热启动期间有效，速度最快)
 const GLOBAL_KV_CACHE = new Map();
+const MAX_KV_CACHE_SIZE = 200; // [新增] 防止内存无限增长
 
 // Cache API 使用的虚拟前缀 (用于伪装 Request)
 const CACHE_API_PREFIX = 'http://kv-cache.local/';
@@ -272,6 +275,8 @@ export async function getKV(env, key) {
             }
 
             // 命中有效值，回填到 L1
+            // [安全] 检查 L1 大小
+            if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
             GLOBAL_KV_CACHE.set(key, val);
             console.log(`[KV] Hit Cache API for ${key}`);
             return val;
@@ -293,6 +298,7 @@ export async function getKV(env, key) {
     // [修复] 无论 val 是否为 null，都写入缓存
     
     // 写回 L1 (L1 Map 可以直接存 null)
+    if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
     GLOBAL_KV_CACHE.set(key, val);
 
     // 写回 L2 (Cache API 只能存 Response，null 需转为特殊标记)
@@ -358,8 +364,13 @@ export class StreamCipher {
         // 初始化种子：混合 Key 和 Salt
         let s1 = 0, s2 = 0, s3 = 0, s4 = 0;
         
-        for (let i = 0; i < keyBytes.length; i++) s1 = (s1 + keyBytes[i]) | 0;
-        for (let i = 0; i < saltBytes.length; i++) s2 = (s2 + saltBytes[i]) | 0;
+        // [修复] 使用 Math.imul(x, 31) 进行混合，防止 key=[1,2] 和 key=[2,1] 产生相同种子
+        for (let i = 0; i < keyBytes.length; i++) {
+            s1 = (Math.imul(s1, 31) + keyBytes[i]) | 0;
+        }
+        for (let i = 0; i < saltBytes.length; i++) {
+            s2 = (Math.imul(s2, 31) + saltBytes[i]) | 0;
+        }
         
         // 增加非线性扰动
         s3 = fmix32(s1 ^ 0x12345678);
