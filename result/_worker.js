@@ -348,6 +348,60 @@ async function clearKVCache(keys) {
   await Promise.all(deletePromises);
   void(0);
 }
+function fmix32(h) {
+  h ^= h >>> 16;
+  h = Math.imul(h, 2246822507);
+  h ^= h >>> 13;
+  h = Math.imul(h, 3266489909);
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+var StreamCipher = class {
+  constructor(keyBytes, saltBytes) {
+    let s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+    for (let i = 0; i < keyBytes.length; i++) s1 = s1 + keyBytes[i] | 0;
+    for (let i = 0; i < saltBytes.length; i++) s2 = s2 + saltBytes[i] | 0;
+    s3 = fmix32(s1 ^ 305419896);
+    s4 = fmix32(s2 ^ 2271560481);
+    s1 = fmix32(s1);
+    s2 = fmix32(s2);
+    this.s = new Uint32Array([s1, s2, s3, s4]);
+  }
+  next() {
+    let t = this.s[3];
+    let s = this.s[0];
+    this.s[3] = this.s[2];
+    this.s[2] = this.s[1];
+    this.s[1] = s;
+    t ^= t << 11;
+    t ^= t >>> 8;
+    this.s[0] = t ^ s ^ s >>> 19;
+    return this.s[0];
+  }
+  process(buffer) {
+    let i = 0;
+    const len = buffer.length;
+    if (buffer.byteOffset % 4 === 0 && len >= 4) {
+      const len32 = Math.floor(len / 4);
+      const view32 = new Uint32Array(buffer.buffer, buffer.byteOffset, len32);
+      for (let j = 0; j < len32; j++) {
+        view32[j] ^= this.next();
+      }
+      i = len32 * 4;
+    }
+    let randomCache = 0;
+    let cacheRemaining = 0;
+    for (; i < len; i++) {
+      if (cacheRemaining === 0) {
+        randomCache = this.next();
+        cacheRemaining = 4;
+      }
+      buffer[i] ^= randomCache & 255;
+      randomCache >>>= 8;
+      cacheRemaining--;
+    }
+  }
+};
 
 var configCache = {};
 var remoteConfigCache = {
@@ -777,6 +831,7 @@ async function parseTrojanHeader(trojanBuffer, password) {
 }
 
 var passwordHashCache =   new Map();
+var passwordBytesCache =   new Map();
 var MAX_CACHE_SIZE2 = 100;
 function constantTimeEqual2(a, b) {
   if (a.byteLength !== b.byteLength) return false;
@@ -792,11 +847,19 @@ async function parseMandalaHeader(mandalaBuffer, password) {
   }
   const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
   const salt = buffer.subarray(0, 4);
-  const decrypted = new Uint8Array(buffer.byteLength - 4);
-  const len = decrypted.length;
-  for (let i = 0; i < len; i++) {
-    decrypted[i] = buffer[i + 4] ^ salt[i & 3];
+  const ciphertext = buffer.subarray(4);
+  const decrypted = new Uint8Array(ciphertext);
+  let passwordBytes = passwordBytesCache.get(password);
+  if (!passwordBytes) {
+    passwordBytes = textEncoder.encode(password);
+    if (passwordBytesCache.size >= MAX_CACHE_SIZE2) {
+      const first = passwordBytesCache.keys().next().value;
+      passwordBytesCache.delete(first);
+    }
+    passwordBytesCache.set(password, passwordBytes);
   }
+  const cipher = new StreamCipher(passwordBytes, salt);
+  cipher.process(decrypted);
   let expectedHashBytes = passwordHashCache.get(password);
   if (!expectedHashBytes) {
     const hashHex = sha224Hash(String(password));
