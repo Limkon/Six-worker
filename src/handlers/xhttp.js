@@ -5,8 +5,8 @@
  * 2. [Refactor] 移除未使用的死代码 (get_xhttp_buffer)。
  * 3. [Fix] Header 解析失败时显式 cancel reader，防止资源泄漏。
  * 4. [Feat] 增加 Header 解析错误的日志记录，便于排查。
- * 5. [Fix] 保留对客户端主动断开连接的异常捕获。
- * 6. [Optimization] 优化错误日志策略：静默处理 "Stream was cancelled" 等预期内网络错误。
+ * 5. [Fix] 全面增强异常捕获：确保 uploader 和 connectionClosed 永远不会 Reject，
+ * 防止 "Stream was cancelled" 导致 Worker 抛出 Uncaught Exception。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -44,20 +44,17 @@ async function read_at_least(reader, minBytes, initialBuffer) {
 async function read_xhttp_header(readable, ctx) {
     const reader = readable.getReader(); 
     
-    // 内部辅助：失败时清理流并返回错误信息
     const fail = async (msg) => {
         try { await reader.cancel(msg); } catch (_) {}
         return msg;
     };
 
     try {
-        // 1. 读取基础头部结构：Version(1) + UUID(16) + PBLen(1) = 18字节
         let { value: cache, done } = await read_at_least(reader, 18);
         if (cache.length < 18) return fail('header too short');
 
         const version = cache[0];
         
-        // [Optimization] 使用 stringifyUUID 进行字符串比对
         const uuidStr = stringifyUUID(cache.subarray(1, 17));
         const expectedID = ctx.userID;
         const expectedIDLow = ctx.userIDLow;
@@ -67,7 +64,6 @@ async function read_xhttp_header(readable, ctx) {
         }
         
         const pb_len = cache[17];
-        // Base(18) + PB(pb_len) + Cmd(1) + Port(2) + Atyp(1) = 22 + pb_len
         const min_len_until_atyp = 22 + pb_len;
         
         if (cache.length < min_len_until_atyp) {
@@ -111,7 +107,6 @@ async function read_xhttp_header(readable, ctx) {
             if (cache.length < header_len) return fail('header too short for full address');
         }
         
-        // 解析地址
         let hostname = '';
         const addr_val_idx = addr_body_idx; 
         
@@ -230,7 +225,6 @@ export async function handleXhttpClient(request, ctx) {
     try {
         const result = await read_xhttp_header(request.body, ctx);
         if (typeof result === 'string') {
-            // 记录解析错误，但如果是客户端断开连接则忽略
             if (result !== 'stream cancelled' && !result.includes('cancelled')) {
                 console.warn('[XHTTP Error] Header parsing failed:', result);
             }
@@ -249,18 +243,21 @@ export async function handleXhttpClient(request, ctx) {
         
         const uploader = {
             done: (async () => {
-                const writer = remoteSocket.writable.getWriter();
+                // [Fix] 将 getWriter 移入 try 块，防止同步抛错导致 Promise Reject
+                let writer = null;
                 try {
+                    writer = remoteSocket.writable.getWriter();
                     await upload_to_remote_xhttp(writer, httpx);
                 } catch (e) {
-                    // [Fix] 捕获客户端断开连接导致的读取错误
-                    // 仅当错误不是 "Stream was cancelled" 时才记录，避免日志刷屏
                     const errStr = (e && e.message) ? e.message : String(e);
+                    // 仅当错误不是 "Stream was cancelled" 时才记录，避免日志刷屏
                     if (!errStr.includes('cancelled') && !errStr.includes('aborted')) {
                         console.warn('[XHTTP Upload Error]:', errStr);
                     }
                 } finally {
-                    try { await writer.close(); } catch (_) {}
+                    if (writer) {
+                        try { await writer.close(); } catch (_) {}
+                    }
                 }
             })(),
             abort: () => { try { remoteSocket.writable.abort(); } catch (_) {} }
@@ -268,6 +265,8 @@ export async function handleXhttpClient(request, ctx) {
 
         const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
         
+        // [Fix] 终极兜底：确保 connectionClosed 永远不会 Reject
+        // 这对于 ctx.waitUntil 是至关重要的，否则任何后台 Rejection 都会被视为 Worker 崩溃
         const connectionClosed = Promise.race([
             downloader.done,
             uploader.done
@@ -275,6 +274,9 @@ export async function handleXhttpClient(request, ctx) {
             try { remoteSocket.close(); } catch (_) {}
             try { downloader.abort(); } catch (_) {}
             try { uploader.abort(); } catch (_) {}
+        }).catch((err) => {
+            // 吞掉所有后台错误，保持 Promise Resolved
+            // console.debug('Ignored XHTTP background error:', err);
         });
 
         return {
@@ -283,10 +285,8 @@ export async function handleXhttpClient(request, ctx) {
         };
 
     } catch (e) {
-        // [Optimization] 全局异常捕获优化：静默处理预期的网络中断
         const errStr = (e && e.message) ? e.message : String(e);
         if (errStr.includes('cancelled') || errStr.includes('aborted')) {
-            // 客户端主动断开，静默返回 null (index.js 会处理为 500，但不报错)
             return null;
         }
         console.error('XHTTP Error:', e);
