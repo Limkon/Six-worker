@@ -3,13 +3,18 @@
  * 说明: 
  * 1. [重构] 引入 src/templates/home.js 模板。
  * 2. [逻辑] 保持了节点生成和协议判断逻辑。
+ * 3. [Fix] 修复直接读取 env.KV 导致的潜在白屏问题，统一使用 getConfig 走缓存和容错机制。
  */
 import { CONSTANTS } from '../constants.js';
 import { sha1 } from '../utils/helpers.js';
+import { getConfig } from '../config.js'; // [新增] 引入配置获取工具
 import { getHomePageHtml, getSectionHtml, getCopyBtnHtml } from '../templates/home.js';
 
 export async function generateHomePage(env, ctx, hostName) {
-    const FileName = await env.KV?.get('SUBNAME') || env.SUBNAME || 'sub';
+    // [Fix] 使用 getConfig 替代直接 KV 读取
+    // 优势: 1. 利用 L1/L2 缓存提高加载速度 2. 包含 try-catch 防止 KV 故障导致白屏 3. 统一配置管理
+    const FileName = await getConfig(env, 'SUBNAME', 'sub');
+    
     const isWorkersDev = hostName.includes("workers.dev");
     const httpsPorts = ctx.httpsPorts;
     const path = '/?ed=2560'; // Default VLESS path
