@@ -5,6 +5,7 @@
  * 1. SOCKS5 UDP Associate (BND.ADDR 0.0.0.0 Fix).
  * 2. 严格的 Cloudflare 防风控机制 (禁止内网 IP).
  * 3. 增强的正则匹配性能.
+ * 4. [Fix] SOCKS5 UDP Buffer: 修复 UDP 分包导致的断流问题。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -336,6 +337,28 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 
 // --- UDP Helper Functions ---
 
+function concatUint8(a, b) {
+    const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
+    const res = new Uint8Array(a.length + bArr.length);
+    res.set(a);
+    res.set(bArr, a.length);
+    return res;
+}
+
+// 计算 SOCKS5 UDP 头部长度，如果数据不足则返回 -1
+function getSocks5UdpHeaderLength(buffer) {
+    if (buffer.length < 4) return -1; // Need at least RSV(2)+FRAG(1)+ATYP(1)
+    const atyp = buffer[3];
+    if (atyp === 1) return 10; // IPv4: 4+4+2
+    if (atyp === 4) return 22; // IPv6: 4+16+2
+    if (atyp === 3) {
+        if (buffer.length < 5) return -1; // Need Len byte
+        const len = buffer[4];
+        return 7 + len; // 4 + 1(Len) + Len + 2(Port)
+    }
+    return 0; // Unknown/Invalid
+}
+
 function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
     const rsvFrag = [0, 0, 0];
     let addrBytes;
@@ -358,18 +381,6 @@ function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
     }
     const portBytes = [portRemote >> 8, portRemote & 0xff];
     return new Uint8Array([...rsvFrag, atyp, ...addrBytes, ...portBytes]);
-}
-
-function stripSocks5UdpHeader(buffer) {
-    if (buffer.length < 4) return null; // Invalid packet
-    let offset = 4;
-    const atyp = buffer[3];
-    if (atyp === 1) offset += 4;
-    else if (atyp === 3) offset += 1 + buffer[4];
-    else if (atyp === 4) offset += 16;
-    offset += 2;
-    if (offset > buffer.length) return null; // Partial packet
-    return buffer.slice(offset);
 }
 
 // --- Write Helpers ---
@@ -476,26 +487,48 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
 
     // Decapsulate & Stream Response
     let responseHeader = vlessResponseHeader;
+    let udpBuffer = new Uint8Array(0); // [Fix] Buffer mechanism for fragmentation
+
     await udpSocket.readable.pipeTo(new WritableStream({
         async write(chunk, controller) {
             if (webSocket.readyState !== 1) { controller.error(new Error('WS Closed')); return; }
             
-            // [Fix] 使用 stripSocks5UdpHeader 处理响应
-            const buffer = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-            const payload = stripSocks5UdpHeader(buffer);
+            // 1. Accumulate buffer
+            udpBuffer = concatUint8(udpBuffer, chunk);
             
-            // 如果 Payload 无效 (Header不完整)，丢弃该包防止断流
-            if (!payload) {
-                // log('[SOCKS5] UDP Packet dropped due to invalid header or fragmentation');
+            // Safety: Buffer limit
+            if (udpBuffer.length > 4096) {
+                // Buffer overflow or bad protocol, reset
+                udpBuffer = new Uint8Array(0); 
                 return;
             }
+
+            // 2. Check for complete header
+            const headerLen = getSocks5UdpHeaderLength(udpBuffer);
             
-            const dataToSend = responseHeader 
-                ? new Uint8Array([...responseHeader, ...payload])
-                : payload;
-            responseHeader = null;
-            
-            webSocket.send(dataToSend);
+            if (headerLen > 0) {
+                // We have enough data for at least the header
+                if (udpBuffer.length >= headerLen) {
+                    // Header is complete
+                    // Extract Payload (Everything after header)
+                    const payload = udpBuffer.subarray(headerLen);
+                    
+                    const dataToSend = responseHeader 
+                        ? new Uint8Array([...responseHeader, ...payload])
+                        : payload;
+                    responseHeader = null;
+                    
+                    webSocket.send(dataToSend);
+                    
+                    // Reset buffer (Assume 1 packet per flow chunk logic or tolerate loss if concatenated)
+                    udpBuffer = new Uint8Array(0);
+                }
+                // Else: Wait for more data
+            } else if (headerLen === 0) {
+                 // Invalid data, reset
+                 udpBuffer = new Uint8Array(0);
+            }
+            // headerLen == -1: Need more data, keep buffering
         },
         close() { 
             log('UDP Relay closed'); 
