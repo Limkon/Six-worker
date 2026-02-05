@@ -2291,7 +2291,9 @@ async function handleXhttpClient(request, ctx) {
   try {
     const result = await read_xhttp_header(request.body, ctx);
     if (typeof result === "string") {
-      void(0);
+      if (result !== "stream cancelled" && !result.includes("cancelled")) {
+        void(0);
+      }
       return null;
     }
     const { hostname, port, atype, data, resp, reader, done } = result;
@@ -2307,6 +2309,10 @@ async function handleXhttpClient(request, ctx) {
         try {
           await upload_to_remote_xhttp(writer, httpx);
         } catch (e) {
+          const errStr = e && e.message ? e.message : String(e);
+          if (!errStr.includes("cancelled") && !errStr.includes("aborted")) {
+            void(0);
+          }
         } finally {
           try {
             await writer.close();
@@ -2344,6 +2350,10 @@ async function handleXhttpClient(request, ctx) {
       closed: connectionClosed
     };
   } catch (e) {
+    const errStr = e && e.message ? e.message : String(e);
+    if (errStr.includes("cancelled") || errStr.includes("aborted")) {
+      return null;
+    }
     void(0);
     return null;
   }
