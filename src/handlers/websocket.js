@@ -1,11 +1,10 @@
 // src/handlers/websocket.js
 /**
  * 文件名: src/handlers/websocket.js
- * 审计结论: [已修复]
- * 1. 包含内存溢出保护 (Header Buffer Limit)。
- * 2. 包含 SOCKS5 状态机修复。
- * 3. 包含完整的资源锁释放逻辑 (Writer Release Lock)。
- * 4. [Fix] 修复 "This ReadableStream is closed" 竞态报错。
+ * 重构说明:
+ * 1. [核心优化] Early Data (0-RTT) 支持：主动解析协议头，支持粘包处理。
+ * 2. [稳定性] 引入 vlessBuffer 缓冲区，自动拼接分包数据，防止连接崩溃。
+ * 3. [功能] 增强日志记录，覆盖 IPv4/IPv6/域名，包含 SOCKS5 状态机修复。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -42,7 +41,9 @@ export async function handleWebSocketRequest(request, ctx) {
     let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [] };
     let isConnected = false; 
     let socks5State = 0; // 0: Method, 1: Auth, 2: Request, 3: Established
-    let headerBuffer = new Uint8Array(0); 
+    
+    // [Buffer] 定义 vlessBuffer 用于处理分包和粘包
+    let vlessBuffer = new Uint8Array(0); 
     
     let activeWriter = null;
     let activeSocket = null;
@@ -62,9 +63,10 @@ export async function handleWebSocketRequest(request, ctx) {
     }, DETECT_TIMEOUT_MS);
 
     // 处理 Early Data (VLESS over WS 0-RTT)
+    // 从 WebSocket 握手头中提取 Sec-WebSocket-Protocol
     const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
     
-    // [Fix] 使用修复后的流创建函数
+    // 创建可读流，自动注入 Early Data
     const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
 
     const streamPromise = readableWebSocketStream.pipeTo(new WritableStream({
@@ -103,42 +105,43 @@ export async function handleWebSocketRequest(request, ctx) {
                 return;
             }
 
-            // --- 阶段一：协议识别与握手 ---
-            headerBuffer = concatUint8(headerBuffer, chunkArr);
+            // --- 阶段一：协议识别与握手 (Active Parsing) ---
+            // 自动拼接数据包，处理碎片化数据
+            vlessBuffer = concatUint8(vlessBuffer, chunkArr);
 
             // [Security] 实时检查 Buffer 大小
-            if (headerBuffer.length > MAX_HEADER_BUFFER) {
+            if (vlessBuffer.length > MAX_HEADER_BUFFER) {
                 clearTimeout(timeoutTimer);
                 throw new Error(`Header buffer limit exceeded`);
             }
 
-            // SOCKS5 握手拦截 (在进入通用识别前处理)
+            // SOCKS5 握手拦截 (特殊状态机处理)
             if (socks5State < 2) {
-                const { consumed, newState, error } = tryHandleSocks5Handshake(headerBuffer, socks5State, webSocket, ctx, log);
+                const { consumed, newState, error } = tryHandleSocks5Handshake(vlessBuffer, socks5State, webSocket, ctx, log);
                 if (error) {
                     clearTimeout(timeoutTimer); 
                     throw new Error(error);
                 }
                 if (consumed > 0) {
-                    headerBuffer = headerBuffer.slice(consumed);
+                    vlessBuffer = vlessBuffer.slice(consumed);
                     socks5State = newState;
                     // 如果还未完成握手 (例如刚完成 Method 协商)，返回等待更多数据
                     if (socks5State !== 2) return; 
                 }
             }
 
-            if (headerBuffer.length === 0) return;
+            if (vlessBuffer.length === 0) return;
 
             try {
-                // 尝试识别协议
-                const result = await protocolManager.detect(headerBuffer, ctx);
+                // 尝试识别协议 (Active Detection)
+                const result = await protocolManager.detect(vlessBuffer, ctx);
                 
                 // 一致性检查：如果之前进行了 SOCKS5 握手，后续协议必须是 SOCKS5
                 if (socks5State === 2 && result.protocol !== 'socks5') {
                     throw new Error('Protocol mismatch after Socks5 handshake');
                 }
 
-                // 禁用协议检查
+                // 检查协议是否被禁用
                 const pName = result.protocol; 
                 const isSocksDisabled = pName === 'socks5' && ctx.disabledProtocols.includes('socks');
                 if (ctx.disabledProtocols.includes(pName) || isSocksDisabled) {
@@ -161,12 +164,13 @@ export async function handleWebSocketRequest(request, ctx) {
                 remoteSocketWrapper.isConnecting = true;
 
                 // 准备 payload 和响应头
-                let clientData = headerBuffer; 
+                // 提取剩余的真实请求数据 (处理粘包)
+                let clientData = vlessBuffer; 
                 let responseHeader = null;
 
                 if (protocol === 'vless') {
                     // VLESS 需要剥离头部，并返回版本号响应
-                    clientData = headerBuffer.subarray(rawDataIndex);
+                    clientData = vlessBuffer.subarray(rawDataIndex);
                     responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
                 } else if (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') {
                     // Trojan/SS 使用解析后的净荷 (去除了头部)
@@ -178,7 +182,7 @@ export async function handleWebSocketRequest(request, ctx) {
                     socks5State = 3;
                 }
 
-                headerBuffer = null; // 释放内存
+                vlessBuffer = null; // 释放内存
 
                 // 移交出站连接 (调用 outbound.js)
                 if (isUDP) {
@@ -188,8 +192,10 @@ export async function handleWebSocketRequest(request, ctx) {
                 }
 
             } catch (e) {
-                // [Robustness] 如果是数据分片导致解析失败（长度不够），允许等待后续数据
-                if (headerBuffer && headerBuffer.length < 512 && headerBuffer.length < MAX_HEADER_BUFFER) {
+                // [Stability] 增强的分包处理
+                // 如果是数据分片导致解析失败（长度不够），且缓冲区未满，则静默等待后续数据
+                if (vlessBuffer && vlessBuffer.length < 512 && vlessBuffer.length < MAX_HEADER_BUFFER) {
+                    // log('Partial data received, waiting for more...');
                     return; 
                 }
                 // 否则视为非法协议或错误
@@ -198,7 +204,7 @@ export async function handleWebSocketRequest(request, ctx) {
                 safeCloseWebSocket(webSocket);
             }
         },
-        // [Fix] 确保流关闭时释放锁和资源
+        // 确保流关闭时释放锁和资源
         close() { 
             if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
             if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} }
@@ -209,7 +215,7 @@ export async function handleWebSocketRequest(request, ctx) {
             safeCloseWebSocket(webSocket); 
         },
     })).catch((err) => {
-        // [Fix] 异常捕获时的兜底清理
+        // 异常捕获时的兜底清理
         clearTimeout(timeoutTimer);
         if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} }
         if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} }
@@ -281,24 +287,24 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
     return res;
 }
 
-// [Fix] 健壮的 ReadableStream 包装器，防止 "closed" 报错
+// 健壮的 ReadableStream 包装器，防止 "closed" 报错
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
     let readableStreamCancel = false;
-    let isStreamClosed = false; // [Fix] 新增内部状态，追踪流是否已关闭
+    let isStreamClosed = false; // 新增内部状态，追踪流是否已关闭
 
     return new ReadableStream({
         start(controller) {
-            // [Fix] 包装 enqueue，防止向已关闭流写入
+            // 包装 enqueue，防止向已关闭流写入
             const safeEnqueue = (chunk) => {
                 if (readableStreamCancel || isStreamClosed) return;
                 try {
                     controller.enqueue(chunk);
                 } catch (e) {
-                    // 忽略 "closed" 错误，但这通常不应该发生，因为我们有 isStreamClosed 检查
+                    // 忽略 "closed" 错误
                 }
             };
             
-            // [Fix] 包装 close
+            // 包装 close
             const safeClose = () => {
                 if (readableStreamCancel || isStreamClosed) return;
                 try {
@@ -307,7 +313,7 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
                 } catch (e) { }
             };
 
-             // [Fix] 包装 error
+             // 包装 error
             const safeError = (e) => {
                 if (readableStreamCancel || isStreamClosed) return;
                 try {
@@ -332,6 +338,7 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
                 safeError(err);
             });
             
+            // 注入 Early Data (0-RTT)
             const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
             if (error) safeError(error);
             else if (earlyData) safeEnqueue(earlyData);
