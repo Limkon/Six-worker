@@ -6,6 +6,7 @@
  * 3. [Fix] Header 解析失败时显式 cancel reader，防止资源泄漏。
  * 4. [Feat] 增加 Header 解析错误的日志记录，便于排查。
  * 5. [Fix] 保留对客户端主动断开连接的异常捕获。
+ * 6. [Optimization] 优化错误日志策略：静默处理 "Stream was cancelled" 等预期内网络错误。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -29,7 +30,6 @@ async function read_at_least(reader, minBytes, initialBuffer) {
     let currentBuffer = initialBuffer || new Uint8Array(0);
     
     while (currentBuffer.length < minBytes) {
-        // [Fix] reader.read() 不接受参数，移除无用的 new Uint8Array 分配
         const { value, done } = await reader.read();
         
         if (done) return { value: currentBuffer, done: true };
@@ -230,8 +230,10 @@ export async function handleXhttpClient(request, ctx) {
     try {
         const result = await read_xhttp_header(request.body, ctx);
         if (typeof result === 'string') {
-            // [Log] 记录具体的解析错误，方便排查
-            console.warn('[XHTTP Error] Header parsing failed:', result);
+            // 记录解析错误，但如果是客户端断开连接则忽略
+            if (result !== 'stream cancelled' && !result.includes('cancelled')) {
+                console.warn('[XHTTP Error] Header parsing failed:', result);
+            }
             return null;
         }
         
@@ -251,8 +253,12 @@ export async function handleXhttpClient(request, ctx) {
                 try {
                     await upload_to_remote_xhttp(writer, httpx);
                 } catch (e) {
-                    // [Fix] 捕获客户端断开连接导致的读取错误，避免触发 Worker 异常日志
-                    // 这是一个预期内的网络行为（如用户关闭页面），不需要抛出错误
+                    // [Fix] 捕获客户端断开连接导致的读取错误
+                    // 仅当错误不是 "Stream was cancelled" 时才记录，避免日志刷屏
+                    const errStr = (e && e.message) ? e.message : String(e);
+                    if (!errStr.includes('cancelled') && !errStr.includes('aborted')) {
+                        console.warn('[XHTTP Upload Error]:', errStr);
+                    }
                 } finally {
                     try { await writer.close(); } catch (_) {}
                 }
@@ -277,6 +283,12 @@ export async function handleXhttpClient(request, ctx) {
         };
 
     } catch (e) {
+        // [Optimization] 全局异常捕获优化：静默处理预期的网络中断
+        const errStr = (e && e.message) ? e.message : String(e);
+        if (errStr.includes('cancelled') || errStr.includes('aborted')) {
+            // 客户端主动断开，静默返回 null (index.js 会处理为 500，但不报错)
+            return null;
+        }
         console.error('XHTTP Error:', e);
         return null;
     }
