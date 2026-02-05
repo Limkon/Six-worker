@@ -3,6 +3,7 @@
  * 文件名: src/index.js
  * 修改说明:
  * 1. [Fix] proxyUrl: 增加防回环检测，防止因配置错误导致 Worker 请求自己引发 loadShed 崩溃。
+ * 2. [Optimization] 增强全局错误捕获，防止异常对象为空时导致 Worker 崩溃白屏。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -257,7 +258,21 @@ export default {
             return new Response('404 Not Found', { status: 404 });
 
         } catch (e) {
-            return new Response(e.stack || e.toString(), { status: 500 });
+            // [Fix] 增强型错误处理：
+            // 1. 防止 e 为 null/undefined 导致二次报错。
+            // 2. 优先获取堆栈信息(stack)，方便排查问题。
+            const errInfo = (e && (e.stack || e.message || e.toString())) || "Unknown Internal Error";
+            
+            console.error(errInfo);
+
+            // 返回带有详细错误信息的 500 响应
+            return new Response(errInfo, { 
+                status: 500, 
+                headers: { 
+                    'Content-Type': 'text/plain;charset=utf-8',
+                    'X-Error-Source': 'Six-Worker-Core'
+                } 
+            });
         }
     },
     
