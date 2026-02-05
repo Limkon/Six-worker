@@ -2,15 +2,15 @@
 /**
  * 文件名: src/protocols/mandala.js
  * 修改说明:
- * 1. [Refactor] 移除本地缓存逻辑，直接依赖 src/utils/helpers.js 的全局 sha224Hash 缓存。
- * 2. [Cleanup] 简化哈希比对流程。
+ * 1. [Refactor] 移除了本地的 passwordHashCache 和 passwordBytesCache，减少内存占用。
+ * 2. [Refactor] 对接 src/utils/helpers.js 的全局 sha224Hash 缓存。
+ * 3. [Feature] 保留了完整的 StreamCipher 解密、Salt 处理和 Padding 逻辑。
  */
 import { CONSTANTS } from '../constants.js';
-import { textDecoder, textEncoder, sha224Hash } from '../utils/helpers.js';
+import { textDecoder, textEncoder, sha224Hash, StreamCipher } from '../utils/helpers.js';
 
 /**
- * [安全] 常量时间比较函数
- * 防止侧信道攻击
+ * 恒定时间比较两个 Uint8Array 是否相等，防止时序攻击
  */
 function constantTimeEqual(a, b) {
     if (a.byteLength !== b.byteLength) return false;
@@ -22,103 +22,130 @@ function constantTimeEqual(a, b) {
 }
 
 export async function parseMandalaHeader(mandalaBuffer, password) {
-    // Mandala 协议头结构与 Trojan 非常相似
-    // 58 = Hash(56) + CR(1) + LF(1)
-    if (mandalaBuffer.byteLength < 58) return { hasError: true, message: 'Mandala buffer too short.' };
-    
-    // [Optimization] 确保 buffer 是 Uint8Array
+    if (!password) {
+        return { hasError: true, message: 'Password is required' };
+    }
+
+    // 基础长度检查 (Salt(4) + Hash(56) + PadLen(1) + Cmd(1) + Atyp(1) + Port(2) + CRLF(2) = 67字节)
+    if (mandalaBuffer.byteLength < 67) {
+        return { hasError: true, message: 'Mandala buffer too short' };
+    }
+
+    // 1. 获取输入视图 (确保是 Uint8Array)
     const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
+
+    // 2. 读取 Salt (明文，前4字节)
+    const salt = buffer.subarray(0, 4);
     
-    // 1. 验证哈希 (Offset 0-56)
-    // [Refactor] 直接调用带缓存的 sha224Hash 函数
-    // 底层 helpers.js 会自动处理 LRU 缓存，这里只需要转换编码
+    // 3. 准备解密 
+    // ciphertext 是原始数据的引用（包含 [加密头部] + [明文Body]）
+    const ciphertext = buffer.subarray(4);
+    
+    // 创建一个副本用于解密，避免修改原始 buffer。
+    // 重要：Mandala 协议只加密了头部，Body 是明文。
+    // StreamCipher 会解密整个流，导致副本中的 Body 变成乱码，但这不影响我们稍后从 ciphertext 中提取正确的 Body。
+    const decrypted = new Uint8Array(ciphertext); 
+    
+    // 4. 获取密码 Bytes
+    // [Optimization] 直接转换，开销极低，无需本地缓存
+    const passwordBytes = textEncoder.encode(password);
+
+    // 5. 初始化流加密并执行解密
+    const cipher = new StreamCipher(passwordBytes, salt);
+    cipher.process(decrypted); 
+
+    // 6. 验证哈希 (Offset 0-56 in decrypted buffer)
+    // [Refactor] 直接调用 sha224Hash，利用 helpers.js 的全局 LRU 缓存
     const hashHex = sha224Hash(String(password));
     const expectedHashBytes = textEncoder.encode(hashHex);
 
-    const receivedHashBytes = buffer.subarray(0, 56);
-    
-    // [安全] 常量时间比对
-    if (!constantTimeEqual(receivedHashBytes, expectedHashBytes)) {
-        return { hasError: true, message: 'Invalid Mandala password.' };
+    if (!constantTimeEqual(decrypted.subarray(0, 56), expectedHashBytes)) {
+        return { hasError: true, message: 'Invalid Mandala Auth' };
     }
 
-    // 2. 验证 CRLF
-    if (buffer[56] !== 0x0D || buffer[57] !== 0x0A) {
-        return { hasError: true, message: 'Invalid Mandala header (Missing CRLF)' };
+    // 7. 解析剩余头部
+    const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
+    
+    const padLen = decrypted[56]; 
+    let cursor = 57 + padLen;     
+
+    // 确保 Padding 后还有数据 (Cmd, Atyp, Port 等)
+    if (cursor >= decrypted.length) {
+        return { hasError: true, message: 'Buffer too short after padding' };
     }
-    
-    // 3. 解析请求 (Cmd + Atyp + Addr + Port + CRLF + Payload)
-    const requestOffset = 58;
-    const requestData = buffer.subarray(requestOffset);
-    
-    if (requestData.byteLength < 4) return { hasError: true, message: 'Mandala request too short.' };
-    
-    const view = new DataView(buffer.buffer, buffer.byteOffset + requestOffset, requestData.byteLength);
-    
-    const command = buffer[requestOffset];
-    const isUDP = (command === 3);
-    
-    if (command !== 1 && !isUDP) {
-        return { hasError: true, message: 'Unsupported Mandala cmd: ' + command };
+
+    const cmd = decrypted[cursor];
+    const isUDP = (cmd === 3);
+
+    // 仅支持 TCP(1) 和 UDP(3)
+    if (cmd !== 1 && !isUDP) {
+        return { hasError: true, message: 'Unsupported Mandala CMD: ' + cmd };
     }
+    cursor++;
+
+    // 检查 cursor 是否越界 (需要读取 atyp)
+    if (cursor >= decrypted.length) return { hasError: true, message: 'Buffer ended unexpectedly' };
+
+    const atyp = decrypted[cursor];
+    cursor++;
     
-    const atyp = buffer[requestOffset + 1];
-    let host = "";
-    let port = 0;
-    let payloadIndex = 0;
-    
-    // 解析地址
+    let addressRemote = "";
+    let portRemote = 0;
+    let headerEnd = 0;
+
     try {
         switch (atyp) {
-            case CONSTANTS.ADDRESS_TYPE_IPV4: // 1
-                host = buffer.subarray(requestOffset + 2, requestOffset + 6).join('.'); 
-                port = view.getUint16(6, false);
-                payloadIndex = 8;
+            case CONSTANTS.ADDRESS_TYPE_IPV4:
+                addressRemote = decrypted.subarray(cursor, cursor + 4).join('.');
+                cursor += 4;
                 break;
-                
-            case CONSTANTS.ATYP_TROJAN_DOMAIN: // 3
-                const domainLen = buffer[requestOffset + 2];
-                host = textDecoder.decode(buffer.subarray(requestOffset + 3, requestOffset + 3 + domainLen)); 
-                port = view.getUint16(3 + domainLen, false);
-                payloadIndex = 3 + domainLen + 2;
+            case CONSTANTS.ATYP_SS_DOMAIN: 
+                const domainLen = decrypted[cursor];
+                cursor++; 
+                addressRemote = textDecoder.decode(decrypted.subarray(cursor, cursor + domainLen));
+                cursor += domainLen;
                 break;
-                
-            case CONSTANTS.ATYP_TROJAN_IPV6: // 4
-                const ipv6 = []; 
+            case CONSTANTS.ATYP_SS_IPV6: 
+                const ipv6 = [];
+                // IPv6 长度 16 字节，每组 2 字节
                 for (let i = 0; i < 8; i++) {
-                    ipv6.push(view.getUint16(2 + i * 2, false).toString(16));
+                    ipv6.push(view.getUint16(cursor + i * 2, false).toString(16)); // false = Big Endian
                 }
-                host = '[' + ipv6.join(':') + ']'; 
-                port = view.getUint16(18, false);
-                payloadIndex = 20;
+                addressRemote = '[' + ipv6.join(':') + ']';
+                cursor += 16;
                 break;
-                
-            default: 
-                return { hasError: true, message: 'Invalid Mandala ATYP: ' + atyp };
+            default:
+                return { hasError: true, message: 'Unknown ATYP: ' + atyp };
         }
+        
+        // 读取 Port (2字节, Big Endian)
+        portRemote = view.getUint16(cursor, false);
+        cursor += 2;
+        headerEnd = cursor;
+
     } catch (e) {
-        return { hasError: true, message: 'Address decode failed' };
+        return { hasError: true, message: 'Address parse failed: ' + e.message };
     }
     
-    const crlfIndex = requestOffset + payloadIndex;
-    
-    if (buffer.byteLength < crlfIndex + 2) {
-        return { hasError: true, message: 'Mandala buffer too short for payload CRLF' };
+    // 8. 验证 CRLF (协议尾部标记)
+    if (headerEnd + 2 > decrypted.byteLength) {
+        return { hasError: true, message: 'Missing CRLF data' };
+    }
+    if (decrypted[headerEnd] !== 0x0D || decrypted[headerEnd + 1] !== 0x0A) {
+        return { hasError: true, message: 'Missing CRLF' };
     }
 
-    if (buffer[crlfIndex] !== 0x0D || buffer[crlfIndex + 1] !== 0x0A) {
-        return { hasError: true, message: 'Mandala missing payload CRLF' };
-    }
-    
-    const rawClientData = buffer.subarray(crlfIndex + 2);
-    
-    return { 
-        hasError: false, 
-        addressRemote: host, 
-        addressType: atyp, 
-        portRemote: port, 
-        rawClientData, 
+    // 9. 返回结果
+    // 这里的关键是从原始 ciphertext 中提取 Body，因为 Body 是明文传输的。
+    const rawClientData = ciphertext.subarray(headerEnd + 2);
+
+    return {
+        hasError: false,
+        addressRemote,
+        portRemote,
+        addressType: atyp,
         isUDP: isUDP, 
-        rawDataIndex: 0 
+        rawClientData: rawClientData,
+        protocol: 'mandala'
     };
 }
