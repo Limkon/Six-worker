@@ -1,10 +1,12 @@
 // src/protocols/trojan.js
+/**
+ * 文件名: src/protocols/trojan.js
+ * 修改说明:
+ * 1. [Refactor] 移除本地 trojanHashCache，直接依赖 sha224Hash 的底层缓存。
+ * 2. [Cleanup] 代码逻辑简化。
+ */
 import { CONSTANTS } from '../constants.js';
 import { textDecoder, textEncoder, sha224Hash } from '../utils/helpers.js';
-
-// Trojan 密码哈希缓存 (存储 Uint8Array 以优化性能)
-const trojanHashCache = new Map();
-const MAX_CACHE_SIZE = 100;
 
 /**
  * [安全] 常量时间比较函数
@@ -30,24 +32,10 @@ export async function parseTrojanHeader(trojanBuffer, password) {
     const buffer = trojanBuffer instanceof Uint8Array ? trojanBuffer : new Uint8Array(trojanBuffer);
     
     // 1. 验证哈希 (Offset 0-56)
-    // [Optimization] 直接操作 Bytes，避免将网络数据解码为 String
-    let expectedHashBytes = trojanHashCache.get(password);
-    
-    if (expectedHashBytes) {
-        // LRU 简单实现：刷新访问顺序
-        trojanHashCache.delete(password);
-        trojanHashCache.set(password, expectedHashBytes);
-    } else {
-        // 计算 SHA224 并转换为 Bytes 缓存
-        const hashHex = sha224Hash(String(password));
-        expectedHashBytes = textEncoder.encode(hashHex);
-        
-        if (trojanHashCache.size >= MAX_CACHE_SIZE) {
-            const oldestKey = trojanHashCache.keys().next().value;
-            trojanHashCache.delete(oldestKey);
-        }
-        trojanHashCache.set(password, expectedHashBytes);
-    }
+    // [Refactor] 直接调用带缓存的 sha224Hash 函数
+    // 底层 helpers.js 会处理 LRU 缓存，此处只需将 Hex 转为 Bytes 即可
+    const hashHex = sha224Hash(String(password));
+    const expectedHashBytes = textEncoder.encode(hashHex);
 
     const receivedHashBytes = buffer.subarray(0, 56);
     
