@@ -2305,8 +2305,9 @@ async function handleXhttpClient(request, ctx) {
     const remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, (()=>{}), ctx.proxyIP);
     const uploader = {
       done: (async () => {
-        const writer = remoteSocket.writable.getWriter();
+        let writer = null;
         try {
+          writer = remoteSocket.writable.getWriter();
           await upload_to_remote_xhttp(writer, httpx);
         } catch (e) {
           const errStr = e && e.message ? e.message : String(e);
@@ -2314,9 +2315,11 @@ async function handleXhttpClient(request, ctx) {
             void(0);
           }
         } finally {
-          try {
-            await writer.close();
-          } catch (_) {
+          if (writer) {
+            try {
+              await writer.close();
+            } catch (_) {
+            }
           }
         }
       })(),
@@ -2344,6 +2347,7 @@ async function handleXhttpClient(request, ctx) {
         uploader.abort();
       } catch (_) {
       }
+    }).catch((err) => {
     });
     return {
       readable: downloader.readable,
@@ -2916,6 +2920,7 @@ async function prepareSubscriptionData(ctx, env) {
   ctx.hardcodedLinks = hardcodedLinks;
   if (ctx.addresses.length === 0 && ctx.hardcodedLinks.length === 0) {
     ctx.addresses.push("www.visa.com.tw:443#CF-Default-1");
+    ctx.addresses.push("usa.visa.com:8443#CF-Default-2");
   }
 }
 async function handleSubscription(request, env, ctx, subPath, hostName) {
