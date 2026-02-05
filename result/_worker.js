@@ -2916,7 +2916,6 @@ async function prepareSubscriptionData(ctx, env) {
   ctx.hardcodedLinks = hardcodedLinks;
   if (ctx.addresses.length === 0 && ctx.hardcodedLinks.length === 0) {
     ctx.addresses.push("www.visa.com.tw:443#CF-Default-1");
-    ctx.addresses.push("usa.visa.com:8443#CF-Default-2");
   }
 }
 async function handleSubscription(request, env, ctx, subPath, hostName) {
