@@ -182,10 +182,21 @@ var computeSha224Core = (inputStr) => {
   }
   return hState.slice(0, 7);
 };
+var globalSha224Cache =   new Map();
+var MAX_SHA224_CACHE_SIZE = 50;
 function sha224Hash(message) {
+  if (globalSha224Cache.has(message)) {
+    return globalSha224Cache.get(message);
+  }
   const utf8Message = sha224ToUtf8(message);
   const hashWords = computeSha224Core(utf8Message);
-  return sha224BytesToHex(hashWords.flatMap((h) => [h >>> 24 & 255, h >>> 16 & 255, h >>> 8 & 255, h & 255]));
+  const resultHex = sha224BytesToHex(hashWords.flatMap((h) => [h >>> 24 & 255, h >>> 16 & 255, h >>> 8 & 255, h & 255]));
+  if (globalSha224Cache.size >= MAX_SHA224_CACHE_SIZE) {
+    const oldestKey = globalSha224Cache.keys().next().value;
+    globalSha224Cache.delete(oldestKey);
+  }
+  globalSha224Cache.set(message, resultHex);
+  return resultHex;
 }
 function base64ToArrayBuffer(base64Str) {
   if (!base64Str) {
@@ -744,8 +755,6 @@ async function processVlessHeader(vlessBuffer, expectedUserIDs) {
   };
 }
 
-var trojanHashCache =   new Map();
-var MAX_CACHE_SIZE = 100;
 function constantTimeEqual(a, b) {
   if (a.byteLength !== b.byteLength) return false;
   let mismatch = 0;
@@ -757,19 +766,8 @@ function constantTimeEqual(a, b) {
 async function parseTrojanHeader(trojanBuffer, password) {
   if (trojanBuffer.byteLength < 58) return { hasError: true, message: "Trojan buffer too short." };
   const buffer = trojanBuffer instanceof Uint8Array ? trojanBuffer : new Uint8Array(trojanBuffer);
-  let expectedHashBytes = trojanHashCache.get(password);
-  if (expectedHashBytes) {
-    trojanHashCache.delete(password);
-    trojanHashCache.set(password, expectedHashBytes);
-  } else {
-    const hashHex = sha224Hash(String(password));
-    expectedHashBytes = textEncoder.encode(hashHex);
-    if (trojanHashCache.size >= MAX_CACHE_SIZE) {
-      const oldestKey = trojanHashCache.keys().next().value;
-      trojanHashCache.delete(oldestKey);
-    }
-    trojanHashCache.set(password, expectedHashBytes);
-  }
+  const hashHex = sha224Hash(String(password));
+  const expectedHashBytes = textEncoder.encode(hashHex);
   const receivedHashBytes = buffer.subarray(0, 56);
   if (!constantTimeEqual(receivedHashBytes, expectedHashBytes)) {
     return { hasError: true, message: "Invalid Trojan password." };
@@ -837,9 +835,6 @@ async function parseTrojanHeader(trojanBuffer, password) {
   };
 }
 
-var passwordHashCache =   new Map();
-var passwordBytesCache =   new Map();
-var MAX_CACHE_SIZE2 = 100;
 function constantTimeEqual2(a, b) {
   if (a.byteLength !== b.byteLength) return false;
   let mismatch = 0;
@@ -847,31 +842,6 @@ function constantTimeEqual2(a, b) {
     mismatch |= a[i] ^ b[i];
   }
   return mismatch === 0;
-}
-function getCachedPasswordHashBytes(password) {
-  let expectedHashBytes = passwordHashCache.get(password);
-  if (!expectedHashBytes) {
-    const hashHex = sha224Hash(String(password));
-    expectedHashBytes = textEncoder.encode(hashHex);
-    if (passwordHashCache.size >= MAX_CACHE_SIZE2) {
-      const firstKey = passwordHashCache.keys().next().value;
-      passwordHashCache.delete(firstKey);
-    }
-    passwordHashCache.set(password, expectedHashBytes);
-  }
-  return expectedHashBytes;
-}
-function getCachedPasswordBytes(password) {
-  let passwordBytes = passwordBytesCache.get(password);
-  if (!passwordBytes) {
-    passwordBytes = textEncoder.encode(password);
-    if (passwordBytesCache.size >= MAX_CACHE_SIZE2) {
-      const first = passwordBytesCache.keys().next().value;
-      passwordBytesCache.delete(first);
-    }
-    passwordBytesCache.set(password, passwordBytes);
-  }
-  return passwordBytes;
 }
 async function parseMandalaHeader(mandalaBuffer, password) {
   if (!password) {
@@ -883,11 +853,14 @@ async function parseMandalaHeader(mandalaBuffer, password) {
   const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
   const salt = buffer.subarray(0, 4);
   const ciphertext = buffer.subarray(4);
-  const decrypted = new Uint8Array(ciphertext);
-  const passwordBytes = getCachedPasswordBytes(password);
+  const PROBE_LIMIT = 2048;
+  const decodeLen = Math.min(ciphertext.byteLength, PROBE_LIMIT);
+  const decrypted = new Uint8Array(ciphertext.subarray(0, decodeLen));
+  const passwordBytes = textEncoder.encode(password);
   const cipher = new StreamCipher(passwordBytes, salt);
   cipher.process(decrypted);
-  const expectedHashBytes = getCachedPasswordHashBytes(password);
+  const hashHex = sha224Hash(String(password));
+  const expectedHashBytes = textEncoder.encode(hashHex);
   if (!constantTimeEqual2(decrypted.subarray(0, 56), expectedHashBytes)) {
     return { hasError: true, message: "Invalid Mandala Auth" };
   }
@@ -895,7 +868,7 @@ async function parseMandalaHeader(mandalaBuffer, password) {
   const padLen = decrypted[56];
   let cursor = 57 + padLen;
   if (cursor >= decrypted.length) {
-    return { hasError: true, message: "Buffer too short after padding" };
+    return { hasError: true, message: "Buffer too short or Padding too long" };
   }
   const cmd = decrypted[cursor];
   const isUDP = cmd === 3;
@@ -918,6 +891,7 @@ async function parseMandalaHeader(mandalaBuffer, password) {
       case CONSTANTS.ATYP_SS_DOMAIN:
         const domainLen = decrypted[cursor];
         cursor++;
+        if (cursor + domainLen > decrypted.length) throw new Error("Domain length overflow");
         addressRemote = textDecoder.decode(decrypted.subarray(cursor, cursor + domainLen));
         cursor += domainLen;
         break;
@@ -932,6 +906,7 @@ async function parseMandalaHeader(mandalaBuffer, password) {
       default:
         return { hasError: true, message: "Unknown ATYP: " + atyp };
     }
+    if (cursor + 2 > decrypted.length) throw new Error("Port overflow");
     portRemote = view.getUint16(cursor, false);
     cursor += 2;
     headerEnd = cursor;
@@ -1243,7 +1218,7 @@ function isPrivateIP(address) {
   return false;
 }
 var CACHE_TTL = 10 * 60 * 1e3;
-var MAX_CACHE_SIZE3 = 500;
+var MAX_CACHE_SIZE = 500;
 var DirectFailureCache = class {
   constructor() {
     this.cache =   new Map();
@@ -1251,7 +1226,7 @@ var DirectFailureCache = class {
   add(host) {
     if (!host) return;
     if (this.has(host)) return;
-    if (this.cache.size >= MAX_CACHE_SIZE3) this.cache.delete(this.cache.keys().next().value);
+    if (this.cache.size >= MAX_CACHE_SIZE) this.cache.delete(this.cache.keys().next().value);
     this.cache.set(host, Date.now() + CACHE_TTL);
   }
   has(host) {
@@ -1509,6 +1484,25 @@ async function createUnifiedConnection(ctx, addressRemote, portRemote, addressTy
   }
   throw new Error(`All connection attempts failed.`);
 }
+function concatUint8(a, b) {
+  const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
+  const res = new Uint8Array(a.length + bArr.length);
+  res.set(a);
+  res.set(bArr, a.length);
+  return res;
+}
+function getSocks5UdpHeaderLength(buffer) {
+  if (buffer.length < 4) return -1;
+  const atyp = buffer[3];
+  if (atyp === 1) return 10;
+  if (atyp === 4) return 22;
+  if (atyp === 3) {
+    if (buffer.length < 5) return -1;
+    const len = buffer[4];
+    return 7 + len;
+  }
+  return 0;
+}
 function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
   const rsvFrag = [0, 0, 0];
   let addrBytes;
@@ -1531,17 +1525,6 @@ function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
   }
   const portBytes = [portRemote >> 8, portRemote & 255];
   return new Uint8Array([...rsvFrag, atyp, ...addrBytes, ...portBytes]);
-}
-function stripSocks5UdpHeader(buffer) {
-  if (buffer.length < 4) return null;
-  let offset = 4;
-  const atyp = buffer[3];
-  if (atyp === 1) offset += 4;
-  else if (atyp === 3) offset += 1 + buffer[4];
-  else if (atyp === 4) offset += 16;
-  offset += 2;
-  if (offset > buffer.length) return null;
-  return buffer.slice(offset);
 }
 async function safeWrite(writer, chunk) {
   const WRITE_TIMEOUT = 1e4;
@@ -1643,20 +1626,30 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
   }
   udpWriter.releaseLock();
   let responseHeader = vlessResponseHeader;
+  let udpBuffer = new Uint8Array(0);
   await udpSocket.readable.pipeTo(new WritableStream({
     async write(chunk, controller) {
       if (webSocket.readyState !== 1) {
         controller.error(new Error("WS Closed"));
         return;
       }
-      const buffer = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-      const payload = stripSocks5UdpHeader(buffer);
-      if (!payload) {
+      udpBuffer = concatUint8(udpBuffer, chunk);
+      if (udpBuffer.length > 4096) {
+        udpBuffer = new Uint8Array(0);
         return;
       }
-      const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
-      responseHeader = null;
-      webSocket.send(dataToSend);
+      const headerLen = getSocks5UdpHeaderLength(udpBuffer);
+      if (headerLen > 0) {
+        if (udpBuffer.length >= headerLen) {
+          const payload = udpBuffer.subarray(headerLen);
+          const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
+          responseHeader = null;
+          webSocket.send(dataToSend);
+          udpBuffer = new Uint8Array(0);
+        }
+      } else if (headerLen === 0) {
+        udpBuffer = new Uint8Array(0);
+      }
     },
     close() {
       log("UDP Relay closed");
@@ -1830,7 +1823,7 @@ async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressR
 }
 
 var protocolManager = new ProtocolManager().register("vless", processVlessHeader).register("trojan", parseTrojanHeader).register("mandala", parseMandalaHeader).register("socks5", parseSocks5Header).register("ss", parseShadowsocksHeader);
-function concatUint8(a, b) {
+function concatUint82(a, b) {
   const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
   const res = new Uint8Array(a.length + bArr.length);
   res.set(a);
@@ -1888,7 +1881,7 @@ async function handleWebSocketRequest(request, ctx) {
         }
         return;
       }
-      vlessBuffer = concatUint8(vlessBuffer, chunkArr);
+      vlessBuffer = concatUint82(vlessBuffer, chunkArr);
       if (vlessBuffer.length > MAX_HEADER_BUFFER) {
         clearTimeout(timeoutTimer);
         throw new Error(`Header buffer limit exceeded`);
