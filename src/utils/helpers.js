@@ -4,7 +4,7 @@
  * 修改内容: 
  * 1. [Fix] StreamCipher: 修复种子生成算法，解决不同顺序 Key 生成相同 Seed 的安全隐患。
  * 2. [Refactor] KV Cache: 增加 MAX_KV_CACHE_SIZE 限制，防止内存无界增长。
- * 3. [Clean] 移除未使用的 CONSTANTS 引用。
+ * 3. [Optimization] getKV: 移除缓存写入的 await，实现 Fire-and-forget 非阻塞写入，提升响应速度。
  */
 
 // 全局编解码器实例
@@ -228,7 +228,6 @@ const CACHE_API_PREFIX = 'http://kv-cache.local/';
 const CACHE_NULL_SENTINEL = "##NULL##"; 
 
 // 定义已知的 KV 键列表 (用于全量刷新时清理 Cache API)
-// [修复] 补全所有 admin.js 和 config.js 中使用的键，确保全量清理时能覆盖所有配置
 const KNOWN_KV_KEYS = [
     // 核心认证
     'UUID', 'KEY', 'ADMIN_PASS', 'SUPER_PASSWORD',
@@ -253,7 +252,6 @@ export async function getKV(env, key) {
     if (!env.KV || !key) return null;
 
     // 1. [L1] 检查内存缓存 (最快)
-    // Map 可以存储 null 值，如果 key 存在且值为 null，直接返回 null
     if (GLOBAL_KV_CACHE.has(key)) {
         return GLOBAL_KV_CACHE.get(key);
     }
@@ -275,7 +273,6 @@ export async function getKV(env, key) {
             }
 
             // 命中有效值，回填到 L1
-            // [安全] 检查 L1 大小
             if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
             GLOBAL_KV_CACHE.set(key, val);
             console.log(`[KV] Hit Cache API for ${key}`);
@@ -295,13 +292,11 @@ export async function getKV(env, key) {
     }
 
     // 4. 回写缓存 (包括有效值 和 空值)
-    // [修复] 无论 val 是否为 null，都写入缓存
-    
-    // 写回 L1 (L1 Map 可以直接存 null)
+    // 写回 L1
     if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
     GLOBAL_KV_CACHE.set(key, val);
 
-    // 写回 L2 (Cache API 只能存 Response，null 需转为特殊标记)
+    // 写回 L2
     const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
     const response = new Response(cacheVal, {
         headers: {
@@ -311,8 +306,10 @@ export async function getKV(env, key) {
     });
     
     try {
-        // 修复: 显式 await 确保写入成功，防止 Worker 提前终止导致缓存丢失
-        await cache.put(cacheKeyUrl, response);
+        // [Optimization] 移除 await，实现非阻塞写入 (Fire-and-forget)
+        // 这样不会阻塞主线程返回数据，提高配置读取速度
+        cache.put(cacheKeyUrl, response).catch(e => console.error('[KV] Cache put bg error:', e));
+        
         console.log(`[KV] Cached ${val === null ? 'NULL' : 'VALUE'} to API for ${key}`);
     } catch (e) {
         console.error('[KV] Cache API put error:', e);
@@ -337,7 +334,6 @@ export async function clearKVCache(keys) {
     }
 
     // 2. 清理 L2 Cache API
-    // Cache API 不支持批量删除，必须按 URL 逐个删除
     const deletePromises = targetKeys.map(key => {
         const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
         return cache.delete(cacheKeyUrl).catch(e => console.warn(`[KV] Failed to delete cache for ${key}`, e));
@@ -400,18 +396,16 @@ export class StreamCipher {
         const len = buffer.length;
         
         // [Optimization] Fast path for 4-byte aligned data
-        // 检查缓冲区偏移是否对齐，且长度足够
         if (buffer.byteOffset % 4 === 0 && len >= 4) {
             const len32 = Math.floor(len / 4);
             const view32 = new Uint32Array(buffer.buffer, buffer.byteOffset, len32);
             for (let j = 0; j < len32; j++) {
                 view32[j] ^= this.next();
             }
-            i = len32 * 4; // 更新字节索引
+            i = len32 * 4;
         }
 
-        // 处理剩余的非4字节部分 (0-3 bytes)
-        // 或者是未对齐的缓冲区的慢速路径
+        // 处理剩余部分
         let randomCache = 0;
         let cacheRemaining = 0;
         
