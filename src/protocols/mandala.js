@@ -2,9 +2,9 @@
 /**
  * 文件名: src/protocols/mandala.js
  * 修改说明:
- * 1. [Refactor] 移除了本地的 passwordHashCache 和 passwordBytesCache，减少内存占用。
- * 2. [Refactor] 对接 src/utils/helpers.js 的全局 sha224Hash 缓存。
- * 3. [Feature] 保留了完整的 StreamCipher 解密、Salt 处理和 Padding 逻辑。
+ * 1. [Optimization] 引入头部预读机制 (Header Probing)：仅复制并解密前 2KB 数据用于解析头部，
+ * 避免在大流量场景下对 Payload 进行无效的内存复制和异或运算，显著降低 CPU 和内存开销。
+ * 2. [Refactor] 保持与 helpers.js 全局缓存的对接。
  */
 import { CONSTANTS } from '../constants.js';
 import { textDecoder, textEncoder, sha224Hash, StreamCipher } from '../utils/helpers.js';
@@ -31,31 +31,34 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         return { hasError: true, message: 'Mandala buffer too short' };
     }
 
-    // 1. 获取输入视图 (确保是 Uint8Array)
+    // 1. 获取输入视图
     const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
 
     // 2. 读取 Salt (明文，前4字节)
     const salt = buffer.subarray(0, 4);
     
-    // 3. 准备解密 
-    // ciphertext 是原始数据的引用（包含 [加密头部] + [明文Body]）
+    // 3. 准备解密区域
+    // ciphertext 指向 Salt 之后的所有数据 (含 加密头部 + 明文Body)
     const ciphertext = buffer.subarray(4);
     
-    // 创建一个副本用于解密，避免修改原始 buffer。
-    // 重要：Mandala 协议只加密了头部，Body 是明文。
-    // StreamCipher 会解密整个流，导致副本中的 Body 变成乱码，但这不影响我们稍后从 ciphertext 中提取正确的 Body。
-    const decrypted = new Uint8Array(ciphertext); 
+    // [Optimization] 性能优化关键点：
+    // Mandala 协议只加密了头部。为了避免处理 Payload (可能很大) 带来的内存复制和异或计算开销，
+    // 我们只截取前 2048 字节进行解密和解析。这足够覆盖任何合法的 Mandala 头部。
+    const PROBE_LIMIT = 2048;
+    const decodeLen = Math.min(ciphertext.byteLength, PROBE_LIMIT);
     
-    // 4. 获取密码 Bytes
-    // [Optimization] 直接转换，开销极低，无需本地缓存
+    // 创建一个较小的缓冲区用于解密头部
+    const decrypted = new Uint8Array(ciphertext.subarray(0, decodeLen)); 
+    
+    // 4. 获取密码 Bytes (直接转换，开销极低)
     const passwordBytes = textEncoder.encode(password);
 
-    // 5. 初始化流加密并执行解密
+    // 5. 初始化流加密并执行解密 (仅针对头部区域)
     const cipher = new StreamCipher(passwordBytes, salt);
     cipher.process(decrypted); 
 
     // 6. 验证哈希 (Offset 0-56 in decrypted buffer)
-    // [Refactor] 直接调用 sha224Hash，利用 helpers.js 的全局 LRU 缓存
+    // 直接调用 sha224Hash，利用 helpers.js 的全局 LRU 缓存
     const hashHex = sha224Hash(String(password));
     const expectedHashBytes = textEncoder.encode(hashHex);
 
@@ -71,7 +74,8 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
 
     // 确保 Padding 后还有数据 (Cmd, Atyp, Port 等)
     if (cursor >= decrypted.length) {
-        return { hasError: true, message: 'Buffer too short after padding' };
+        // 如果头部甚至超出了我们的探测范围 (2KB)，说明数据异常或遭到了攻击
+        return { hasError: true, message: 'Buffer too short or Padding too long' };
     }
 
     const cmd = decrypted[cursor];
@@ -83,7 +87,6 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     }
     cursor++;
 
-    // 检查 cursor 是否越界 (需要读取 atyp)
     if (cursor >= decrypted.length) return { hasError: true, message: 'Buffer ended unexpectedly' };
 
     const atyp = decrypted[cursor];
@@ -102,14 +105,14 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
             case CONSTANTS.ATYP_SS_DOMAIN: 
                 const domainLen = decrypted[cursor];
                 cursor++; 
+                if (cursor + domainLen > decrypted.length) throw new Error('Domain length overflow');
                 addressRemote = textDecoder.decode(decrypted.subarray(cursor, cursor + domainLen));
                 cursor += domainLen;
                 break;
             case CONSTANTS.ATYP_SS_IPV6: 
                 const ipv6 = [];
-                // IPv6 长度 16 字节，每组 2 字节
                 for (let i = 0; i < 8; i++) {
-                    ipv6.push(view.getUint16(cursor + i * 2, false).toString(16)); // false = Big Endian
+                    ipv6.push(view.getUint16(cursor + i * 2, false).toString(16)); 
                 }
                 addressRemote = '[' + ipv6.join(':') + ']';
                 cursor += 16;
@@ -117,6 +120,8 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
             default:
                 return { hasError: true, message: 'Unknown ATYP: ' + atyp };
         }
+        
+        if (cursor + 2 > decrypted.length) throw new Error('Port overflow');
         
         // 读取 Port (2字节, Big Endian)
         portRemote = view.getUint16(cursor, false);
@@ -128,6 +133,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     }
     
     // 8. 验证 CRLF (协议尾部标记)
+    // headerEnd 指向 Port 之后的位置，CRLF 紧随其后
     if (headerEnd + 2 > decrypted.byteLength) {
         return { hasError: true, message: 'Missing CRLF data' };
     }
@@ -136,7 +142,9 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
     }
 
     // 9. 返回结果
-    // 这里的关键是从原始 ciphertext 中提取 Body，因为 Body 是明文传输的。
+    // 这里的关键是从原始 ciphertext 中提取 Body。
+    // decrypted 只是头部的一个拷贝，且只解密了前部分。
+    // 真实的 Payload (Body) 位于原始 ciphertext 的 (headerEnd + 2) 之后。
     const rawClientData = ciphertext.subarray(headerEnd + 2);
 
     return {
@@ -145,7 +153,7 @@ export async function parseMandalaHeader(mandalaBuffer, password) {
         portRemote,
         addressType: atyp,
         isUDP: isUDP, 
-        rawClientData: rawClientData,
+        rawClientData: rawClientData, // Zero-copy view from original buffer
         protocol: 'mandala'
     };
 }
