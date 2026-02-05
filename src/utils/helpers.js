@@ -5,6 +5,7 @@
  * 1. [Fix] StreamCipher: 修复种子生成算法，解决不同顺序 Key 生成相同 Seed 的安全隐患。
  * 2. [Refactor] KV Cache: 增加 MAX_KV_CACHE_SIZE 限制，防止内存无界增长。
  * 3. [Optimization] getKV: 移除缓存写入的 await，实现 Fire-and-forget 非阻塞写入，提升响应速度。
+ * 4. [Optimization] sha224Hash: 增加内置 LRU 缓存，避免重复计算，提升 Trojan 握手性能。
  */
 
 // 全局编解码器实例
@@ -124,10 +125,29 @@ const computeSha224Core = (inputStr) => {
     return hState.slice(0, 7);
 };
 
+// --- SHA224 缓存系统 (新增) ---
+const globalSha224Cache = new Map();
+const MAX_SHA224_CACHE_SIZE = 50; // 限制缓存大小，防止内存溢出
+
 export function sha224Hash(message) {
+    // 1. 查缓存
+    if (globalSha224Cache.has(message)) {
+        return globalSha224Cache.get(message);
+    }
+
+    // 2. 计算哈希 (原始逻辑)
     const utf8Message = sha224ToUtf8(message);
     const hashWords = computeSha224Core(utf8Message);
-    return sha224BytesToHex(hashWords.flatMap(h => [(h >>> 24) & 0xFF, (h >>> 16) & 0xFF, (h >>> 8) & 0xFF, h & 0xFF]));
+    const resultHex = sha224BytesToHex(hashWords.flatMap(h => [(h >>> 24) & 0xFF, (h >>> 16) & 0xFF, (h >>> 8) & 0xFF, h & 0xFF]));
+
+    // 3. 写入缓存 (带 LRU 淘汰机制)
+    if (globalSha224Cache.size >= MAX_SHA224_CACHE_SIZE) {
+        const oldestKey = globalSha224Cache.keys().next().value;
+        globalSha224Cache.delete(oldestKey);
+    }
+    globalSha224Cache.set(message, resultHex);
+
+    return resultHex;
 }
 
 export function base64ToArrayBuffer(base64Str) {
