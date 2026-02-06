@@ -2,9 +2,9 @@
 /**
  * 文件名: src/utils/dns.js
  * 修复说明:
- * 1. [Critical Fix] 将 L2 Cache (Cache API) 的写入操作隔离在独立的 try-catch 块中。
- * 防止因 Cache API 配额不足或写入错误导致整个 DNS 解析函数抛出异常并返回 null（即：缓存失败不应导致解析失败）。
- * 2. [Reliability] 保持使用 await 确保 Worker 结束前尝试写入完成，但容忍写入错误。
+ * 1. [Performance] resolveToIPv6: 增加 ctx 参数，使用 ctx.waitUntil 实现 Cache API 非阻塞写入。
+ * 消除了之前 await cache.put 导致的 DNS 解析延迟。
+ * 2. [Reliability] 保留了 Cache API 写入的错误捕获，防止后台任务失败影响主流程。
  */
 import { CONSTANTS } from '../constants.js';
 
@@ -214,8 +214,9 @@ async function performResolve(domain, dnsServer) {
 
 /**
  * 核心解析函数：集成 L1/L2 缓存与并发合并
+ * [Change] 增加 ctx 参数，用于利用 waitUntil 进行非阻塞缓存写入
  */
-export async function resolveToIPv6(domain, dnsServer) {
+export async function resolveToIPv6(domain, dnsServer, ctx) {
     if (!dnsServer) return null;
 
     // [Original Keep] 缓存容量保护：防止 Worker 内存溢出
@@ -267,21 +268,28 @@ export async function resolveToIPv6(domain, dnsServer) {
             dnsCache.set(cacheKey, { ip, expires: Date.now() + 60000 });
             
             // 存入 L2 (Cache API)
-            // [Fix] 将 Cache API 写入包裹在独立的 try-catch 中
-            // 确保即使写入失败（如配额超限），也不影响 DNS 解析结果的返回
-            try {
-                const cacheResponse = new Response(ip, {
-                    headers: { 
-                        'Cache-Control': 'max-age=60', // 边缘缓存 60 秒
-                        'Content-Type': 'text/plain' 
-                    }
-                });
-                
-                // ES Modules Worker 必须使用 await，否则 Worker 结束时会中断未完成的 Promise
-                // 如果写入失败，catch 会捕获，不会影响 ip 的返回
-                await cache.put(cacheUrl, cacheResponse);
-            } catch (cacheError) {
-                console.warn(`[DNS] Cache put failed for ${domain}:`, cacheError);
+            // [Fix] 关键优化：使用 ctx.waitUntil 实现非阻塞写入
+            // 之前使用 await cache.put 会阻塞 DNS 返回，增加延迟
+            const putCache = async () => {
+                try {
+                    const cacheResponse = new Response(ip, {
+                        headers: { 
+                            'Cache-Control': 'max-age=60', // 边缘缓存 60 秒
+                            'Content-Type': 'text/plain' 
+                        }
+                    });
+                    await cache.put(cacheUrl, cacheResponse);
+                } catch (cacheError) {
+                    console.warn(`[DNS] Cache put bg error:`, cacheError);
+                }
+            };
+
+            if (ctx && typeof ctx.waitUntil === 'function') {
+                ctx.waitUntil(putCache());
+            } else {
+                // 如果没有提供 ctx，则回退到 Fire-and-forget 模式 (不 await，也不阻塞)
+                // 注意：在 Worker 结束前这可能无法完成，但总比阻塞好
+                putCache().catch(e => {}); 
             }
         }
         return ip;
