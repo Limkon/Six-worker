@@ -2,8 +2,9 @@
 /**
  * 文件名: src/config.js
  * 修改说明:
- * 1. [Fix] 修复远程配置关闭后 (REMOTE_CONFIG=0) 仍然读取脏缓存的 Bug。
- * 2. [Optimization] 保持并发限制 (5+5+1) 以避免 CPU 超时。
+ * 1. [Fix] 修复 Race Condition: 刷新缓存时不再清空 remoteConfigCache，防止并发请求读取空配置。
+ * 2. [Fix] 修复远程配置关闭后 (REMOTE_CONFIG=0) 仍然读取脏缓存的 Bug。
+ * 3. [Config] 尊重用户策略：保持严格单一 ProxyIP 逻辑 (ctx.proxyIPList 仅含一个 IP) 以防止风控。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID, getKV, clearKVCache } from './utils/helpers.js';
@@ -68,6 +69,7 @@ export async function loadRemoteConfig(env, forceReload = false) {
                 const now = Date.now();
                 try {
                     const newData = JSON.parse(text);
+                    // [Atomic Update] 原子更新引用，确保读取安全
                     remoteConfigCache.data = newData;
                     remoteConfigCache.lastFetch = now;
                     configCache = {}; // 远程配置更新，强制让 getConfig 重新计算
@@ -133,7 +135,13 @@ export async function initializeContext(request, env) {
 
     if (forceReload) {
         console.log('[Config] Flush requested via URL parameter. Purging caches...');
-        await cleanConfigCache();
+        
+        // [Fix] 修复 Race Condition: 
+        // 仅清理派生缓存和 KV 缓存，保留 remoteConfigCache 防止在 fetch 完成前并发请求读取到空配置。
+        // loadRemoteConfig 会在下载成功后原子替换 remoteConfigCache.data。
+        configCache = {};
+        proxyIPRemoteCache = { data: [], expires: 0 };
+        await clearKVCache();
     }
 
     const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0');
@@ -141,7 +149,6 @@ export async function initializeContext(request, env) {
         await loadRemoteConfig(env, forceReload);
     } else {
         // [Fix] 关键修复: 如果远程配置被关闭，必须清除内存中可能残留的远程数据
-        // 否则 getConfig 在 KV 缺失时会错误地回退到陈旧的远程配置中
         if (remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
             console.log('[Config] Remote config disabled, clearing stale cache.');
             remoteConfigCache.data = {};
@@ -270,6 +277,7 @@ export async function initializeContext(request, env) {
     }
 
     // [Feature] 严格单一 ProxyIP 策略
+    // 审计确认：保持原逻辑，ctx.proxyIPList 仅包含单一 IP，确保一次连接周期内 IP 不变
     if (rawList && rawList.length > 0) {
         const selectedIP = rawList[Math.floor(Math.random() * rawList.length)];
         ctx.proxyIP = selectedIP;
