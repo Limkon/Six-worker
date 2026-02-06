@@ -1,39 +1,41 @@
 // src/config.js
 /**
  * 文件名: src/config.js
- * 修改说明:
- * 1. [Fix] 修复 Race Condition: 刷新缓存时不再清空 remoteConfigCache，防止并发请求读取空配置。
- * 2. [Fix] 修复远程配置关闭后 (REMOTE_CONFIG=0) 仍然读取脏缓存的 Bug。
- * 3. [Config] 尊重用户策略：保持严格单一 ProxyIP 逻辑 (ctx.proxyIPList 仅含一个 IP) 以防止风控。
+ * 审计优化说明:
+ * 1. [Fix] Race Condition Fix 保留: 继续保持 initializeContext 中的原子更新逻辑。
+ * 2. [Optimization] ProxyIP 防惊群: 引入 proxyIPFetchingPromise，防止缓存过期瞬间爆发大量重复 fetch 请求。
+ * 3. [Feature] Remote Config TTL: 增加远程配置 5 分钟自动过期机制，避免配置长期不更新。
+ * 4. [Config] 策略保持: 继续维持 ProxyIP 单一 IP 策略。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID, getKV, clearKVCache } from './utils/helpers.js';
 
 // 内存缓存对象 (处理后的配置)
-// 注意：此缓存随 Worker 实例存活，修改 KV 后需访问 /?flush=1 才能立即生效
 let configCache = {};
 
 // 远程配置缓存
+const REMOTE_CONFIG_TTL = 5 * 60 * 1000; // 5分钟自动过期
 let remoteConfigCache = {
     data: {},
     lastFetch: 0
 };
 
-// 远程 ProxyIP 缓存
+// 远程 ProxyIP 缓存及并发锁
 let proxyIPRemoteCache = {
     data: [],
-    expires: 0
+    expires: 0,
+    fetchingPromise: null // [Optimization] 防止惊群效应的 Promise 锁
 };
 
 /**
  * 清理配置缓存
- * @param {Array<string>} [updatedKeys] - 可选，仅清理指定的键名。
  */
 export async function cleanConfigCache(updatedKeys) {
     if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes('REMOTE_CONFIG_URL')) {
         configCache = {};
         remoteConfigCache = { data: {}, lastFetch: 0 };
-        proxyIPRemoteCache = { data: [], expires: 0 };
+        // 清理 ProxyIP 缓存时，也要重置 fetchingPromise
+        proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
         await clearKVCache();
         return;
     }
@@ -42,19 +44,25 @@ export async function cleanConfigCache(updatedKeys) {
     }
     await clearKVCache(updatedKeys);
     if (updatedKeys.includes('PROXYIP')) {
-        proxyIPRemoteCache = { data: [], expires: 0 };
+        proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
     }
 }
 
 export async function loadRemoteConfig(env, forceReload = false) {
     const remoteConfigUrl = await getKV(env, 'REMOTE_CONFIG_URL');
     
-    if (!forceReload && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
+    // [Feature] 增加 TTL 检查
+    const now = Date.now();
+    const isExpired = (now - remoteConfigCache.lastFetch) > REMOTE_CONFIG_TTL;
+
+    if (!forceReload && !isExpired && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
         return remoteConfigCache.data;
     }
     
     if (remoteConfigUrl) {
         try {
+            // 简单的 fetch 逻辑，无需复杂的锁，因为 initializeContext 通常串行控制了刷新流程
+            // 且配置文件的体积通常很小，重复 fetch 影响不如 ProxyIP 列表大
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
             
@@ -66,13 +74,12 @@ export async function loadRemoteConfig(env, forceReload = false) {
 
             if (response.ok) {
                 const text = await response.text();
-                const now = Date.now();
+                const updateTime = Date.now();
                 try {
                     const newData = JSON.parse(text);
-                    // [Atomic Update] 原子更新引用，确保读取安全
                     remoteConfigCache.data = newData;
-                    remoteConfigCache.lastFetch = now;
-                    configCache = {}; // 远程配置更新，强制让 getConfig 重新计算
+                    remoteConfigCache.lastFetch = updateTime;
+                    configCache = {}; 
                 } catch (e) {
                     console.warn('Remote config is not JSON, trying line parse');
                     const lines = text.split('\n');
@@ -88,7 +95,7 @@ export async function loadRemoteConfig(env, forceReload = false) {
                         }
                     });
                     remoteConfigCache.data = newData;
-                    remoteConfigCache.lastFetch = now;
+                    remoteConfigCache.lastFetch = updateTime;
                     configCache = {}; 
                 }
             }
@@ -110,7 +117,6 @@ export async function getConfig(env, key, defaultValue = undefined) {
         val = await getKV(env, key);
     }
 
-    // 仅当 KV 未定义时才尝试远程配置
     if ((val === null || val === undefined) && remoteConfigCache.data && remoteConfigCache.data[key]) {
         val = remoteConfigCache.data[key];
     }
@@ -135,12 +141,10 @@ export async function initializeContext(request, env) {
 
     if (forceReload) {
         console.log('[Config] Flush requested via URL parameter. Purging caches...');
-        
-        // [Fix] 修复 Race Condition: 
-        // 仅清理派生缓存和 KV 缓存，保留 remoteConfigCache 防止在 fetch 完成前并发请求读取到空配置。
-        // loadRemoteConfig 会在下载成功后原子替换 remoteConfigCache.data。
+        // [Fix] Race Condition Fix: 仅清理派生缓存和 KV，保留 remoteConfigCache
         configCache = {};
-        proxyIPRemoteCache = { data: [], expires: 0 };
+        // 强制重置 ProxyIP 缓存和锁
+        proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
         await clearKVCache();
     }
 
@@ -148,18 +152,15 @@ export async function initializeContext(request, env) {
     if (enableRemote === '1') {
         await loadRemoteConfig(env, forceReload);
     } else {
-        // [Fix] 关键修复: 如果远程配置被关闭，必须清除内存中可能残留的远程数据
         if (remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
             console.log('[Config] Remote config disabled, clearing stale cache.');
             remoteConfigCache.data = {};
             remoteConfigCache.lastFetch = 0;
-            // 同时清理 configCache，防止已计算的混合配置包含脏数据
             configCache = {}; 
         }
     }
 
-    // [Optimization] 分批执行 (Batch Limit: 5)
-    // Batch 1: 核心认证 (5)
+    // Batch 1
     const [adminPass, rawUUID, rawKey, timeDaysStr, updateHourStr] = await Promise.all([
         getConfig(env, 'ADMIN_PASS'),
         getConfig(env, 'UUID'),
@@ -168,7 +169,7 @@ export async function initializeContext(request, env) {
         getConfig(env, 'UPTIME')
     ]);
 
-    // Batch 2: 网络配置 (5)
+    // Batch 2
     const [proxyIPStr, dns64, socks5Addr, go2socksStr, banStr] = await Promise.all([
         getConfig(env, 'PROXYIP'),
         getConfig(env, 'DNS64'),
@@ -177,7 +178,7 @@ export async function initializeContext(request, env) {
         getConfig(env, 'BAN')
     ]);
 
-    // Batch 3: 其他 (1)
+    // Batch 3
     const disStrRaw = await getConfig(env, 'DIS', '');
 
     const ctx = {
@@ -241,47 +242,54 @@ export async function initializeContext(request, env) {
     let rawList = [];
     if (rawProxyIP) { 
         if (rawProxyIP.startsWith('http')) {
-             if (Date.now() < proxyIPRemoteCache.expires) {
+             if (Date.now() < proxyIPRemoteCache.expires && proxyIPRemoteCache.data.length > 0) {
                  rawList = proxyIPRemoteCache.data;
              } else {
-                 try {
-                     const controller = new AbortController();
-                     const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-                     const response = await fetch(rawProxyIP, {
-                        signal: controller.signal
-                     }).finally(() => {
-                         clearTimeout(timeoutId);
-                     });
-
-                     if (response.ok) {
-                         const text = await response.text();
-                         const list = await cleanList(text); 
-                         rawList = list;
-                         proxyIPRemoteCache.data = list;
-                         proxyIPRemoteCache.expires = Date.now() + 600000;
-                     } else {
-                         throw new Error(`ProxyIP fetch failed: ${response.status}`);
-                     }
-                 } catch (e) {
-                     console.error('Failed to fetch remote ProxyIP:', e);
-                     const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
-                     rawList = defParams;
-                     proxyIPRemoteCache.data = defParams;
-                     proxyIPRemoteCache.expires = Date.now() + 60000; 
+                 // [Optimization] 防止惊群效应 (Thundering Herd)
+                 // 如果已有请求正在 fetch，后续请求直接复用该 Promise
+                 if (!proxyIPRemoteCache.fetchingPromise) {
+                     proxyIPRemoteCache.fetchingPromise = (async () => {
+                         try {
+                             const controller = new AbortController();
+                             const timeoutId = setTimeout(() => controller.abort(), 5000);
+                             const response = await fetch(rawProxyIP, { signal: controller.signal }).finally(() => clearTimeout(timeoutId));
+                             
+                             if (response.ok) {
+                                 const text = await response.text();
+                                 const list = await cleanList(text);
+                                 // 更新缓存
+                                 proxyIPRemoteCache.data = list;
+                                 proxyIPRemoteCache.expires = Date.now() + 600000; // 10分钟缓存
+                                 return list;
+                             } else {
+                                 throw new Error(`ProxyIP fetch failed: ${response.status}`);
+                             }
+                         } catch (e) {
+                             console.error('Failed to fetch remote ProxyIP:', e);
+                             // 失败时的兜底：使用默认列表，缓存 1 分钟
+                             const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+                             proxyIPRemoteCache.data = defParams;
+                             proxyIPRemoteCache.expires = Date.now() + 60000; 
+                             return defParams;
+                         } finally {
+                             // 无论成功失败，结束后释放锁
+                             proxyIPRemoteCache.fetchingPromise = null;
+                         }
+                     })();
                  }
+                 
+                 // 等待 fetch 结果
+                 rawList = await proxyIPRemoteCache.fetchingPromise;
              }
         } else {
              rawList = rawProxyIP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
         }
     }
 
-    // [Feature] 严格单一 ProxyIP 策略
-    // 审计确认：保持原逻辑，ctx.proxyIPList 仅包含单一 IP，确保一次连接周期内 IP 不变
     if (rawList && rawList.length > 0) {
         const selectedIP = rawList[Math.floor(Math.random() * rawList.length)];
         ctx.proxyIP = selectedIP;
-        ctx.proxyIPList = [selectedIP]; 
+        ctx.proxyIPList = [selectedIP]; // 保持单一 IP 策略
     } else {
         ctx.proxyIP = '';
         ctx.proxyIPList = [];
