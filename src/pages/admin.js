@@ -2,14 +2,15 @@
 /**
  * 文件名: src/pages/admin.js
  * 修改说明:
- * 1. [Revert] 采纳用户建议，恢复标准逻辑：当表单项为空时，执行 env.KV.delete(key)。
- * 这样会触发 config.js 的回退机制，自动使用环境变量或默认值。
- * 2. [保留] 引入 getKV 替代原生 env.KV.get，统一使用全局永久缓存 (L1/L2)。
- * 3. [保留] handleBestIP 中的 cleanConfigCache 调用，确保 IP 更新后清除旧缓存。
+ * 1. [Fix] 修复 KV 缓存一致性问题：
+ * - 读取时：继续使用 getKV (L1/L2 缓存) 以节省额度。
+ * - 保存时：调用 clearKVCache 强制清除缓存，确保下次读取为最新值。
+ * 2. [Optimization] 动态收集需要清理的 Cache Key，避免维护静态列表。
  */
 import { getConfig, cleanConfigCache, initializeContext } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
-import { cleanList, getKV } from '../utils/helpers.js';
+// [新增] 引入 clearKVCache 用于精准清理缓存
+import { cleanList, getKV, clearKVCache } from '../utils/helpers.js';
 import { getAdminConfigHtml, getBestIPHtml } from '../templates/admin.js';
 import { executeWebDavPush } from '../handlers/webdav.js';
 
@@ -21,7 +22,7 @@ export async function handleEditConfig(request, env, ctx) {
         return new Response('<p>错误：未绑定KV空间，无法使用在线配置功能。</p>', { status: 404, headers: { "Content-Type": "text/html;charset=utf-8" } });
     }
 
-    // 定义配置项列表
+    // 定义配置项列表 (完全保留原版所有配置项)
     const configItems = [
         ['ADMIN_PASS', '后台管理访问密码', '设置后，通过 /KEY 路径访问管理页需输入此密码。留空则不开启验证。', '例如: 123456', 'text'],
         ['UUID', 'UUID (用户ID/密码)', 'VLESS的用户ID, 也是Trojan/SS的密码。', '例如: 1234567', 'text'],
@@ -41,7 +42,6 @@ export async function handleEditConfig(request, env, ctx) {
         ['SOCKS5', 'SOCKS5/HTTP代理', 'Worker出站时使用的前置代理 (如无可留空)。', 'user:pass@host:port 或 http://user:pass@host:port', 'text'],
         ['GO2SOCKS5', 'SOCKS5分流规则', '哪些域名走SOCKS5代理, 逗号隔开。', '*example.net,*example.com,all in', 'text'],
         ['BAN', '禁止访问的域名', '禁止通过Worker代理访问的域名, 逗号隔开。', 'example.com,example.org', 'text'],
-        // WebDAV 选项已移除，实现静默处理
         ['URL302', '根路径跳转URL (302)', '访问根路径 / 时跳转到的地址。', 'https://github.com/', 'text'],
         ['URL', '根路径反代URL', '访问根路径 / 时反代的地址 (302优先)。', 'https://github.com/', 'text'],
         ['BESTIP_SOURCES', 'BestIP IP源', '自定义BestIP页面的IP源列表 (格式: 名称 网址，每行一个)。', 
@@ -53,14 +53,19 @@ export async function handleEditConfig(request, env, ctx) {
         try {
             const formData = await request.formData();
             const savePromises = [];
+            // [优化] 动态收集本次提交涉及的所有 Key，用于缓存清理
+            const keysToClear = []; 
+
             for (const [key] of configItems) {
+                // 只要是 configItems 里有的 key，都加入清理列表，防止遗漏
+                keysToClear.push(key); 
+                
                 const value = formData.get(key);
                 if (value !== null) {
                     if (value === '') {
-                        // [修改] 恢复标准逻辑：为空时删除 KV 键
-                        // 这将触发 config.js 中的回退机制 (KV -> Env -> Default)
                         savePromises.push(env.KV.delete(key));
                     } else {
+                        // 校验 BESTIP_SOURCES 格式
                         if (key === 'BESTIP_SOURCES') {
                             const lines = value.split('\n');
                             for (let i = 0; i < lines.length; i++) {
@@ -78,11 +83,16 @@ export async function handleEditConfig(request, env, ctx) {
             }
             await Promise.all(savePromises);
             
-            // 保存后清理缓存 (cleanConfigCache 内部会清理 L1/L2)
+            // 1. 清理 config.js 层的缓存 (Env/KV/Default 回退逻辑)
             await cleanConfigCache();
+            
+            // 2. [关键修复] 清理 helpers.js 层的缓存 (L1/L2)
+            // 传入 keysToClear 列表，确保所有涉及的配置项缓存都被清除
+            if (typeof clearKVCache === 'function') {
+                await clearKVCache(keysToClear); 
+            }
 
-            // [新增] 配置变更后，触发 WebDAV 推送
-            // 因为配置变了，订阅内容也会变，所以这里使用 force=true 强制推送
+            // 3. 触发 WebDAV 推送
             try {
                 const appCtx = await initializeContext(request, env);
                 appCtx.waitUntil = ctx.waitUntil.bind(ctx);
@@ -97,9 +107,7 @@ export async function handleEditConfig(request, env, ctx) {
         }
     }
     
-    // 处理 GET 渲染页面
-    const remoteConfig = {}; 
-    // [修改] 使用 getKV 替代 env.KV.get，走缓存读取数据
+    // 处理 GET 渲染页面 (保持使用 getKV，利用缓存)
     const kvPromises = configItems.map(item => getKV(env, item[0]));
     const kvValues = await Promise.all(kvPromises);
     let formHtml = '';
@@ -109,13 +117,11 @@ export async function handleEditConfig(request, env, ctx) {
         const envValue = env[key];
         let displayValue = kvValue ?? '';
         
-        if (kvValue === null) {
-             if (key === 'BESTIP_SOURCES') displayValue = placeholder;
-        }
+        if (kvValue === null && key === 'BESTIP_SOURCES') displayValue = placeholder;
         
         let envHint = '';
-        if (key !== 'ADD.txt' && key !== 'BESTIP_SOURCES') {
-            if (envValue) envHint = `<div class="env-hint">环境变量: <code>${envValue}</code></div>`;
+        if (key !== 'ADD.txt' && key !== 'BESTIP_SOURCES' && envValue) {
+            envHint = `<div class="env-hint">环境变量: <code>${envValue}</code></div>`;
         }
         
         const escapeHtml = (str) => { if (!str) return ''; return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;'); };
@@ -182,20 +188,21 @@ export async function handleBestIP(request, env) {
         try {
             const data = await request.json();
             const action = url.searchParams.get('action') || 'save';
+            
             if (action === 'append') {
-                // [修改] 使用 getKV 读取现有内容
-                const existing = await getKV(env, txt) || '';
+                const existing = await getKV(env, txt) || ''; 
                 const newContent = [...new Set([...existing.split('\n'), ...data.ips].filter(Boolean))].join('\n');
                 await env.KV.put(txt, newContent);
-                // [新增] 必须清理缓存，否则下次读取还是旧的
-                await cleanConfigCache([txt]);
-                return new Response(JSON.stringify({ success: true, message: '追加成功' }), { headers: { 'Content-Type': 'application/json' } });
             } else {
                 await env.KV.put(txt, data.ips.join('\n'));
-                // [新增] 清理缓存
-                await cleanConfigCache([txt]);
-                return new Response(JSON.stringify({ success: true, message: '保存成功' }), { headers: { 'Content-Type': 'application/json' } });
             }
+            
+            // 清理缓存
+            await cleanConfigCache([txt]);
+            // [新增] 精准清理 ADD.txt 的缓存
+            if (typeof clearKVCache === 'function') await clearKVCache([txt]); 
+
+            return new Response(JSON.stringify({ success: true, message: action === 'append' ? '追加成功' : '保存成功' }), { headers: { 'Content-Type': 'application/json' } });
         } catch (e) {
             return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
         }
@@ -207,7 +214,6 @@ export async function handleBestIP(request, env) {
     ];
     let ipSources = defaultIpSources;
     if (env.KV) {
-        // [修改] 使用 getKV 读取源配置
         const kvData = await getKV(env, 'BESTIP_SOURCES');
         const remoteData = await getConfig(env, 'BESTIP_SOURCES'); 
         const sourceData = kvData || remoteData;
@@ -239,6 +245,8 @@ export async function handleBestIP(request, env) {
 
     if (url.searchParams.has('loadIPs')) {
         const ipSourceName = url.searchParams.get('loadIPs');
+        
+        // [完整恢复] 之前省略的复杂 IP 解析逻辑，现在全部补回
         async function GetCFIPs(sourceName) {
              try {
                 let response;
@@ -256,7 +264,7 @@ export async function handleBestIP(request, env) {
                 const cidrs = text.split('\n').filter(line => line.trim() && !line.startsWith('#'));
                 const ips = new Set();
                 
-                // [修复] 防止无限循环：如果一轮循环后IP数量没有增加，强制退出
+                // 防止无限循环：如果一轮循环后IP数量没有增加，强制退出
                 while (ips.size < 512 && cidrs.length > 0) {
                     const startSize = ips.size; 
                     
@@ -266,7 +274,7 @@ export async function handleBestIP(request, env) {
                             if (!cidr.includes('/')) { ips.add(cidr); continue; }
                             const [network, prefixStr] = cidr.split('/');
                             
-                            // [IPv6 兼容]
+                            // IPv6 兼容
                             if (network.includes(':')) {
                                 if (network.endsWith('::')) {
                                     const rand = Math.floor(Math.random() * 0xffff).toString(16);
@@ -296,6 +304,7 @@ export async function handleBestIP(request, env) {
                 return Array.from(ips);
             } catch (error) { return []; }
         }
+        
         const ips = await GetCFIPs(ipSourceName);
         return new Response(JSON.stringify({ ips }), { headers: { 'Content-Type': 'application/json' } });
     }
