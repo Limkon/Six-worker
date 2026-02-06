@@ -3,6 +3,7 @@
  * 审计与修复: 
  * 1. [Fix] 增加凭据非空检查，防止空配置导致 Fetch 异常。
  * 2. [Optimization] 延长推送超时时间至 10s，适应网络波动。
+ * 3. [Security] 限制推送内容最大为 10KB，防止大对象导致的内存溢出风险。
  */
 import { handleSubscription } from '../pages/sub.js';
 import { sha1 } from '../utils/helpers.js';
@@ -72,9 +73,30 @@ export async function executeWebDavPush(env, ctx, force = false) {
             content = decoded;
         } catch (e) {}
 
-        // 6. 简单的去重处理
+        // 6. 去重与大小限制 (10KB 限制修复)
         const uniqueLines = [...new Set(content.split('\n'))].filter(line => line.trim() !== '');
-        const finalContent = uniqueLines.join('\n');
+        
+        // [Security Fix] 严格限制推送大小不超过 10KB
+        const MAX_BYTES = 10 * 1024; // 10KB
+        const encoder = new TextEncoder();
+        
+        let accumulatedBytes = 0;
+        const limitedLines = [];
+        
+        for (const line of uniqueLines) {
+            // 计算当前行加上换行符后的字节大小
+            const lineBytes = encoder.encode(line).length + 1; 
+            
+            if (accumulatedBytes + lineBytes > MAX_BYTES) {
+                console.warn(`[WebDAV] Content exceeded 10KB limit. Truncating remaining nodes...`);
+                break;
+            }
+            
+            limitedLines.push(line);
+            accumulatedBytes += lineBytes;
+        }
+        
+        const finalContent = limitedLines.join('\n');
 
         // 7. 检查内容 Hash (防重复推送)
         if (env.KV && !force) {
