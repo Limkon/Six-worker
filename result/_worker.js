@@ -3147,7 +3147,9 @@ async function handleEditConfig(request, env, ctx) {
     try {
       const formData = await request.formData();
       const savePromises = [];
+      const keysToClear = [];
       for (const [key] of configItems) {
+        keysToClear.push(key);
         const value = formData.get(key);
         if (value !== null) {
           if (value === "") {
@@ -3170,6 +3172,9 @@ async function handleEditConfig(request, env, ctx) {
       }
       await Promise.all(savePromises);
       await cleanConfigCache();
+      if (typeof clearKVCache === "function") {
+        await clearKVCache(keysToClear);
+      }
       try {
         const appCtx = await initializeContext(request, env);
         appCtx.waitUntil = ctx.waitUntil.bind(ctx);
@@ -3182,7 +3187,6 @@ async function handleEditConfig(request, env, ctx) {
       return new Response("\u4FDD\u5B58\u5931\u8D25: " + e.message, { status: 500 });
     }
   }
-  const remoteConfig = {};
   const kvPromises = configItems.map((item) => getKV(env, item[0]));
   const kvValues = await Promise.all(kvPromises);
   let formHtml = "";
@@ -3190,12 +3194,10 @@ async function handleEditConfig(request, env, ctx) {
     const kvValue = kvValues[index];
     const envValue = env[key];
     let displayValue = kvValue ?? "";
-    if (kvValue === null) {
-      if (key === "BESTIP_SOURCES") displayValue = placeholder;
-    }
+    if (kvValue === null && key === "BESTIP_SOURCES") displayValue = placeholder;
     let envHint = "";
-    if (key !== "ADD.txt" && key !== "BESTIP_SOURCES") {
-      if (envValue) envHint = `<div class="env-hint">\u73AF\u5883\u53D8\u91CF: <code>${envValue}</code></div>`;
+    if (key !== "ADD.txt" && key !== "BESTIP_SOURCES" && envValue) {
+      envHint = `<div class="env-hint">\u73AF\u5883\u53D8\u91CF: <code>${envValue}</code></div>`;
     }
     const escapeHtml = (str) => {
       if (!str) return "";
@@ -3262,13 +3264,12 @@ async function handleBestIP(request, env) {
         const existing = await getKV(env, txt) || "";
         const newContent = [...new Set([...existing.split("\n"), ...data.ips].filter(Boolean))].join("\n");
         await env.KV.put(txt, newContent);
-        await cleanConfigCache([txt]);
-        return new Response(JSON.stringify({ success: true, message: "\u8FFD\u52A0\u6210\u529F" }), { headers: { "Content-Type": "application/json" } });
       } else {
         await env.KV.put(txt, data.ips.join("\n"));
-        await cleanConfigCache([txt]);
-        return new Response(JSON.stringify({ success: true, message: "\u4FDD\u5B58\u6210\u529F" }), { headers: { "Content-Type": "application/json" } });
       }
+      await cleanConfigCache([txt]);
+      if (typeof clearKVCache === "function") await clearKVCache([txt]);
+      return new Response(JSON.stringify({ success: true, message: action === "append" ? "\u8FFD\u52A0\u6210\u529F" : "\u4FDD\u5B58\u6210\u529F" }), { headers: { "Content-Type": "application/json" } });
     } catch (e) {
       return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { "Content-Type": "application/json" } });
     }
