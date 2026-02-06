@@ -422,19 +422,21 @@ var StreamCipher = class {
 };
 
 var configCache = {};
+var REMOTE_CONFIG_TTL = 5 * 60 * 1e3;
 var remoteConfigCache = {
   data: {},
   lastFetch: 0
 };
 var proxyIPRemoteCache = {
   data: [],
-  expires: 0
+  expires: 0,
+  fetchingPromise: null
 };
 async function cleanConfigCache(updatedKeys) {
   if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes("REMOTE_CONFIG_URL")) {
     configCache = {};
     remoteConfigCache = { data: {}, lastFetch: 0 };
-    proxyIPRemoteCache = { data: [], expires: 0 };
+    proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
     await clearKVCache();
     return;
   }
@@ -443,12 +445,14 @@ async function cleanConfigCache(updatedKeys) {
   }
   await clearKVCache(updatedKeys);
   if (updatedKeys.includes("PROXYIP")) {
-    proxyIPRemoteCache = { data: [], expires: 0 };
+    proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
   }
 }
 async function loadRemoteConfig(env, forceReload = false) {
   const remoteConfigUrl = await getKV(env, "REMOTE_CONFIG_URL");
-  if (!forceReload && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
+  const now = Date.now();
+  const isExpired = now - remoteConfigCache.lastFetch > REMOTE_CONFIG_TTL;
+  if (!forceReload && !isExpired && remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
     return remoteConfigCache.data;
   }
   if (remoteConfigUrl) {
@@ -462,11 +466,11 @@ async function loadRemoteConfig(env, forceReload = false) {
       });
       if (response.ok) {
         const text = await response.text();
-        const now = Date.now();
+        const updateTime = Date.now();
         try {
           const newData = JSON.parse(text);
           remoteConfigCache.data = newData;
-          remoteConfigCache.lastFetch = now;
+          remoteConfigCache.lastFetch = updateTime;
           configCache = {};
         } catch (e) {
           void(0);
@@ -483,7 +487,7 @@ async function loadRemoteConfig(env, forceReload = false) {
             }
           });
           remoteConfigCache.data = newData;
-          remoteConfigCache.lastFetch = now;
+          remoteConfigCache.lastFetch = updateTime;
           configCache = {};
         }
       }
@@ -520,7 +524,9 @@ async function initializeContext(request, env) {
   const forceReload = url.searchParams.get("flush") === "1";
   if (forceReload) {
     void(0);
-    await cleanConfigCache();
+    configCache = {};
+    proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
+    await clearKVCache();
   }
   const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0");
   if (enableRemote === "1") {
@@ -602,33 +608,36 @@ async function initializeContext(request, env) {
   let rawList = [];
   if (rawProxyIP) {
     if (rawProxyIP.startsWith("http")) {
-      if (Date.now() < proxyIPRemoteCache.expires) {
+      if (Date.now() < proxyIPRemoteCache.expires && proxyIPRemoteCache.data.length > 0) {
         rawList = proxyIPRemoteCache.data;
       } else {
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 5e3);
-          const response = await fetch(rawProxyIP, {
-            signal: controller.signal
-          }).finally(() => {
-            clearTimeout(timeoutId);
-          });
-          if (response.ok) {
-            const text = await response.text();
-            const list = await cleanList(text);
-            rawList = list;
-            proxyIPRemoteCache.data = list;
-            proxyIPRemoteCache.expires = Date.now() + 6e5;
-          } else {
-            throw new Error(`ProxyIP fetch failed: ${response.status}`);
-          }
-        } catch (e) {
-          void(0);
-          const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
-          rawList = defParams;
-          proxyIPRemoteCache.data = defParams;
-          proxyIPRemoteCache.expires = Date.now() + 6e4;
+        if (!proxyIPRemoteCache.fetchingPromise) {
+          proxyIPRemoteCache.fetchingPromise = (async () => {
+            try {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 5e3);
+              const response = await fetch(rawProxyIP, { signal: controller.signal }).finally(() => clearTimeout(timeoutId));
+              if (response.ok) {
+                const text = await response.text();
+                const list = await cleanList(text);
+                proxyIPRemoteCache.data = list;
+                proxyIPRemoteCache.expires = Date.now() + 6e5;
+                return list;
+              } else {
+                throw new Error(`ProxyIP fetch failed: ${response.status}`);
+              }
+            } catch (e) {
+              void(0);
+              const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+              proxyIPRemoteCache.data = defParams;
+              proxyIPRemoteCache.expires = Date.now() + 6e4;
+              return defParams;
+            } finally {
+              proxyIPRemoteCache.fetchingPromise = null;
+            }
+          })();
         }
+        rawList = await proxyIPRemoteCache.fetchingPromise;
       }
     } else {
       rawList = rawProxyIP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
@@ -1830,6 +1839,7 @@ async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressR
 }
 
 var protocolManager = new ProtocolManager().register("vless", processVlessHeader).register("trojan", parseTrojanHeader).register("mandala", parseMandalaHeader).register("socks5", parseSocks5Header).register("ss", parseShadowsocksHeader);
+var activeWebSocketConnections = 0;
 function concatUint82(a, b) {
   const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
   const res = new Uint8Array(a.length + bArr.length);
@@ -1837,11 +1847,23 @@ function concatUint82(a, b) {
   res.set(bArr, a.length);
   return res;
 }
+function getDynamicBufferSize() {
+  if (activeWebSocketConnections < 5) return 10 * 1024 * 1024;
+  if (activeWebSocketConnections < 20) return 2 * 1024 * 1024;
+  if (activeWebSocketConnections < 50) return 512 * 1024;
+  return 128 * 1024;
+}
 async function handleWebSocketRequest(request, ctx) {
   const webSocketPair = new WebSocketPair();
   const [client, webSocket] = Object.values(webSocketPair);
-  webSocket.accept();
-  let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [] };
+  try {
+    webSocket.accept();
+  } catch (e) {
+    void(0);
+    return new Response("WebSocket Accept Failed", { status: 500 });
+  }
+  activeWebSocketConnections++;
+  let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [], bufferedBytes: 0 };
   let isConnected = false;
   let socks5State = 0;
   let vlessBuffer = new Uint8Array(0);
@@ -1885,7 +1907,17 @@ async function handleWebSocketRequest(request, ctx) {
         if (activeWriter) {
           await activeWriter.write(chunkArr);
         } else if (remoteSocketWrapper.isConnecting) {
+          if (remoteSocketWrapper.buffer.length === 0) {
+            remoteSocketWrapper.bufferedBytes = 0;
+          }
+          const newSize = remoteSocketWrapper.bufferedBytes + chunkArr.byteLength;
+          const dynamicLimit = getDynamicBufferSize();
+          if (newSize > dynamicLimit) {
+            clearTimeout(timeoutTimer);
+            throw new Error(`Smart Buffer Limit Exceeded: ${newSize} > ${dynamicLimit} (ActiveConns: ${activeWebSocketConnections})`);
+          }
           remoteSocketWrapper.buffer.push(chunkArr);
+          remoteSocketWrapper.bufferedBytes = newSize;
         }
         return;
       }
@@ -1953,51 +1985,44 @@ async function handleWebSocketRequest(request, ctx) {
       }
     },
     close() {
-      if (activeWriter) {
-        try {
-          activeWriter.releaseLock();
-        } catch (e) {
-        }
-      }
-      if (remoteSocketWrapper.value) {
-        try {
-          remoteSocketWrapper.value.close();
-        } catch (e) {
-        }
-      }
+      cleanup();
     },
     abort(reason) {
-      if (activeWriter) {
-        try {
-          activeWriter.releaseLock();
-        } catch (e) {
-        }
-      }
-      if (remoteSocketWrapper.value) {
-        try {
-          remoteSocketWrapper.value.close();
-        } catch (e) {
-        }
-      }
+      cleanup();
       safeCloseWebSocket(webSocket);
     }
   })).catch((err) => {
     clearTimeout(timeoutTimer);
+    cleanup();
+    safeCloseWebSocket(webSocket);
+  });
+  function cleanup() {
     if (activeWriter) {
       try {
         activeWriter.releaseLock();
       } catch (e) {
       }
+      activeWriter = null;
     }
     if (remoteSocketWrapper.value) {
       try {
         remoteSocketWrapper.value.close();
       } catch (e) {
       }
+      remoteSocketWrapper.value = null;
     }
-    safeCloseWebSocket(webSocket);
-  });
-  if (ctx.waitUntil) ctx.waitUntil(streamPromise);
+  }
+  if (ctx.waitUntil) {
+    ctx.waitUntil(streamPromise.finally(() => {
+      activeWebSocketConnections--;
+      if (activeWebSocketConnections < 0) activeWebSocketConnections = 0;
+    }));
+  } else {
+    streamPromise.finally(() => {
+      activeWebSocketConnections--;
+      if (activeWebSocketConnections < 0) activeWebSocketConnections = 0;
+    });
+  }
   return new Response(null, { status: 101, webSocket: client });
 }
 function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
