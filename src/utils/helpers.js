@@ -2,10 +2,8 @@
 /**
  * 文件名: src/utils/helpers.js
  * 修改内容: 
- * 1. [Fix] StreamCipher: 修复种子生成算法，解决不同顺序 Key 生成相同 Seed 的安全隐患。
- * 2. [Refactor] KV Cache: 增加 MAX_KV_CACHE_SIZE 限制，防止内存无界增长。
- * 3. [Optimization] getKV: 移除缓存写入的 await，实现 Fire-and-forget 非阻塞写入，提升响应速度。
- * 4. [Optimization] sha224Hash: 增加内置 LRU 缓存，避免重复计算，提升 Trojan 握手性能。
+ * 1. [Feature] 确认导出 clearKVCache 函数，支持全量清理和精准清理，用于配合 admin.js 的保存逻辑。
+ * 2. [Feature] 包含完整的 L1/L2 双层缓存系统、StreamCipher、SHA224 等工具函数。
  */
 
 // 全局编解码器实例
