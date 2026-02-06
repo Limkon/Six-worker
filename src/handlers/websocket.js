@@ -4,7 +4,8 @@
  * 重构说明:
  * 1. [核心优化] Early Data (0-RTT) 支持：主动解析协议头，支持粘包处理。
  * 2. [稳定性] 引入 vlessBuffer 缓冲区，自动拼接分包数据，防止连接崩溃。
- * 3. [功能] 增强日志记录，覆盖 IPv4/IPv6/域名，包含 SOCKS5 状态机修复。
+ * 3. [Fix] 修复 Buffer 堆积风险：降低 MAX_HEADER_BUFFER 至 2KB，设定明确的探测阈值 (1KB)，防止垃圾数据占用内存。
+ * 4. [功能] 增强日志记录，覆盖 IPv4/IPv6/域名，包含 SOCKS5 状态机修复。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -49,7 +50,11 @@ export async function handleWebSocketRequest(request, ctx) {
     let activeSocket = null;
     
     // 安全配置
-    const MAX_HEADER_BUFFER = 4096; // 限制头部最大 4KB，防止内存溢出
+    // [Fix] 降低最大缓冲区限制至 2048 (足够 Mandala 探测，防止大内存分配)
+    const MAX_HEADER_BUFFER = 2048; 
+    // [Fix] 探测阈值：如果积累了 1024 字节仍无法识别协议，视为非法连接直接断开
+    // (Mandala 协议含 Padding 和长域名可能接近 600-800 字节，设为 1024 较为安全)
+    const PROBE_THRESHOLD = 1024;
     const DETECT_TIMEOUT_MS = 10000; // 10秒未识别协议则断开
 
     const log = (info, event) => console.log(`[WS] ${info}`, event || '');
@@ -193,12 +198,13 @@ export async function handleWebSocketRequest(request, ctx) {
 
             } catch (e) {
                 // [Stability] 增强的分包处理
-                // 如果是数据分片导致解析失败（长度不够），且缓冲区未满，则静默等待后续数据
-                if (vlessBuffer && vlessBuffer.length < 512 && vlessBuffer.length < MAX_HEADER_BUFFER) {
+                // [Fix] 使用 PROBE_THRESHOLD 控制探测容忍度
+                // 如果是数据分片导致解析失败（长度不够），且缓冲区未满阈值，则静默等待后续数据
+                if (vlessBuffer && vlessBuffer.length < PROBE_THRESHOLD && vlessBuffer.length < MAX_HEADER_BUFFER) {
                     // log('Partial data received, waiting for more...');
                     return; 
                 }
-                // 否则视为非法协议或错误
+                // 否则视为非法协议或错误 (垃圾数据堆积超过阈值)
                 clearTimeout(timeoutTimer);
                 log(`Detection failed: ${e.message}`);
                 safeCloseWebSocket(webSocket);
