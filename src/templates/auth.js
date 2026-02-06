@@ -1,6 +1,8 @@
+// src/templates/auth.js
 /**
  * 文件名: src/templates/auth.js
  * 说明: 存放认证相关的 HTML 模板 (登录页、初始化密码页)
+ * 修改: [Security] 在登录页增加 Cookie 可用性检测脚本，防止登录死循环。
  */
 
 export function getPasswordSetupHtml() {
@@ -23,6 +25,9 @@ export function getLoginHtml() {
             --card-bg: #ffffff;
             --text-color: #333333;
             --border-color: #dee2e6;
+            --error-bg: #f8d7da;
+            --error-color: #721c24;
+            --error-border: #f5c6cb;
         }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -91,17 +96,59 @@ export function getLoginHtml() {
         button:active {
             transform: scale(0.98);
         }
+        .error-box {
+            background-color: var(--error-bg);
+            color: var(--error-color);
+            border: 1px solid var(--error-border);
+            padding: 0.75rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            font-size: 0.9rem;
+            text-align: left;
+            display: none; /* 默认隐藏，由JS触发 */
+            line-height: 1.4;
+        }
     </style>
 </head>
 <body>
     <div class="card">
         <h3>🔒 访问受限</h3>
+        
+        <div id="error-msg" class="error-box"></div>
+
         <p style="color:#666; margin-bottom: 1.5rem;">当前页面需要管理员权限</p>
         <form method="POST" action="?auth=login">
             <input type="password" name="password" placeholder="请输入访问密码" required autofocus autocomplete="current-password">
             <button type="submit">立即解锁</button>
         </form>
     </div>
+
+    <script>
+        (function() {
+            var msgDiv = document.getElementById('error-msg');
+            
+            // 1. 静态检测：浏览器是否完全禁用了 Cookie
+            if (!navigator.cookieEnabled) {
+                msgDiv.innerHTML = "<strong>⚠️ 浏览器 Cookie 已禁用</strong><br>系统必须依赖 Cookie 保存登录状态。请在浏览器设置中开启 Cookie 后刷新页面重试。";
+                msgDiv.style.display = 'block';
+                return;
+            }
+
+            // 2. 动态检测：是否发生了“登录成功但Cookie丢失”的死循环
+            // (配合 index.js 中的 login_check=1 参数)
+            var urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.has('login_check')) {
+                msgDiv.innerHTML = "<strong>⚠️ 无法写入登录状态</strong><br>您的密码正确，但浏览器未保存 Cookie。<br>可能原因：<br>1. 正在使用隐私模式或第三方 Cookie 被拦截<br>2. 访问域名不支持 HttpOnly Cookie<br>3. 请尝试切换 HTTPS 访问";
+                msgDiv.style.display = 'block';
+                
+                // 清理 URL 参数，避免用户刷新时一直看到错误
+                try {
+                    var newUrl = window.location.pathname;
+                    window.history.replaceState({}, document.title, newUrl);
+                } catch(e) {}
+            }
+        })();
+    </script>
 </body>
 </html>`;
 }
