@@ -847,7 +847,7 @@ async function parseMandalaHeader(mandalaBuffer, password) {
   if (!password) {
     return { hasError: true, message: "Password is required" };
   }
-  if (mandalaBuffer.byteLength < 67) {
+  if (mandalaBuffer.byteLength < 40) {
     return { hasError: true, message: "Mandala buffer too short" };
   }
   const buffer = mandalaBuffer instanceof Uint8Array ? mandalaBuffer : new Uint8Array(mandalaBuffer);
@@ -859,29 +859,23 @@ async function parseMandalaHeader(mandalaBuffer, password) {
   const passwordBytes = textEncoder.encode(password);
   const cipher = new StreamCipher(passwordBytes, salt);
   cipher.process(decrypted);
-  const hashHex = sha224Hash(String(password));
-  const expectedHashBytes = textEncoder.encode(hashHex);
-  if (!constantTimeEqual2(decrypted.subarray(0, 56), expectedHashBytes)) {
-    return { hasError: true, message: "Invalid Mandala Auth" };
-  }
-  const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
-  const padLen = decrypted[56];
-  let cursor = 57 + padLen;
-  if (cursor >= decrypted.length) {
-    return { hasError: true, message: "Buffer too short or Padding too long" };
-  }
+  const cachedAuthKeyHex = sha224Hash(String(password));
+  const cachedAuthKeyBytes = textEncoder.encode(cachedAuthKeyHex);
+  const HASH_SIZE = 32;
+  if (decrypted.byteLength < HASH_SIZE + 1) return { hasError: true, message: "Data too short" };
+  const padLen = decrypted[HASH_SIZE];
+  let cursor = HASH_SIZE + 1 + padLen;
+  if (cursor >= decrypted.length) return { hasError: true, message: "Padding overflow" };
   const cmd = decrypted[cursor];
   const isUDP = cmd === 3;
-  if (cmd !== 1 && !isUDP) {
-    return { hasError: true, message: "Unsupported Mandala CMD: " + cmd };
-  }
+  if (cmd !== 1 && !isUDP) return { hasError: true, message: "Unsupported Mandala CMD: " + cmd };
   cursor++;
   if (cursor >= decrypted.length) return { hasError: true, message: "Buffer ended unexpectedly" };
   const atyp = decrypted[cursor];
   cursor++;
   let addressRemote = "";
   let portRemote = 0;
-  let headerEnd = 0;
+  const view = new DataView(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
   try {
     switch (atyp) {
       case CONSTANTS.ADDRESS_TYPE_IPV4:
@@ -891,35 +885,40 @@ async function parseMandalaHeader(mandalaBuffer, password) {
       case CONSTANTS.ATYP_SS_DOMAIN:
         const domainLen = decrypted[cursor];
         cursor++;
-        if (cursor + domainLen > decrypted.length) throw new Error("Domain length overflow");
         addressRemote = textDecoder.decode(decrypted.subarray(cursor, cursor + domainLen));
         cursor += domainLen;
         break;
       case CONSTANTS.ATYP_SS_IPV6:
         const ipv6 = [];
-        for (let i = 0; i < 8; i++) {
-          ipv6.push(view.getUint16(cursor + i * 2, false).toString(16));
-        }
+        for (let i = 0; i < 8; i++) ipv6.push(view.getUint16(cursor + i * 2, false).toString(16));
         addressRemote = "[" + ipv6.join(":") + "]";
         cursor += 16;
         break;
       default:
         return { hasError: true, message: "Unknown ATYP: " + atyp };
     }
-    if (cursor + 2 > decrypted.length) throw new Error("Port overflow");
     portRemote = view.getUint16(cursor, false);
     cursor += 2;
-    headerEnd = cursor;
   } catch (e) {
-    return { hasError: true, message: "Address parse failed: " + e.message };
+    return { hasError: true, message: "Header parse failed" };
   }
-  if (headerEnd + 2 > decrypted.byteLength) {
-    return { hasError: true, message: "Missing CRLF data" };
-  }
+  const headerEnd = cursor;
+  if (headerEnd + 2 > decrypted.byteLength) return { hasError: true, message: "Missing CRLF" };
   if (decrypted[headerEnd] !== 13 || decrypted[headerEnd + 1] !== 10) {
-    return { hasError: true, message: "Missing CRLF" };
+    return { hasError: true, message: "Invalid Footer" };
   }
-  const rawClientData = ciphertext.subarray(headerEnd + 2);
+  const fullHeaderLen = headerEnd + 2;
+  const receivedHash = decrypted.subarray(0, HASH_SIZE);
+  const headerData = decrypted.subarray(HASH_SIZE, fullHeaderLen);
+  const verifyBuffer = new Uint8Array(cachedAuthKeyBytes.length + headerData.length);
+  verifyBuffer.set(cachedAuthKeyBytes);
+  verifyBuffer.set(headerData, cachedAuthKeyBytes.length);
+  const computedHashBuffer = await crypto.subtle.digest("SHA-256", verifyBuffer);
+  const computedHash = new Uint8Array(computedHashBuffer);
+  if (!constantTimeEqual2(receivedHash, computedHash)) {
+    return { hasError: true, message: "Mandala Integrity Check Failed" };
+  }
+  const rawClientData = ciphertext.subarray(fullHeaderLen);
   return {
     hasError: false,
     addressRemote,
@@ -1153,7 +1152,7 @@ async function performResolve(domain, dnsServer) {
   }
   return null;
 }
-async function resolveToIPv6(domain, dnsServer) {
+async function resolveToIPv6(domain, dnsServer, ctx) {
   if (!dnsServer) return null;
   if (dnsCache.size > 1e3) {
     dnsCache.clear();
@@ -1186,16 +1185,24 @@ async function resolveToIPv6(domain, dnsServer) {
     const ip = await promise;
     if (ip) {
       dnsCache.set(cacheKey, { ip, expires: Date.now() + 6e4 });
-      try {
-        const cacheResponse = new Response(ip, {
-          headers: {
-            "Cache-Control": "max-age=60",
-            "Content-Type": "text/plain"
-          }
+      const putCache = async () => {
+        try {
+          const cacheResponse = new Response(ip, {
+            headers: {
+              "Cache-Control": "max-age=60",
+              "Content-Type": "text/plain"
+            }
+          });
+          await cache.put(cacheUrl, cacheResponse);
+        } catch (cacheError) {
+          void(0);
+        }
+      };
+      if (ctx && typeof ctx.waitUntil === "function") {
+        ctx.waitUntil(putCache());
+      } else {
+        putCache().catch((e) => {
         });
-        await cache.put(cacheUrl, cacheResponse);
-      } catch (cacheError) {
-        void(0);
       }
     }
     return ip;
@@ -1205,7 +1212,7 @@ async function resolveToIPv6(domain, dnsServer) {
   }
 }
 
-var IPV4_PRIVATE_REGEX = /^(?:127\.|10\.|172\.(?:1[6-9]|2\d|3[0-1])\.|192\.168\.|169\.254\.|0\.0\.0\.0|localhost)/;
+var IPV4_PRIVATE_REGEX = /^(?:127\.|10\.|172\.(?:1[6-9]|2\d|3[0-1])\.|192\.168\.|169\.254\.|198\.1[89]\.|(?:22[4-9]|23\d|24\d|25[0-5])\.|0\.|localhost)/;
 var IPV4_CGNAT_REGEX = /^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./;
 var IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/i;
 function isPrivateIP(address) {
@@ -1840,7 +1847,8 @@ async function handleWebSocketRequest(request, ctx) {
   let vlessBuffer = new Uint8Array(0);
   let activeWriter = null;
   let activeSocket = null;
-  const MAX_HEADER_BUFFER = 4096;
+  const MAX_HEADER_BUFFER = 2048;
+  const PROBE_THRESHOLD = 1024;
   const DETECT_TIMEOUT_MS = 1e4;
   const log = (info, event) => void(0);
   const timeoutTimer = setTimeout(() => {
@@ -1936,7 +1944,7 @@ async function handleWebSocketRequest(request, ctx) {
           handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
         }
       } catch (e) {
-        if (vlessBuffer && vlessBuffer.length < 512 && vlessBuffer.length < MAX_HEADER_BUFFER) {
+        if (vlessBuffer && vlessBuffer.length < PROBE_THRESHOLD && vlessBuffer.length < MAX_HEADER_BUFFER) {
           return;
         }
         clearTimeout(timeoutTimer);
@@ -3065,7 +3073,20 @@ async function executeWebDavPush(env, ctx, force = false) {
     } catch (e) {
     }
     const uniqueLines = [...new Set(content.split("\n"))].filter((line) => line.trim() !== "");
-    const finalContent = uniqueLines.join("\n");
+    const MAX_BYTES = 10 * 1024;
+    const encoder = new TextEncoder();
+    let accumulatedBytes = 0;
+    const limitedLines = [];
+    for (const line of uniqueLines) {
+      const lineBytes = encoder.encode(line).length + 1;
+      if (accumulatedBytes + lineBytes > MAX_BYTES) {
+        void(0);
+        break;
+      }
+      limitedLines.push(line);
+      accumulatedBytes += lineBytes;
+    }
+    const finalContent = limitedLines.join("\n");
     if (env.KV && !force) {
       const currentHash = await sha1(finalContent);
       const lastHash = await env.KV.get("WEBDAV_HASH");
@@ -3518,6 +3539,9 @@ function getLoginHtml() {
             --card-bg: #ffffff;
             --text-color: #333333;
             --border-color: #dee2e6;
+            --error-bg: #f8d7da;
+            --error-color: #721c24;
+            --error-border: #f5c6cb;
         }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -3586,17 +3610,59 @@ function getLoginHtml() {
         button:active {
             transform: scale(0.98);
         }
+        .error-box {
+            background-color: var(--error-bg);
+            color: var(--error-color);
+            border: 1px solid var(--error-border);
+            padding: 0.75rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            font-size: 0.9rem;
+            text-align: left;
+            display: none; /* \u9ED8\u8BA4\u9690\u85CF\uFF0C\u7531JS\u89E6\u53D1 */
+            line-height: 1.4;
+        }
     </style>
 </head>
 <body>
     <div class="card">
         <h3>\u{1F512} \u8BBF\u95EE\u53D7\u9650</h3>
+        
+        <div id="error-msg" class="error-box"></div>
+
         <p style="color:#666; margin-bottom: 1.5rem;">\u5F53\u524D\u9875\u9762\u9700\u8981\u7BA1\u7406\u5458\u6743\u9650</p>
         <form method="POST" action="?auth=login">
             <input type="password" name="password" placeholder="\u8BF7\u8F93\u5165\u8BBF\u95EE\u5BC6\u7801" required autofocus autocomplete="current-password">
             <button type="submit">\u7ACB\u5373\u89E3\u9501</button>
         </form>
     </div>
+
+    <script>
+        (function() {
+            var msgDiv = document.getElementById('error-msg');
+            
+            // 1. \u9759\u6001\u68C0\u6D4B\uFF1A\u6D4F\u89C8\u5668\u662F\u5426\u5B8C\u5168\u7981\u7528\u4E86 Cookie
+            if (!navigator.cookieEnabled) {
+                msgDiv.innerHTML = "<strong>\u26A0\uFE0F \u6D4F\u89C8\u5668 Cookie \u5DF2\u7981\u7528</strong><br>\u7CFB\u7EDF\u5FC5\u987B\u4F9D\u8D56 Cookie \u4FDD\u5B58\u767B\u5F55\u72B6\u6001\u3002\u8BF7\u5728\u6D4F\u89C8\u5668\u8BBE\u7F6E\u4E2D\u5F00\u542F Cookie \u540E\u5237\u65B0\u9875\u9762\u91CD\u8BD5\u3002";
+                msgDiv.style.display = 'block';
+                return;
+            }
+
+            // 2. \u52A8\u6001\u68C0\u6D4B\uFF1A\u662F\u5426\u53D1\u751F\u4E86\u201C\u767B\u5F55\u6210\u529F\u4F46Cookie\u4E22\u5931\u201D\u7684\u6B7B\u5FAA\u73AF
+            // (\u914D\u5408 index.js \u4E2D\u7684 login_check=1 \u53C2\u6570)
+            var urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.has('login_check')) {
+                msgDiv.innerHTML = "<strong>\u26A0\uFE0F \u65E0\u6CD5\u5199\u5165\u767B\u5F55\u72B6\u6001</strong><br>\u60A8\u7684\u5BC6\u7801\u6B63\u786E\uFF0C\u4F46\u6D4F\u89C8\u5668\u672A\u4FDD\u5B58 Cookie\u3002<br>\u53EF\u80FD\u539F\u56E0\uFF1A<br>1. \u6B63\u5728\u4F7F\u7528\u9690\u79C1\u6A21\u5F0F\u6216\u7B2C\u4E09\u65B9 Cookie \u88AB\u62E6\u622A<br>2. \u8BBF\u95EE\u57DF\u540D\u4E0D\u652F\u6301 HttpOnly Cookie<br>3. \u8BF7\u5C1D\u8BD5\u5207\u6362 HTTPS \u8BBF\u95EE";
+                msgDiv.style.display = 'block';
+                
+                // \u6E05\u7406 URL \u53C2\u6570\uFF0C\u907F\u514D\u7528\u6237\u5237\u65B0\u65F6\u4E00\u76F4\u770B\u5230\u9519\u8BEF
+                try {
+                    var newUrl = window.location.pathname;
+                    window.history.replaceState({}, document.title, newUrl);
+                } catch(e) {}
+            }
+        })();
+    <\/script>
 </body>
 </html>`;
 }
@@ -3749,7 +3815,7 @@ var index_default = {
                     status: 302,
                     headers: {
                       "Set-Cookie": `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
-                      "Location": url.pathname
+                      "Location": url.pathname + "?login_check=1"
                     }
                   });
                 }
