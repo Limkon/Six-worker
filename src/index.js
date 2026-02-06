@@ -4,6 +4,7 @@
  * 修改说明:
  * 1. [Fix] proxyUrl: 增加防回环检测，防止因配置错误导致 Worker 请求自己引发 loadShed 崩溃。
  * 2. [Optimization] 增强全局错误捕获，防止异常对象为空时导致 Worker 崩溃白屏。
+ * 3. [Security] Login Redirect: 增加 login_check=1 标记，配合前端检测 Cookie 写入失败的情况。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -218,7 +219,8 @@ export default {
                                         status: 302,
                                         headers: {
                                             'Set-Cookie': `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
-                                            'Location': url.pathname 
+                                            // [Fix] 增加登录成功标记 login_check=1，用于前端检测 Cookie 写入失败的情况
+                                            'Location': url.pathname + '?login_check=1'
                                         }
                                     });
                                 }
