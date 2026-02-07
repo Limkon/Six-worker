@@ -422,6 +422,7 @@ var StreamCipher = class {
 };
 
 var configCache = {};
+var configGeneration = 0;
 var REMOTE_CONFIG_TTL = 360 * 60 * 1e3;
 var remoteConfigCache = {
   data: {},
@@ -439,6 +440,7 @@ var uuidCache = {
 };
 var UUID_CACHE_TTL = 10 * 60 * 1e3;
 async function cleanConfigCache(updatedKeys) {
+  configGeneration++;
   if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes("REMOTE_CONFIG_URL")) {
     configCache = {};
     remoteConfigCache = { data: {}, lastFetch: 0 };
@@ -477,29 +479,31 @@ async function loadRemoteConfig(env, forceReload = false) {
       if (response.ok) {
         const text = await response.text();
         const updateTime = Date.now();
-        try {
-          const newData = JSON.parse(text);
-          remoteConfigCache.data = newData;
-          remoteConfigCache.lastFetch = updateTime;
-          configCache = {};
-        } catch (e) {
-          void(0);
-          const lines = text.split("\n");
-          const newData = {};
-          lines.forEach((line) => {
-            const trimmedLine = line.trim();
-            if (!trimmedLine || trimmedLine.startsWith("#") || trimmedLine.startsWith("//")) return;
-            const eqIndex = trimmedLine.indexOf("=");
-            if (eqIndex > 0) {
-              const k = trimmedLine.substring(0, eqIndex).trim();
-              const v = trimmedLine.substring(eqIndex + 1).trim();
-              if (k && v) newData[k] = v;
-            }
-          });
-          remoteConfigCache.data = newData;
-          remoteConfigCache.lastFetch = updateTime;
-          configCache = {};
-        }
+        const parseConfig = (txt) => {
+          try {
+            return JSON.parse(txt);
+          } catch (e) {
+            void(0);
+            const lines = txt.split("\n");
+            const newData2 = {};
+            lines.forEach((line) => {
+              const trimmedLine = line.trim();
+              if (!trimmedLine || trimmedLine.startsWith("#") || trimmedLine.startsWith("//")) return;
+              const eqIndex = trimmedLine.indexOf("=");
+              if (eqIndex > 0) {
+                const k = trimmedLine.substring(0, eqIndex).trim();
+                const v = trimmedLine.substring(eqIndex + 1).trim();
+                if (k && v) newData2[k] = v;
+              }
+            });
+            return newData2;
+          }
+        };
+        const newData = parseConfig(text);
+        remoteConfigCache.data = newData;
+        remoteConfigCache.lastFetch = updateTime;
+        configCache = {};
+        configGeneration++;
       }
     } catch (e) {
       void(0);
@@ -511,6 +515,7 @@ async function getConfig(env, key, defaultValue = void 0) {
   if (configCache[key] !== void 0) {
     return configCache[key];
   }
+  const currentGen = configGeneration;
   let val = void 0;
   if (env.KV) {
     val = await getKV(env, key);
@@ -526,7 +531,9 @@ async function getConfig(env, key, defaultValue = void 0) {
   }
   if (!val && key === "KEY") val = env.KEY || env.TOKEN;
   const finalVal = val !== void 0 && val !== null ? val : defaultValue;
-  configCache[key] = finalVal;
+  if (currentGen === configGeneration) {
+    configCache[key] = finalVal;
+  }
   return finalVal;
 }
 async function getCachedUUID(seed, timeDays, updateHour) {
@@ -549,6 +556,7 @@ async function initializeContext(request, env) {
   if (forceReload) {
     void(0);
     configCache = {};
+    configGeneration++;
     proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
     uuidCache = { key: null, data: null, lastUpdate: 0 };
     await clearKVCache();
@@ -562,6 +570,7 @@ async function initializeContext(request, env) {
       remoteConfigCache.data = {};
       remoteConfigCache.lastFetch = 0;
       configCache = {};
+      configGeneration++;
     }
   }
   const [adminPass, rawUUID, rawKey, timeDaysStr, updateHourStr] = await Promise.all([
@@ -1255,12 +1264,10 @@ var IPV4_CGNAT_REGEX = /^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./;
 var IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/i;
 function isPrivateIP(address) {
   if (!address) return true;
-  if (IPV4_PRIVATE_REGEX.test(address)) return true;
-  if (IPV4_CGNAT_REGEX.test(address)) return true;
-  if (address.includes(":")) {
-    if (IPV6_PRIVATE_REGEX.test(address.toLowerCase())) return true;
+  if (address.indexOf(":") !== -1) {
+    return IPV6_PRIVATE_REGEX.test(address.toLowerCase());
   }
-  return false;
+  return IPV4_PRIVATE_REGEX.test(address) || IPV4_CGNAT_REGEX.test(address);
 }
 var CACHE_TTL = 10 * 60 * 1e3;
 var MAX_CACHE_SIZE = 500;
@@ -1674,10 +1681,12 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallb
 async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, finalizeConnectionCallback) {
   const { bndAddr, bndPort, originalHost } = controlSocket;
   let targetHost = bndAddr;
+  const cleanBndAddr = bndAddr.replace(/[\[\]]/g, "");
+  const isPrivate = isPrivateIP(cleanBndAddr);
   const isZeroIP = bndAddr === "0.0.0.0" || bndAddr === "::" || bndAddr.startsWith("0:0:0:0") || bndAddr === "[::]";
-  if (isZeroIP && originalHost) {
+  if ((isZeroIP || isPrivate) && originalHost) {
     targetHost = originalHost;
-    log(`[SOCKS5] BND.ADDR is ${bndAddr}, falling back to proxy host: ${targetHost}`);
+    log(`[SOCKS5] BND.ADDR is ${bndAddr} (Private/Zero), falling back to proxy host: ${targetHost}`);
   }
   log(`[SOCKS5] UDP Associate ready. Relay: ${targetHost}:${bndPort}`);
   const udpSocket = connect({ hostname: targetHost, port: bndPort });
@@ -1897,7 +1906,7 @@ async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressR
 }
 
 var protocolManager = new ProtocolManager().register("vless", processVlessHeader).register("trojan", parseTrojanHeader).register("mandala", parseMandalaHeader).register("socks5", parseSocks5Header).register("ss", parseShadowsocksHeader);
-var activeWebSocketConnections = 0;
+var activeConnectionsInInstance = 0;
 function concatUint82(a, b) {
   const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
   const res = new Uint8Array(a.length + bArr.length);
@@ -1906,12 +1915,16 @@ function concatUint82(a, b) {
   return res;
 }
 function getDynamicBufferSize() {
-  if (activeWebSocketConnections < 5) return 10 * 1024 * 1024;
-  if (activeWebSocketConnections < 20) return 2 * 1024 * 1024;
-  if (activeWebSocketConnections < 50) return 512 * 1024;
+  if (activeConnectionsInInstance < 5) return 10 * 1024 * 1024;
+  if (activeConnectionsInInstance < 20) return 2 * 1024 * 1024;
+  if (activeConnectionsInInstance < 50) return 512 * 1024;
   return 128 * 1024;
 }
 async function handleWebSocketRequest(request, ctx) {
+  if (activeConnectionsInInstance >= CONSTANTS.MAX_CONCURRENT) {
+    void(0);
+    return new Response("Error: Instance Too Busy (Rate Limit)", { status: 429 });
+  }
   const webSocketPair = new WebSocketPair();
   const [client, webSocket] = Object.values(webSocketPair);
   try {
@@ -1920,7 +1933,7 @@ async function handleWebSocketRequest(request, ctx) {
     void(0);
     return new Response("WebSocket Accept Failed", { status: 500 });
   }
-  activeWebSocketConnections++;
+  activeConnectionsInInstance++;
   let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [], bufferedBytes: 0 };
   let isConnected = false;
   let socks5State = 0;
@@ -1972,7 +1985,7 @@ async function handleWebSocketRequest(request, ctx) {
           const dynamicLimit = getDynamicBufferSize();
           if (newSize > dynamicLimit) {
             clearTimeout(timeoutTimer);
-            throw new Error(`Smart Buffer Limit Exceeded: ${newSize} > ${dynamicLimit} (ActiveConns: ${activeWebSocketConnections})`);
+            throw new Error(`Smart Buffer Limit Exceeded: ${newSize} > ${dynamicLimit} (ActiveConns: ${activeConnectionsInInstance})`);
           }
           remoteSocketWrapper.buffer.push(chunkArr);
           remoteSocketWrapper.bufferedBytes = newSize;
@@ -2072,13 +2085,13 @@ async function handleWebSocketRequest(request, ctx) {
   }
   if (ctx.waitUntil) {
     ctx.waitUntil(streamPromise.finally(() => {
-      activeWebSocketConnections--;
-      if (activeWebSocketConnections < 0) activeWebSocketConnections = 0;
+      activeConnectionsInInstance--;
+      if (activeConnectionsInInstance < 0) activeConnectionsInInstance = 0;
     }));
   } else {
     streamPromise.finally(() => {
-      activeWebSocketConnections--;
-      if (activeWebSocketConnections < 0) activeWebSocketConnections = 0;
+      activeConnectionsInInstance--;
+      if (activeConnectionsInInstance < 0) activeConnectionsInInstance = 0;
     });
   }
   return new Response(null, { status: 101, webSocket: client });
@@ -2197,10 +2210,24 @@ function concat_typed_arrays(first, ...args) {
   }
   return r;
 }
-async function read_at_least(reader, minBytes, initialBuffer) {
+async function read_at_least(reader, minBytes, initialBuffer, deadline) {
   let currentBuffer = initialBuffer || new Uint8Array(0);
   while (currentBuffer.length < minBytes) {
-    const { value, done } = await reader.read();
+    const remainingTime = deadline - Date.now();
+    if (remainingTime <= 0) {
+      throw new Error("Header read timeout");
+    }
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error("Header read timeout")), remainingTime);
+    });
+    let result;
+    try {
+      result = await Promise.race([reader.read(), timeoutPromise]);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    const { value, done } = result;
     if (done) return { value: currentBuffer, done: true };
     if (value) {
       currentBuffer = concat_typed_arrays(currentBuffer, value);
@@ -2210,6 +2237,8 @@ async function read_at_least(reader, minBytes, initialBuffer) {
 }
 async function read_xhttp_header(readable, ctx) {
   const reader = readable.getReader();
+  const HEADER_TIMEOUT = 3e3;
+  const deadline = Date.now() + HEADER_TIMEOUT;
   const fail = async (msg) => {
     try {
       await reader.cancel(msg);
@@ -2218,7 +2247,7 @@ async function read_xhttp_header(readable, ctx) {
     return msg;
   };
   try {
-    let { value: cache, done } = await read_at_least(reader, 18);
+    let { value: cache, done } = await read_at_least(reader, 18, null, deadline);
     if (cache.length < 18) return fail("header too short");
     const version = cache[0];
     const uuidStr = stringifyUUID(cache.subarray(1, 17));
@@ -2230,7 +2259,7 @@ async function read_xhttp_header(readable, ctx) {
     const pb_len = cache[17];
     const min_len_until_atyp = 22 + pb_len;
     if (cache.length < min_len_until_atyp) {
-      const r = await read_at_least(reader, min_len_until_atyp, cache);
+      const r = await read_at_least(reader, min_len_until_atyp, cache, deadline);
       cache = r.value;
       if (cache.length < min_len_until_atyp) return fail("header too short for metadata");
     }
@@ -2249,7 +2278,7 @@ async function read_xhttp_header(readable, ctx) {
       header_len = addr_body_idx + 16;
     } else if (atype === CONSTANTS.ADDRESS_TYPE_URL) {
       if (cache.length < addr_body_idx + 1) {
-        const r = await read_at_least(reader, addr_body_idx + 1, cache);
+        const r = await read_at_least(reader, addr_body_idx + 1, cache, deadline);
         cache = r.value;
         if (cache.length < addr_body_idx + 1) return fail("header too short for domain len");
       }
@@ -2259,7 +2288,7 @@ async function read_xhttp_header(readable, ctx) {
       return fail("read address type failed: " + atype);
     }
     if (cache.length < header_len) {
-      const r = await read_at_least(reader, header_len, cache);
+      const r = await read_at_least(reader, header_len, cache, deadline);
       cache = r.value;
       if (cache.length < header_len) return fail("header too short for full address");
     }
