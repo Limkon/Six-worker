@@ -439,6 +439,35 @@ var uuidCache = {
   lastUpdate: 0
 };
 var UUID_CACHE_TTL = 10 * 60 * 1e3;
+async function safeReadText(response, maxLength = 1024 * 50) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let result = "";
+  let bytesRead = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        result += decoder.decode(value, { stream: true });
+        bytesRead += value.byteLength;
+        if (bytesRead > maxLength) {
+          void(0);
+          break;
+        }
+      }
+    }
+    result += decoder.decode();
+  } catch (e) {
+    void(0);
+  } finally {
+    try {
+      reader.cancel();
+    } catch (_) {
+    }
+  }
+  return result;
+}
 async function cleanConfigCache(updatedKeys) {
   configGeneration++;
   if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes("REMOTE_CONFIG_URL")) {
@@ -477,32 +506,26 @@ async function loadRemoteConfig(env, forceReload = false) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5e3);
       const response = await fetch(remoteConfigUrl, {
-        signal: controller.signal
-      }).finally(() => {
-        clearTimeout(timeoutId);
-      });
+        signal: controller.signal,
+        headers: { "User-Agent": "Six-Worker-Config-Fetcher" }
+      }).finally(() => clearTimeout(timeoutId));
       if (response.ok) {
-        const text = await response.text();
+        const text = await safeReadText(response, 50 * 1024);
         const updateTime = Date.now();
         const parseConfig = (txt) => {
           try {
-            return JSON.parse(txt);
+            const json = JSON.parse(txt);
+            if (json && typeof json === "object") return json;
           } catch (e) {
-            void(0);
-            const lines = txt.split("\n");
-            const newData2 = {};
-            lines.forEach((line) => {
-              const trimmedLine = line.trim();
-              if (!trimmedLine || trimmedLine.startsWith("#") || trimmedLine.startsWith("//")) return;
-              const eqIndex = trimmedLine.indexOf("=");
-              if (eqIndex > 0) {
-                const k = trimmedLine.substring(0, eqIndex).trim();
-                const v = trimmedLine.substring(eqIndex + 1).trim();
-                if (k && v) newData2[k] = v;
-              }
-            });
-            return newData2;
           }
+          const newData2 = {};
+          const regex = /^\s*([^#=\s]+)\s*=\s*(.+?)\s*$/gm;
+          let match;
+          let loopCount = 0;
+          while ((match = regex.exec(txt)) !== null && loopCount++ < 1e3) {
+            newData2[match[1]] = match[2];
+          }
+          return newData2;
         };
         const newData = parseConfig(text);
         remoteConfigCache.data = newData;
@@ -549,25 +572,16 @@ async function initializeContext(request, env) {
   const forceReload = url.searchParams.get("flush") === "1";
   if (forceReload) {
     void(0);
-    configCache = {};
-    configGeneration++;
-    proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
-    uuidCache = { key: null, data: null, lastUpdate: 0 };
-    parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
-    await clearKVCache();
+    await cleanConfigCache();
   }
   const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0");
   if (enableRemote === "1") {
     await loadRemoteConfig(env, forceReload);
-  } else {
-    if (remoteConfigCache.data && Object.keys(remoteConfigCache.data).length > 0) {
-      void(0);
-      remoteConfigCache.data = {};
-      remoteConfigCache.lastFetch = 0;
-      configCache = {};
-      configGeneration++;
-      parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
-    }
+  } else if (remoteConfigCache.lastFetch > 0) {
+    remoteConfigCache = { data: {}, lastFetch: 0 };
+    configCache = {};
+    configGeneration++;
+    parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
   }
   const [adminPass, rawUUID, rawKey, timeDaysStr, updateHourStr] = await Promise.all([
     getConfig(env, "ADMIN_PASS"),
@@ -608,7 +622,8 @@ async function initializeContext(request, env) {
   if (rawKey || rawUUID && !isStrictV4UUID(rawUUID)) {
     const seed = rawKey || rawUUID;
     if (seed) {
-      const timeDays = Number(timeDaysStr) || 0;
+      let timeDays = Number(timeDaysStr) || 0;
+      if (timeDays > 36500) timeDays = 36500;
       const updateHour = Number(updateHourStr) || 0;
       const userIDs = await getCachedUUID(seed, timeDays, updateHour);
       ctx.userID = userIDs[0];
@@ -619,7 +634,8 @@ async function initializeContext(request, env) {
   if (!ctx.userID) {
     const superPass = await getConfig(env, "SUPER_PASSWORD") || CONSTANTS.SUPER_PASSWORD;
     if (superPass) {
-      const timeDays = Number(timeDaysStr) || 0;
+      let timeDays = Number(timeDaysStr) || 0;
+      if (timeDays > 36500) timeDays = 36500;
       const updateHour = Number(updateHourStr) || 0;
       const userIDs = await getCachedUUID(superPass, timeDays, updateHour);
       ctx.userID = userIDs[0];
@@ -645,10 +661,13 @@ async function initializeContext(request, env) {
           proxyIPRemoteCache.fetchingPromise = (async () => {
             try {
               const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 5e3);
-              const response = await fetch(rawProxyIP, { signal: controller.signal }).finally(() => clearTimeout(timeoutId));
+              const timeoutId = setTimeout(() => controller.abort(), 3e3);
+              const response = await fetch(rawProxyIP, {
+                signal: controller.signal,
+                headers: { "User-Agent": "Six-Worker-ProxyIP-Fetcher" }
+              }).finally(() => clearTimeout(timeoutId));
               if (response.ok) {
-                const text = await response.text();
+                const text = await safeReadText(response, 50 * 1024);
                 const list = await cleanList(text);
                 proxyIPRemoteCache.data = list;
                 proxyIPRemoteCache.expires = Date.now() + 6e5;
@@ -673,7 +692,8 @@ async function initializeContext(request, env) {
       if (parsedListCache.proxyIP) {
         rawList = parsedListCache.proxyIP;
       } else {
-        rawList = rawProxyIP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+        const safeStr = rawProxyIP.length > 1e4 ? rawProxyIP.substring(0, 1e4) : rawProxyIP;
+        rawList = safeStr.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
         parsedListCache.proxyIP = rawList;
       }
     }
@@ -689,13 +709,15 @@ async function initializeContext(request, env) {
   if (parsedListCache.go2socks5) {
     ctx.go2socks5 = parsedListCache.go2socks5;
   } else {
-    ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
+    const safeGoStr = go2socksStr && go2socksStr.length > 5e3 ? go2socksStr.substring(0, 5e3) : go2socksStr;
+    ctx.go2socks5 = safeGoStr ? await cleanList(safeGoStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
     parsedListCache.go2socks5 = ctx.go2socks5;
   }
   if (parsedListCache.banHosts) {
     ctx.banHosts = parsedListCache.banHosts;
   } else if (banStr) {
-    ctx.banHosts = await cleanList(banStr);
+    const safeBanStr = banStr.length > 1e4 ? banStr.substring(0, 1e4) : banStr;
+    ctx.banHosts = await cleanList(safeBanStr);
     parsedListCache.banHosts = ctx.banHosts;
   }
   if (parsedListCache.disabledProtocols) {
