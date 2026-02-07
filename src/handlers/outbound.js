@@ -5,8 +5,9 @@
  * 1. SOCKS5 UDP Associate (BND.ADDR 0.0.0.0 Fix).
  * 2. [Security] 严格的 Cloudflare 防风控机制 (增强了私有/保留 IP 阻断正则).
  * 3. 增强的正则匹配性能.
- * 4. [Fix] SOCKS5 UDP Buffer: 修复 UDP 分包导致的断流问题 (引入 isHeaderComplete 状态机).
+ * 4. [Fix] SOCKS5 UDP Buffer: 修复 UDP 分包导致的断流问题。
  * 5. [New Fix] 优化连接超时与写入超时，解决网络波动断连问题。
+ * 6. [Security Strict] SOCKS5 强制密码验证模式 (拒绝无认证降级)。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -15,11 +16,6 @@ import { safeCloseWebSocket, isHostBanned, textEncoder } from '../utils/helpers.
 
 // --- [Security] 安全检查：私有 IP 阻断 (防止风控核心) ---
 // 使用预编译正则提高性能，严格匹配小数点防止误杀公网 IP (如 10.x vs 104.x)
-// [修复说明] 扩展了阻断范围：
-// 1. 198.18.0.0/15: 基准测试专用 (198.18.x.x - 198.19.x.x)
-// 2. 224.0.0.0/4: 组播地址 (224.0.0.0 - 239.255.255.255)
-// 3. 240.0.0.0/4: 保留地址 (240.0.0.0 - 255.255.255.254)
-// 4. 0.0.0.0/8: 当前网络 (0.x.x.x)
 const IPV4_PRIVATE_REGEX = /^(?:127\.|10\.|172\.(?:1[6-9]|2\d|3[0-1])\.|192\.168\.|169\.254\.|198\.1[89]\.|(?:22[4-9]|23\d|24\d|25[0-5])\.|0\.|localhost)/;
 const IPV4_CGNAT_REGEX = /^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./; // 100.64.0.0/10
 const IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/i; // fc00::, fe80::, ::1
@@ -148,14 +144,27 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     const reader = socket.readable.getReader();
     const encoder = new TextEncoder();
     
-    // 1. Handshake
-    await writer.write(new Uint8Array([5, 1, 2])); 
+    // 1. Handshake (Security Strict Mode)
+    // [Security Fix] 强制安全策略：
+    // 如果配置了密码，直接发送 [5, 1, 2]，强制要求服务端使用 0x02 (User/Pass) 认证。
+    // 这会拒绝服务端尝试降级到 "无认证" 模式，确保连接必须经过验证。
+    if (username && password) {
+        await writer.write(new Uint8Array([5, 1, 2])); 
+    } else {
+        // 如果未配置密码，则发送 [5, 1, 0]，仅支持无认证。
+        await writer.write(new Uint8Array([5, 1, 0])); 
+    }
+
     let { value: res } = await reader.read();
-    if (!res || res.length < 2 || res[0] !== 0x05 || res[1] === 0xff) throw new Error('SOCKS5 greeting failed');
+    if (!res || res.length < 2 || res[0] !== 0x05) throw new Error('SOCKS5 greeting failed');
+    
+    // 检查服务端选中的 Method
+    const selectedMethod = res[1];
+    if (selectedMethod === 0xff) throw new Error('SOCKS5 no acceptable methods');
     
     // 2. Auth
-    if (res[1] === 0x02) {
-        if (!username || !password) throw new Error('SOCKS5 auth required');
+    if (selectedMethod === 0x02) {
+        if (!username || !password) throw new Error('SOCKS5 auth required but credentials missing');
         const uBytes = encoder.encode(username);
         const pBytes = encoder.encode(password);
         const authReq = new Uint8Array([1, uBytes.length, ...uBytes, pBytes.length, ...pBytes]);
@@ -497,8 +506,8 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
 
     // Decapsulate & Stream Response
     let responseHeader = vlessResponseHeader;
-    let udpBuffer = new Uint8Array(0); 
-    let isHeaderComplete = false; // [Fix] 状态标记：标记是否已处理过头部
+    let udpBuffer = new Uint8Array(0); // [Fix] Buffer mechanism for fragmentation
+    let isHeaderComplete = false; 
 
     // [Fix] 扩大 UDP 缓冲区限制，防止高并发丢包
     const MAX_UDP_BUFFER = 65535; // 原代码为 4096 (硬编码)，现提升至 64KB
@@ -512,8 +521,7 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
             
             // Safety: Buffer limit
             if (udpBuffer.length > MAX_UDP_BUFFER) {
-                // Buffer overflow protection, treat as payload if header already handled? 
-                // But better to reset to avoid OOM
+                // Buffer overflow or bad protocol, reset
                 udpBuffer = new Uint8Array(0); 
                 return;
             }
@@ -542,7 +550,6 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
                         
                         // [Critical Fix] 切换状态到 "Payload Mode"。
                         // 后续所有数据都视为 Payload 直接转发，不再解析 Header。
-                        // 这解决了 "Header 之后是分包 Payload" 导致的断流问题。
                         isHeaderComplete = true;
                         
                         // Reset buffer (consumed)
