@@ -1,12 +1,12 @@
 // src/index.js
 /**
  * 文件名: src/index.js
- * 状态: 最终确认版 (Final Verified)
- * 变更说明:
- * 1. [Fix] 解决 CPU 超限: 移除全局 POST 拦截，改为特征路由匹配。
- * 2. [Feat] 智能 XHTTP 路由: 支持 UUID 前段 (Hash) 及 6-12位 Hex 特征路径，解决客户端连接问题。
- * 3. [Security] 严格 API 鉴权: 确保管理接口不被绕过。
- * 4. [Keep] 保留所有原版功能: WebSocket, 自动域名发现, WebDAV, 订阅等。
+ * 状态: 最终生产版 (Final Production)
+ * 确认项:
+ * 1. [Fix] 恢复 API (GET) 访问能力，解决 /edit 打不开的问题。
+ * 2. [Logic] 严格对齐原版“自动域名发现”逻辑，防止 Hex 扫描触发数据库写入。
+ * 3. [Perf] 移除全局 POST 拦截器，彻底修复 CPU 超限。
+ * 4. [Feat] 支持 UUID 前段及 Hex 特征路径作为 XHTTP 隧道。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -139,29 +139,27 @@ export default {
             }
 
             // ============================================================
-            // 3. 路由特征识别 (分流核心)
+            // 3. 路由特征识别 (关键逻辑)
             // ============================================================
             const superPassword = CONSTANTS.SUPER_PASSWORD;
             const dynamicID = context.dynamicUUID.toLowerCase();
             
-            // 计算标准 Hash
+            // 计算标准 Hash (用于订阅和精确匹配)
             const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
             
-            // 判定路径类型
+            // 判定路径归属
             const isSuperRoute = path.startsWith('/' + superPassword);
             const isFullUserRoute = path.startsWith('/' + dynamicID);
             
-            // [Feature] Hex 特征匹配: 允许 /8fee08ee 或类似 Hex 路径
-            // 1. 精确匹配计算出的 Hash
+            // Hash 匹配逻辑：
+            // 1. 精确匹配计算出的 Hash (用于订阅/管理)
             const isCalculatedHash = path.startsWith('/' + userHash);
-            // 2. 宽容匹配 6-12 位 Hex 字符 (用于处理客户端 Hash 长度不一致问题)
+            // 2. 特征匹配 (6-12位 Hex) - 用于兼容客户端的 Hash 差异，仅用于 XHTTP 代理
             const isHexFeature = /^\/[a-f0-9]{6,12}(\/|$)/i.test(path);
             
-            // 只要满足任意一种 Hash 特征，都视为 Hash 路由
             const isHashRoute = isCalculatedHash || isHexFeature;
 
-            // [Security] 提前拦截非法路径，防止扫描器进入后续逻辑消耗 CPU
-            // 如果既不是管理路径，也不是 Hash/Hex 路径，直接 404
+            // [Security] 提前拦截非法路径，防止 CPU 耗尽
             if (!isSuperRoute && !isFullUserRoute && !isHashRoute) {
                 return new Response('404 Not Found', { status: 404 });
             }
@@ -175,9 +173,11 @@ export default {
             const isLoginRequest = url.searchParams.get('auth') === 'login';
 
             // ============================================================
-            // 4. 域名自动发现 (在任何有效路由的 GET 请求中触发)
+            // 4. 域名自动发现 (仅在受信任的路径触发)
+            // [Fix] 恢复原版逻辑：仅 isManagementRoute 或 isCalculatedHash 触发
+            // 防止 Hex 特征路径扫描触发 KV 写入
             // ============================================================
-            if (request.method === 'GET' && env.KV && hostName && hostName.includes('.')) {
+            if (request.method === 'GET' && (isManagementRoute || isCalculatedHash) && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     const now = Date.now();
                     if (now - lastPushTime > PUSH_COOLDOWN) {
@@ -221,19 +221,19 @@ export default {
                     }
                 }
 
-                // 5.2 受保护的 API (POST)
-                if (request.method === 'POST') {
-                    if (subPath === '/edit') return await handleEditConfig(request, env, ctx);
-                    if (subPath === '/bestip') return await handleBestIP(request, env);
-                }
-                
+                // 5.2 受保护的 API
+                // [Fix] 允许 GET/POST 访问，解决 /edit 页面打不开的问题
+                if (subPath === '/edit') return await handleEditConfig(request, env, ctx);
+                if (subPath === '/bestip') return await handleBestIP(request, env);
+
                 // 5.3 管理页面 (GET)
+                // 仅在非 API 路径时显示首页
                 if (request.method === 'GET') {
                     const html = await generateHomePage(env, context, hostName);
                     return new Response(html, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
                 }
 
-                // 完整 UUID 路径下的其他 POST 请求直接 404 (不处理 XHTTP)
+                // 完整 UUID 路径下的其他 POST 请求直接 404 (严格模式，不处理 XHTTP)
                 return new Response('404 Not Found', { status: 404 });
             }
 
@@ -241,7 +241,7 @@ export default {
             // 6. Hash 路由 (UUID 前段 / Hex 特征) -> XHTTP / 订阅
             // ============================================================
             if (isHashRoute) {
-                // 6.1 XHTTP 代理 (仅限 POST 且开启功能)
+                // 6.1 XHTTP 代理 (POST)
                 if (request.method === 'POST') {
                     if (context.enableXhttp && !isLoginRequest) {
                         const r = await handleXhttpClient(request, context);
@@ -261,8 +261,8 @@ export default {
                     }
                 }
 
-                // 6.2 订阅内容 (仅限 GET)
-                // [Security] 只有当 Hash 严格匹配时才输出订阅，防止 Hex 扫描泄露订阅信息
+                // 6.2 订阅内容 (GET)
+                // [Security] 只有精确 Hash 才能获取订阅
                 if (request.method === 'GET' && isCalculatedHash) {
                     const response = await handleSubscription(request, env, context, subPath, hostName);
                     if (response) return response;
