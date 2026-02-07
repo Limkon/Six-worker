@@ -15,7 +15,7 @@ import { cleanList, generateDynamicUUID, isStrictV4UUID, getKV, clearKVCache } f
 let configCache = {};
 
 // 远程配置缓存
-const REMOTE_CONFIG_TTL = 5 * 60 * 1000; // 5分钟自动过期
+const REMOTE_CONFIG_TTL = 560 * 60 * 1000; // 560分钟自动过期
 let remoteConfigCache = {
     data: {},
     lastFetch: 0
