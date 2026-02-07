@@ -432,11 +432,18 @@ var proxyIPRemoteCache = {
   expires: 0,
   fetchingPromise: null
 };
+var uuidCache = {
+  key: null,
+  data: null,
+  lastUpdate: 0
+};
+var UUID_CACHE_TTL = 10 * 60 * 1e3;
 async function cleanConfigCache(updatedKeys) {
   if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes("REMOTE_CONFIG_URL")) {
     configCache = {};
     remoteConfigCache = { data: {}, lastFetch: 0 };
     proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
+    uuidCache = { key: null, data: null, lastUpdate: 0 };
     await clearKVCache();
     return;
   }
@@ -446,6 +453,9 @@ async function cleanConfigCache(updatedKeys) {
   await clearKVCache(updatedKeys);
   if (updatedKeys.includes("PROXYIP")) {
     proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
+  }
+  if (updatedKeys.some((k) => ["UUID", "KEY", "TIME", "UPTIME", "SUPER_PASSWORD"].includes(k))) {
+    uuidCache = { key: null, data: null, lastUpdate: 0 };
   }
 }
 async function loadRemoteConfig(env, forceReload = false) {
@@ -519,6 +529,20 @@ async function getConfig(env, key, defaultValue = void 0) {
   configCache[key] = finalVal;
   return finalVal;
 }
+async function getCachedUUID(seed, timeDays, updateHour) {
+  const cacheKey = `${seed}|${timeDays}|${updateHour}`;
+  const now = Date.now();
+  if (uuidCache.key === cacheKey && uuidCache.data && now - uuidCache.lastUpdate < UUID_CACHE_TTL) {
+    return uuidCache.data;
+  }
+  const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
+  uuidCache = {
+    key: cacheKey,
+    data: userIDs,
+    lastUpdate: now
+  };
+  return userIDs;
+}
 async function initializeContext(request, env) {
   const url = new URL(request ? request.url : "http://localhost");
   const forceReload = url.searchParams.get("flush") === "1";
@@ -526,6 +550,7 @@ async function initializeContext(request, env) {
     void(0);
     configCache = {};
     proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
+    uuidCache = { key: null, data: null, lastUpdate: 0 };
     await clearKVCache();
   }
   const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0");
@@ -580,7 +605,7 @@ async function initializeContext(request, env) {
     if (seed) {
       const timeDays = Number(timeDaysStr) || 0;
       const updateHour = Number(updateHourStr) || 0;
-      const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
+      const userIDs = await getCachedUUID(seed, timeDays, updateHour);
       ctx.userID = userIDs[0];
       ctx.userIDLow = userIDs[1];
       ctx.dynamicUUID = seed;
@@ -591,7 +616,7 @@ async function initializeContext(request, env) {
     if (superPass) {
       const timeDays = Number(timeDaysStr) || 0;
       const updateHour = Number(updateHourStr) || 0;
-      const userIDs = await generateDynamicUUID(superPass, timeDays, updateHour);
+      const userIDs = await getCachedUUID(superPass, timeDays, updateHour);
       ctx.userID = userIDs[0];
       ctx.userIDLow = userIDs[1];
       ctx.dynamicUUID = superPass;
@@ -740,9 +765,13 @@ async function processVlessHeader(vlessBuffer, expectedUserIDs) {
         break;
       case CONSTANTS.ADDRESS_TYPE_IPV6:
         addressLength = 16;
-        const ipv6View = new DataView(buffer.buffer, buffer.byteOffset + addressIndex, 16);
         const ipv6 = [];
-        for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2, false).toString(16));
+        for (let i = 0; i < 8; i++) {
+          const idx = addressIndex + i * 2;
+          const high = buffer[idx];
+          const low = buffer[idx + 1];
+          ipv6.push((high << 8 | low).toString(16));
+        }
         addressRemote = "[" + ipv6.join(":") + "]";
         break;
       default:
@@ -1460,8 +1489,8 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
 }
 async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
   const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-  const DIRECT_TIMEOUTS = [1500, 4e3];
-  const PROXY_TIMEOUT = 5e3;
+  const DIRECT_TIMEOUTS = [4e3, 8e3];
+  const PROXY_TIMEOUT = 1e4;
   if (!failureCache.has(addressRemote)) {
     const currentTimeout = DIRECT_TIMEOUTS[0];
     try {
@@ -1490,7 +1519,7 @@ async function createUnifiedConnection(ctx, addressRemote, portRemote, addressTy
   }
   if (!useSocks && ctx.dns64) {
     try {
-      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64, ctx);
       if (v6Address) {
         return await connectWithTimeout(v6Address, portRemote, PROXY_TIMEOUT, log);
       }
@@ -1543,7 +1572,7 @@ function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
   return new Uint8Array([...rsvFrag, atyp, ...addrBytes, ...portBytes]);
 }
 async function safeWrite(writer, chunk) {
-  const WRITE_TIMEOUT = 1e4;
+  const WRITE_TIMEOUT = 3e4;
   const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Write timeout")), WRITE_TIMEOUT));
   await Promise.race([writer.write(chunk), timeoutPromise]);
 }
@@ -1643,6 +1672,8 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
   udpWriter.releaseLock();
   let responseHeader = vlessResponseHeader;
   let udpBuffer = new Uint8Array(0);
+  let isHeaderComplete = false;
+  const MAX_UDP_BUFFER = 65535;
   await udpSocket.readable.pipeTo(new WritableStream({
     async write(chunk, controller) {
       if (webSocket.readyState !== 1) {
@@ -1650,21 +1681,33 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
         return;
       }
       udpBuffer = concatUint8(udpBuffer, chunk);
-      if (udpBuffer.length > 4096) {
+      if (udpBuffer.length > MAX_UDP_BUFFER) {
         udpBuffer = new Uint8Array(0);
         return;
       }
-      const headerLen = getSocks5UdpHeaderLength(udpBuffer);
-      if (headerLen > 0) {
-        if (udpBuffer.length >= headerLen) {
-          const payload = udpBuffer.subarray(headerLen);
-          const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
+      if (!isHeaderComplete) {
+        const headerLen = getSocks5UdpHeaderLength(udpBuffer);
+        if (headerLen > 0) {
+          if (udpBuffer.length >= headerLen) {
+            const payload = udpBuffer.subarray(headerLen);
+            const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
+            responseHeader = null;
+            if (dataToSend.length > 0) {
+              webSocket.send(dataToSend);
+            }
+            isHeaderComplete = true;
+            udpBuffer = new Uint8Array(0);
+          }
+        } else if (headerLen === 0) {
+          udpBuffer = new Uint8Array(0);
+        }
+      } else {
+        if (udpBuffer.length > 0) {
+          const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...udpBuffer]) : udpBuffer;
           responseHeader = null;
           webSocket.send(dataToSend);
           udpBuffer = new Uint8Array(0);
         }
-      } else if (headerLen === 0) {
-        udpBuffer = new Uint8Array(0);
       }
     },
     close() {
@@ -1700,9 +1743,9 @@ async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressR
     }
     prepareRetry();
     try {
-      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64, ctx);
       if (!v6Address) throw new Error("DNS64 failed");
-      const natSocket = await connectWithTimeout(v6Address, portRemote, 5e3, log);
+      const natSocket = await connectWithTimeout(v6Address, portRemote, 1e4, log);
       const writer = natSocket.writable.getWriter();
       if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
       await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -1723,7 +1766,7 @@ async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressR
     if (ip) {
       try {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
-        const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5e3, log);
+        const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 1e4, log);
         const writer = proxySocket.writable.getWriter();
         if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
         await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -1775,7 +1818,7 @@ async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressR
     try {
       const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
       if (!v6Address) throw new Error("DNS64 failed");
-      const natSocket = await connectWithTimeout(v6Address, portRemote, 5e3, log);
+      const natSocket = await connectWithTimeout(v6Address, portRemote, 1e4, log);
       const writer = natSocket.writable.getWriter();
       if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
       await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -1805,7 +1848,7 @@ async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressR
       } catch (socksErr) {
       }
       try {
-        const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5e3, log);
+        const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 1e4, log);
         const writer = proxySocket.writable.getWriter();
         if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
         await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -1869,7 +1912,7 @@ async function handleWebSocketRequest(request, ctx) {
   let vlessBuffer = new Uint8Array(0);
   let activeWriter = null;
   let activeSocket = null;
-  const MAX_HEADER_BUFFER = 2048;
+  const MAX_HEADER_BUFFER = 4096;
   const PROBE_THRESHOLD = 1024;
   const DETECT_TIMEOUT_MS = 1e4;
   const log = (info, event) => void(0);
@@ -1966,7 +2009,7 @@ async function handleWebSocketRequest(request, ctx) {
           clientData = result.rawClientData;
         } else if (protocol === "socks5") {
           clientData = result.rawClientData;
-          webSocket.send(new Uint8Array([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+          responseHeader = new Uint8Array([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
           socks5State = 3;
         }
         vlessBuffer = null;
@@ -1976,7 +2019,8 @@ async function handleWebSocketRequest(request, ctx) {
           handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
         }
       } catch (e) {
-        if (vlessBuffer && vlessBuffer.length < PROBE_THRESHOLD && vlessBuffer.length < MAX_HEADER_BUFFER) {
+        const isFatalError = e.message.startsWith("Blocked") || e.message.startsWith("Protocol mismatch") || e.message.includes("disabled");
+        if (!isFatalError && vlessBuffer && vlessBuffer.length < PROBE_THRESHOLD && vlessBuffer.length < MAX_HEADER_BUFFER) {
           return;
         }
         clearTimeout(timeoutTimer);
@@ -3306,12 +3350,17 @@ async function handleBestIP(request, env) {
     try {
       const data = await request.json();
       const action = url.searchParams.get("action") || "save";
+      let inputIps = [];
+      if (data.ips && Array.isArray(data.ips)) {
+        inputIps = data.ips.slice(0, 50).map((line) => String(line).trim().substring(0, 100)).filter(Boolean);
+      }
       if (action === "append") {
         const existing = await getKV(env, txt) || "";
-        const newContent = [...new Set([...existing.split("\n"), ...data.ips].filter(Boolean))].join("\n");
+        const existingLines = existing.split("\n").map((l) => l.trim()).filter(Boolean);
+        const newContent = [...  new Set([...existingLines, ...inputIps])].join("\n");
         await env.KV.put(txt, newContent);
       } else {
-        await env.KV.put(txt, data.ips.join("\n"));
+        await env.KV.put(txt, inputIps.join("\n"));
       }
       await cleanConfigCache([txt]);
       if (typeof clearKVCache === "function") await clearKVCache([txt]);
