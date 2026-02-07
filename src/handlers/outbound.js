@@ -332,7 +332,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     // Phase 3: NAT64
     if (!useSocks && ctx.dns64) {
         try {
-            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64, ctx);
             if (v6Address) {
                 return await connectWithTimeout(v6Address, portRemote, PROXY_TIMEOUT, log);
             }
@@ -566,7 +566,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         if (!ctx.dns64) { safeCloseWebSocket(webSocket); return; }
         prepareRetry();
         try {
-            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64, ctx);
             if (!v6Address) throw new Error('DNS64 failed');
             // [Fix] 超时时间 5000 -> 10000
             const natSocket = await connectWithTimeout(v6Address, portRemote, 10000, log);
