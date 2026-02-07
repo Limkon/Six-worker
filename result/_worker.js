@@ -423,6 +423,12 @@ var StreamCipher = class {
 
 var configCache = {};
 var configGeneration = 0;
+var parsedListCache = {
+  proxyIP: null,
+  banHosts: null,
+  disabledProtocols: null,
+  go2socks5: null
+};
 var REMOTE_CONFIG_TTL = 360 * 60 * 1e3;
 var remoteConfigCache = {
   data: {},
@@ -446,6 +452,7 @@ async function cleanConfigCache(updatedKeys) {
     remoteConfigCache = { data: {}, lastFetch: 0 };
     proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
     uuidCache = { key: null, data: null, lastUpdate: 0 };
+    parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
     await clearKVCache();
     return;
   }
@@ -455,7 +462,11 @@ async function cleanConfigCache(updatedKeys) {
   await clearKVCache(updatedKeys);
   if (updatedKeys.includes("PROXYIP")) {
     proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
+    parsedListCache.proxyIP = null;
   }
+  if (updatedKeys.includes("BAN")) parsedListCache.banHosts = null;
+  if (updatedKeys.includes("DIS")) parsedListCache.disabledProtocols = null;
+  if (updatedKeys.includes("GO2SOCKS5")) parsedListCache.go2socks5 = null;
   if (updatedKeys.some((k) => ["UUID", "KEY", "TIME", "UPTIME", "SUPER_PASSWORD"].includes(k))) {
     uuidCache = { key: null, data: null, lastUpdate: 0 };
   }
@@ -504,6 +515,7 @@ async function loadRemoteConfig(env, forceReload = false) {
         remoteConfigCache.lastFetch = updateTime;
         configCache = {};
         configGeneration++;
+        parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
       }
     } catch (e) {
       void(0);
@@ -517,18 +529,10 @@ async function getConfig(env, key, defaultValue = void 0) {
   }
   const currentGen = configGeneration;
   let val = void 0;
-  if (env.KV) {
-    val = await getKV(env, key);
-  }
-  if ((val === null || val === void 0) && remoteConfigCache.data && remoteConfigCache.data[key]) {
-    val = remoteConfigCache.data[key];
-  }
-  if ((val === null || val === void 0) && env[key]) {
-    val = env[key];
-  }
-  if (!val && key === "UUID") {
-    val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
-  }
+  if (env.KV) val = await getKV(env, key);
+  if ((val === null || val === void 0) && remoteConfigCache.data && remoteConfigCache.data[key]) val = remoteConfigCache.data[key];
+  if ((val === null || val === void 0) && env[key]) val = env[key];
+  if (!val && key === "UUID") val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
   if (!val && key === "KEY") val = env.KEY || env.TOKEN;
   const finalVal = val !== void 0 && val !== null ? val : defaultValue;
   if (currentGen === configGeneration) {
@@ -543,11 +547,7 @@ async function getCachedUUID(seed, timeDays, updateHour) {
     return uuidCache.data;
   }
   const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
-  uuidCache = {
-    key: cacheKey,
-    data: userIDs,
-    lastUpdate: now
-  };
+  uuidCache = { key: cacheKey, data: userIDs, lastUpdate: now };
   return userIDs;
 }
 async function initializeContext(request, env) {
@@ -559,6 +559,7 @@ async function initializeContext(request, env) {
     configGeneration++;
     proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
     uuidCache = { key: null, data: null, lastUpdate: 0 };
+    parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
     await clearKVCache();
   }
   const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0");
@@ -571,6 +572,7 @@ async function initializeContext(request, env) {
       remoteConfigCache.lastFetch = 0;
       configCache = {};
       configGeneration++;
+      parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
     }
   }
   const [adminPass, rawUUID, rawKey, timeDaysStr, updateHourStr] = await Promise.all([
@@ -674,7 +676,12 @@ async function initializeContext(request, env) {
         rawList = await proxyIPRemoteCache.fetchingPromise;
       }
     } else {
-      rawList = rawProxyIP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+      if (parsedListCache.proxyIP) {
+        rawList = parsedListCache.proxyIP;
+      } else {
+        rawList = rawProxyIP.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+        parsedListCache.proxyIP = rawList;
+      }
     }
   }
   if (rawList && rawList.length > 0) {
@@ -685,15 +692,31 @@ async function initializeContext(request, env) {
     ctx.proxyIP = "";
     ctx.proxyIPList = [];
   }
-  ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
-  if (banStr) ctx.banHosts = await cleanList(banStr);
-  let disStr = disStrRaw;
-  if (disStr) disStr = disStr.replace(/，/g, ",");
-  ctx.disabledProtocols = (await cleanList(disStr)).map((p) => {
-    const protocol = p.trim().toLowerCase();
-    if (protocol === "shadowsocks") return "ss";
-    return protocol;
-  });
+  if (parsedListCache.go2socks5) {
+    ctx.go2socks5 = parsedListCache.go2socks5;
+  } else {
+    ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
+    parsedListCache.go2socks5 = ctx.go2socks5;
+  }
+  if (parsedListCache.banHosts) {
+    ctx.banHosts = parsedListCache.banHosts;
+  } else if (banStr) {
+    ctx.banHosts = await cleanList(banStr);
+    parsedListCache.banHosts = ctx.banHosts;
+  }
+  if (parsedListCache.disabledProtocols) {
+    ctx.disabledProtocols = parsedListCache.disabledProtocols;
+  } else {
+    let disStr = disStrRaw;
+    if (disStr) disStr = disStr.replace(/，/g, ",");
+    const disList = await cleanList(disStr);
+    ctx.disabledProtocols = disList.map((p) => {
+      const protocol = p.trim().toLowerCase();
+      if (protocol === "shadowsocks") return "ss";
+      return protocol;
+    });
+    parsedListCache.disabledProtocols = ctx.disabledProtocols;
+  }
   ctx.enableXhttp = !ctx.disabledProtocols.includes("xhttp");
   if (url.searchParams.has("proxyip")) {
     const manualIP = url.searchParams.get("proxyip");
@@ -2198,21 +2221,14 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   });
 }
 
-function concat_typed_arrays(first, ...args) {
-  let len = first.length;
-  for (let a of args) len += a.length;
-  const r = new first.constructor(len);
-  r.set(first, 0);
-  len = first.length;
-  for (let a of args) {
-    r.set(a, len);
-    len += a.length;
-  }
-  return r;
-}
 async function read_at_least(reader, minBytes, initialBuffer, deadline) {
-  let currentBuffer = initialBuffer || new Uint8Array(0);
-  while (currentBuffer.length < minBytes) {
+  let chunks = [];
+  let totalLength = 0;
+  if (initialBuffer && initialBuffer.byteLength > 0) {
+    chunks.push(initialBuffer);
+    totalLength += initialBuffer.byteLength;
+  }
+  while (totalLength < minBytes) {
     const remainingTime = deadline - Date.now();
     if (remainingTime <= 0) {
       throw new Error("Header read timeout");
@@ -2228,12 +2244,27 @@ async function read_at_least(reader, minBytes, initialBuffer, deadline) {
       clearTimeout(timeoutId);
     }
     const { value, done } = result;
-    if (done) return { value: currentBuffer, done: true };
-    if (value) {
-      currentBuffer = concat_typed_arrays(currentBuffer, value);
+    if (done) {
+      break;
+    }
+    if (value && value.byteLength > 0) {
+      chunks.push(value);
+      totalLength += value.byteLength;
     }
   }
-  return { value: currentBuffer, done: false };
+  if (chunks.length === 0) {
+    return { value: new Uint8Array(0), done: true };
+  }
+  if (chunks.length === 1) {
+    return { value: chunks[0], done: totalLength < minBytes };
+  }
+  const resultBuffer = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    resultBuffer.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { value: resultBuffer, done: totalLength < minBytes };
 }
 async function read_xhttp_header(readable, ctx) {
   const reader = readable.getReader();
@@ -3871,10 +3902,14 @@ var index_default = {
       }
       const superPassword = CONSTANTS.SUPER_PASSWORD;
       const dynamicID = context.dynamicUUID.toLowerCase();
-      const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
       const isSuperRoute = path.startsWith("/" + superPassword);
       const isUserRoute = path.startsWith("/" + dynamicID);
-      const isSubRoute = path.startsWith("/" + userHash);
+      let userHash = "";
+      let isSubRoute = false;
+      if (!isSuperRoute && !isUserRoute) {
+        userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
+        isSubRoute = path.startsWith("/" + userHash);
+      }
       let subPath = "";
       if (isSuperRoute) subPath = path.substring(("/" + superPassword).length);
       else if (isUserRoute) subPath = path.substring(("/" + dynamicID).length);
