@@ -1,3 +1,4 @@
+// src/handlers/outbound.js
 /**
  * 文件名: src/handlers/outbound.js
  * 核心功能: 处理出站连接 (TCP/UDP)，支持 Direct, ProxyIP, SOCKS5, NAT64。
@@ -6,6 +7,7 @@
  * 2. [Critical Fix] SOCKS5 Handshake Timeout: 防止握手阶段无限挂起。
  * 3. [Security] 严格的 Cloudflare 防风控机制 (增强了私有/保留 IP 阻断正则).
  * 4. 增强的正则匹配性能.
+ * 5. [Fix] SOCKS5 UDP BND.ADDR 内网 IP 自动回退 (Docker 兼容性修复).
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -480,10 +482,16 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
     const { bndAddr, bndPort, originalHost } = controlSocket;
     
     let targetHost = bndAddr;
+    
+    // [Fix] 增加私有 IP 检查，防止连接到代理服务器内网 (Docker IP 等)
+    // 移除 IPv6 可能存在的括号以便准确匹配
+    const cleanBndAddr = bndAddr.replace(/[\[\]]/g, '');
+    const isPrivate = isPrivateIP(cleanBndAddr);
     const isZeroIP = bndAddr === '0.0.0.0' || bndAddr === '::' || bndAddr.startsWith('0:0:0:0') || bndAddr === '[::]';
-    if (isZeroIP && originalHost) {
+    
+    if ((isZeroIP || isPrivate) && originalHost) {
         targetHost = originalHost;
-        log(`[SOCKS5] BND.ADDR is ${bndAddr}, falling back to proxy host: ${targetHost}`);
+        log(`[SOCKS5] BND.ADDR is ${bndAddr} (Private/Zero), falling back to proxy host: ${targetHost}`);
     }
 
     log(`[SOCKS5] UDP Associate ready. Relay: ${targetHost}:${bndPort}`);
