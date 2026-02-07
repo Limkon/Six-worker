@@ -2,7 +2,10 @@
 /**
  * 文件名: src/utils/helpers.js
  * 说明: 核心工具库。包含加密、UUID生成、KV缓存系统(L1/L2)等核心功能。
- * 状态: 完整版 (SHA224/StreamCipher/KV系统全量保留)
+ * 修复说明:
+ * 1. [Fix] cleanList: 优化为单次 split 正则，解决处理大文本(PROXYIP/BAN)时导致 CPU 挂起的问题。
+ * 2. [Optimization] computeSha224Core: 移除字符串拼接循环，改用 repeat 一次性填充，消除 O(N^2) 隐患。
+ * 3. [Optimization] base64ToArrayBuffer: 使用 padEnd 替代 while 循环。
  */
 
 // 全局编解码器实例
@@ -29,7 +32,6 @@ export async function sha1(str) {
 }
 
 // --- SHA224 静态资源 (一次初始化) ---
-// [完整性检查] 64个常量完整保留
 const SHA224_CONSTANTS = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -45,7 +47,6 @@ const sha224RotateRight = (value, shift) => {
     return ((value >>> shift) | (value << (32 - shift))) >>> 0;
 };
 
-// 保留原有的 unescape hack 以支持二进制字符串操作，保持核心算法一致性
 const sha224ToUtf8 = (str) => { return unescape(encodeURIComponent(str)) };
 
 const sha224BytesToHex = (byteArray) => {
@@ -58,12 +59,18 @@ const sha224BytesToHex = (byteArray) => {
 };
 
 const computeSha224Core = (inputStr) => {
-    // SHA-224 初始哈希值
     let hState = [0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4];
     
     const messageBitLength = inputStr.length * 8;
     inputStr += String.fromCharCode(0x80);
-    while ((inputStr.length * 8) % 512 !== 448) { inputStr += String.fromCharCode(0) }
+    
+    // [Optimization] 移除 while 循环拼接，改用数学计算一次性补齐
+    // (len * 8) % 512 === 448  =>  len % 64 === 56
+    const currentLen = inputStr.length;
+    const padLen = (56 - (currentLen % 64) + 64) % 64;
+    if (padLen > 0) {
+        inputStr += String.fromCharCode(0).repeat(padLen);
+    }
     
     const highBits = Math.floor(messageBitLength / 0x100000000);
     const lowBits = messageBitLength & 0xFFFFFFFF;
@@ -78,7 +85,6 @@ const computeSha224Core = (inputStr) => {
         words.push((inputStr.charCodeAt(i) << 24) | (inputStr.charCodeAt(i + 1) << 16) | (inputStr.charCodeAt(i + 2) << 8) | inputStr.charCodeAt(i + 3));
     }
 
-    // 优化：将 w 数组分配移出循环，避免重复分配内存
     const w = new Array(64);
 
     for (let i = 0; i < words.length; i += 16) {
@@ -125,20 +131,17 @@ const computeSha224Core = (inputStr) => {
 
 // --- SHA224 缓存系统 ---
 const globalSha224Cache = new Map();
-const MAX_SHA224_CACHE_SIZE = 50; // 限制缓存大小，防止内存溢出
+const MAX_SHA224_CACHE_SIZE = 50; 
 
 export function sha224Hash(message) {
-    // 1. 查缓存
     if (globalSha224Cache.has(message)) {
         return globalSha224Cache.get(message);
     }
 
-    // 2. 计算哈希 (原始逻辑)
     const utf8Message = sha224ToUtf8(message);
     const hashWords = computeSha224Core(utf8Message);
     const resultHex = sha224BytesToHex(hashWords.flatMap(h => [(h >>> 24) & 0xFF, (h >>> 16) & 0xFF, (h >>> 8) & 0xFF, h & 0xFF]));
 
-    // 3. 写入缓存 (带 LRU 淘汰机制)
     if (globalSha224Cache.size >= MAX_SHA224_CACHE_SIZE) {
         const oldestKey = globalSha224Cache.keys().next().value;
         globalSha224Cache.delete(oldestKey);
@@ -154,10 +157,10 @@ export function base64ToArrayBuffer(base64Str) {
     }
     try {
         base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
-        // 修复：自动补全 Base64 填充字符 '='
-        while (base64Str.length % 4) {
-            base64Str += '=';
-        }
+        // [Optimization] 使用 padEnd 高效补全
+        const padLen = (4 - (base64Str.length % 4)) % 4;
+        if (padLen > 0) base64Str = base64Str.padEnd(base64Str.length + padLen, '=');
+        
         const decode = atob(base64Str);
         const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
         return { earlyData: arryBuffer.buffer, error: null };
@@ -168,11 +171,9 @@ export function base64ToArrayBuffer(base64Str) {
 
 export async function cleanList(content) {
     if (!content) return [];
-    // 优化：显式使用 \t 提高正则可读性
-    let replaced = content.replace(/[\t"'\r\n]+/g, ',').replace(/,+/g, ',');
-    if (replaced.startsWith(',')) replaced = replaced.slice(1);
-    if (replaced.endsWith(',')) replaced = replaced.slice(0, -1);
-    return replaced.split(',').filter(Boolean);
+    // [Fix] 优化性能：直接使用 split 正则分割，避免 replace 创建巨大的中间字符串
+    // 允许的分隔符：逗号、制表符、双引号、单引号、换行符
+    return content.split(/[\t"'\r\n,]+/).filter(Boolean);
 }
 
 export function safeCloseWebSocket(socket) {
@@ -235,46 +236,28 @@ export function isHostBanned(hostname, banList) {
 // [New Feature] 双层永久缓存系统 (L1 Memory + L2 Cache API)
 // ==========================================
 
-// L1: 内存缓存 (Worker 热启动期间有效，速度最快)
 const GLOBAL_KV_CACHE = new Map();
-const MAX_KV_CACHE_SIZE = 200; // [新增] 防止内存无限增长
+const MAX_KV_CACHE_SIZE = 200; 
 
-// Cache API 使用的虚拟前缀 (用于伪装 Request)
 const CACHE_API_PREFIX = 'http://kv-cache.local/';
-
-// [新增] 定义空值缓存的特殊标记
 const CACHE_NULL_SENTINEL = "##NULL##"; 
 
-// 定义已知的 KV 键列表 (用于全量刷新时清理 Cache API)
 const KNOWN_KV_KEYS = [
-    // 核心认证
     'UUID', 'KEY', 'ADMIN_PASS', 'SUPER_PASSWORD',
-    // 核心配置
     'PROXYIP', 'SOCKS5', 'GO2SOCKS5', 'DNS64', 'BAN', 'DIS', 
     'TIME', 'UPTIME', 
-    // 文件与订阅
     'SUBNAME', 'ADD.txt', 'ADDAPI', 'ADDNOTLS', 'ADDNOTLSAPI', 'ADDCSV', 
     'CFPORTS', 'BESTIP_SOURCES',
-    // 系统与隐藏配置
     'REMOTE_CONFIG', 'REMOTE_CONFIG_URL', 'URL', 'URL302', 'SAVED_DOMAIN'
 ];
 
-/**
- * 智能 KV 读取函数 (L1 Memory -> L2 Cache API -> L3 KV)
- * [修复] 增加对 null 值的缓存，防止缓存穿透导致 KV 读额度耗尽
- * 实现 Worker 重启后仍保留缓存，不消耗 KV 额度
- * @param {Object} env Cloudflare Env 对象
- * @param {String} key KV 键名
- */
 export async function getKV(env, key) {
     if (!env.KV || !key) return null;
 
-    // 1. [L1] 检查内存缓存 (最快)
     if (GLOBAL_KV_CACHE.has(key)) {
         return GLOBAL_KV_CACHE.get(key);
     }
 
-    // 2. [L2] 检查 Cache API (跨实例持久化)
     const cache = caches.default;
     const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
     
@@ -283,25 +266,22 @@ export async function getKV(env, key) {
         if (match) {
             const val = await match.text();
             
-            // [新增] 检测是否为缓存的空值标记
             if (val === CACHE_NULL_SENTINEL) {
-                console.log(`[KV] Hit Cache API (NULL) for ${key}`);
+                // console.log(`[KV] Hit Cache API (NULL) for ${key}`);
                 GLOBAL_KV_CACHE.set(key, null);
                 return null;
             }
 
-            // 命中有效值，回填到 L1
             if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
             GLOBAL_KV_CACHE.set(key, val);
-            console.log(`[KV] Hit Cache API for ${key}`);
+            // console.log(`[KV] Hit Cache API for ${key}`);
             return val;
         }
     } catch (e) {
         console.error(`[KV] Cache API error for ${key}:`, e);
     }
 
-    // 3. [L3] 真实读取 KV (消耗额度)
-    console.log(`[KV] MISS - Reading real KV for ${key}`);
+    // console.log(`[KV] MISS - Reading real KV for ${key}`);
     let val = null;
     try {
         val = await env.KV.get(key);
@@ -309,26 +289,19 @@ export async function getKV(env, key) {
         console.error(`[KV] Real KV get failed:`, e);
     }
 
-    // 4. 回写缓存 (包括有效值 和 空值)
-    // 写回 L1
     if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
     GLOBAL_KV_CACHE.set(key, val);
 
-    // 写回 L2
     const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
     const response = new Response(cacheVal, {
         headers: {
             'Content-Type': 'text/plain',
-            'Cache-Control': 'max-age=2592000' // 30天
+            'Cache-Control': 'max-age=2592000' 
         }
     });
     
     try {
-        // [Optimization] 移除 await，实现非阻塞写入 (Fire-and-forget)
-        // 这样不会阻塞主线程返回数据，提高配置读取速度
         cache.put(cacheKeyUrl, response).catch(e => console.error('[KV] Cache put bg error:', e));
-        
-        console.log(`[KV] Cached ${val === null ? 'NULL' : 'VALUE'} to API for ${key}`);
     } catch (e) {
         console.error('[KV] Cache API put error:', e);
     }
@@ -336,22 +309,16 @@ export async function getKV(env, key) {
     return val;
 }
 
-/**
- * 清空 KV 缓存 (同时清理 L1 和 L2)
- * @param {Array<string>} [keys] 指定要清除的键。如果不传，则清除所有已知键。
- */
 export async function clearKVCache(keys) {
     const cache = caches.default;
     const targetKeys = keys && Array.isArray(keys) ? keys : KNOWN_KV_KEYS;
 
-    // 1. 清理 L1 内存
     if (keys) {
         keys.forEach(k => GLOBAL_KV_CACHE.delete(k));
     } else {
         GLOBAL_KV_CACHE.clear();
     }
 
-    // 2. 清理 L2 Cache API
     const deletePromises = targetKeys.map(key => {
         const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
         return cache.delete(cacheKeyUrl).catch(e => console.warn(`[KV] Failed to delete cache for ${key}`, e));
@@ -365,7 +332,6 @@ export async function clearKVCache(keys) {
 // [New Feature] 轻量级流加密工具 (Xorshift128+)
 // ==========================================
 
-// MurmurHash3 fmix32 实现 (用于种子混合)
 function fmix32(h) {
     h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b);
     h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35);
@@ -375,10 +341,8 @@ function fmix32(h) {
 
 export class StreamCipher {
     constructor(keyBytes, saltBytes) {
-        // 初始化种子：混合 Key 和 Salt
         let s1 = 0, s2 = 0, s3 = 0, s4 = 0;
         
-        // [修复] 使用 Math.imul(x, 31) 进行混合，防止 key=[1,2] 和 key=[2,1] 产生相同种子
         for (let i = 0; i < keyBytes.length; i++) {
             s1 = (Math.imul(s1, 31) + keyBytes[i]) | 0;
         }
@@ -386,7 +350,6 @@ export class StreamCipher {
             s2 = (Math.imul(s2, 31) + saltBytes[i]) | 0;
         }
         
-        // 增加非线性扰动
         s3 = fmix32(s1 ^ 0x12345678);
         s4 = fmix32(s2 ^ 0x87654321);
         s1 = fmix32(s1); 
@@ -395,7 +358,6 @@ export class StreamCipher {
         this.s = new Uint32Array([s1, s2, s3, s4]);
     }
 
-    // Xorshift128+ 算法生成下一个 32位随机数
     next() {
         let t = this.s[3];
         let s = this.s[0];
@@ -408,12 +370,10 @@ export class StreamCipher {
         return this.s[0];
     }
 
-    // 原地处理 Buffer (异或操作，加密解密通用)
     process(buffer) {
         let i = 0;
         const len = buffer.length;
         
-        // [Optimization] Fast path for 4-byte aligned data
         if (buffer.byteOffset % 4 === 0 && len >= 4) {
             const len32 = Math.floor(len / 4);
             const view32 = new Uint32Array(buffer.buffer, buffer.byteOffset, len32);
@@ -423,7 +383,6 @@ export class StreamCipher {
             i = len32 * 4;
         }
 
-        // 处理剩余部分
         let randomCache = 0;
         let cacheRemaining = 0;
         
