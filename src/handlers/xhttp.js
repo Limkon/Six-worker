@@ -1,91 +1,95 @@
 // src/handlers/xhttp.js
 /**
  * 文件名: src/handlers/xhttp.js
- * 修正说明:
- * 1. [Fix] 移除 reader.read() 的无效参数，避免无意义的内存分配。
- * 2. [Refactor] 移除未使用的死代码 (get_xhttp_buffer)。
- * 3. [Fix] Header 解析失败时显式 cancel reader，防止资源泄漏。
- * 4. [Feat] 增加 Header 解析错误的日志记录，便于排查。
- * 5. [Fix] 全面增强异常捕获：确保 uploader 和 connectionClosed 永远不会 Reject。
- * 6. [Security] 增加 Header 读取超时控制 (3秒)，防止 Slow Loris 攻击导致资源耗尽。
- * 7. [Optimization] 重构 read_at_least，优化 Buffer 拼接逻辑，消除 O(N^2) 性能陷阱。
+ * 最终确认版:
+ * 1. [Full] 包含所有原版核心逻辑 (UUID校验, 协议解析, 黑名单, 超时控制).
+ * 2. [Elegant] 使用 safe_read/safe_cancel 消除 "Stream was cancelled" 报错.
+ * 3. [Robust] 恢复了 Idle Timeout 的强力清理逻辑 (abort writable).
+ * 4. [Log] 恢复了关键握手错误的日志记录.
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
 import { isHostBanned, stringifyUUID, textDecoder } from '../utils/helpers.js';
 
-function concat_typed_arrays(first, ...args) {
-    let len = first.length;
-    for (let a of args) len += a.length;
-    const r = new first.constructor(len);
-    r.set(first, 0);
-    len = first.length;
-    for (let a of args) {
-        r.set(a, len);
-        len += a.length;
+// --- 工具函数区 ---
+
+/**
+ * 优雅地取消流，忽略任何因流已关闭导致的错误
+ */
+async function safe_cancel(reader, reason) {
+    if (!reader) return;
+    try {
+        await reader.cancel(reason);
+    } catch (_) {
+        // 忽略所有取消时的错误，因为我们的目标就是关闭它
     }
-    return r;
 }
 
-// 辅助函数：确保从 reader 读取至少 minBytes 长度的数据
-// [Security Fix] 增加 deadline 参数，实现超时控制
-// [Optimization] 使用 Array 收集 Buffer 分片，避免循环内的重复内存分配和拷贝 (O(N^2) -> O(N))
+/**
+ * 安全读取函数：封装了超时和异常处理
+ * 如果流被取消、中断或超时，返回 { done: true, error: Error? }
+ */
+async function safe_read(reader, deadline) {
+    if (!reader) return { done: true };
+
+    const remainingTime = deadline - Date.now();
+    if (remainingTime <= 0) {
+        return { done: true, error: new Error('Read timeout') };
+    }
+
+    let timeoutId;
+    const timeoutPromise = new Promise(resolve => {
+        timeoutId = setTimeout(() => resolve({ timeout: true }), remainingTime);
+    });
+
+    try {
+        const result = await Promise.race([reader.read(), timeoutPromise]);
+        
+        if (result.timeout) {
+            return { done: true, error: new Error('Read timeout') };
+        }
+        return result; // { value, done }
+
+    } catch (e) {
+        // 核心优化：将"Stream cancelled"等非致命网络错误视为读取结束
+        const msg = (e.message || '').toLowerCase();
+        if (msg.includes('cancelled') || msg.includes('aborted') || msg.includes('closed')) {
+            return { done: true };
+        }
+        // 其他真正的逻辑错误抛出
+        throw e;
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+    }
+}
+
+// --- 业务逻辑区 ---
+
 async function read_at_least(reader, minBytes, initialBuffer, deadline) {
-    let chunks = []; // 用于收集分片
+    let chunks = []; 
     let totalLength = 0;
 
-    // 1. 处理初始 Buffer
     if (initialBuffer && initialBuffer.byteLength > 0) {
         chunks.push(initialBuffer);
         totalLength += initialBuffer.byteLength;
     }
 
-    // 2. 循环读取直到满足最小长度
     while (totalLength < minBytes) {
-        // 计算剩余时间
-        const remainingTime = deadline - Date.now();
-        if (remainingTime <= 0) {
-            throw new Error('Header read timeout');
-        }
-
-        // 创建超时 Promise
-        let timeoutId;
-        const timeoutPromise = new Promise((_, reject) => {
-            timeoutId = setTimeout(() => reject(new Error('Header read timeout')), remainingTime);
-        });
-
-        // 竞争读取
-        let result;
-        try {
-            result = await Promise.race([reader.read(), timeoutPromise]);
-        } finally {
-            clearTimeout(timeoutId);
-        }
-
-        const { value, done } = result;
+        const { value, done, error } = await safe_read(reader, deadline);
         
-        if (done) {
-            // 如果流结束，跳出循环进行最终合并
-            break; 
-        }
-        
+        if (error) throw error; // 抛出超时错误
+        if (done) break;        // 流正常结束或被中断，退出循环
+
         if (value && value.byteLength > 0) {
             chunks.push(value);
             totalLength += value.byteLength;
         }
     }
 
-    // 3. 高效合并 (Zero/One Copy)
-    if (chunks.length === 0) {
-        return { value: new Uint8Array(0), done: true };
-    }
+    // Zero/One Copy 优化
+    if (chunks.length === 0) return { value: new Uint8Array(0), done: true };
+    if (chunks.length === 1) return { value: chunks[0], done: totalLength < minBytes };
 
-    // 如果只有一个块，直接返回，避免复制
-    if (chunks.length === 1) {
-        return { value: chunks[0], done: totalLength < minBytes };
-    }
-
-    // 分配精确大小的内存
     const resultBuffer = new Uint8Array(totalLength);
     let offset = 0;
     for (const chunk of chunks) {
@@ -98,144 +102,125 @@ async function read_at_least(reader, minBytes, initialBuffer, deadline) {
 
 async function read_xhttp_header(readable, ctx) {
     const reader = readable.getReader(); 
-    
-    // [Security] 定义头部读取的硬性截止时间 (3秒)
-    // 防止恶意客户端通过极慢的发送速度(Slow Loris)占用 Worker 资源
-    const HEADER_TIMEOUT = 3000;
-    const deadline = Date.now() + HEADER_TIMEOUT;
-
-    const fail = async (msg) => {
-        try { await reader.cancel(msg); } catch (_) {}
-        return msg;
-    };
+    const deadline = Date.now() + 3000; // 3秒超时
 
     try {
-        // [Fix] 传递 deadline 到 read_at_least
+        // 1. 读取基础头部 (18字节: 1B版本 + 16B UUID + 1B MetadataLen)
         let { value: cache, done } = await read_at_least(reader, 18, null, deadline);
-        if (cache.length < 18) return fail('header too short');
+        if (cache.length < 18) throw new Error('header too short');
 
         const version = cache[0];
-        
         const uuidStr = stringifyUUID(cache.subarray(1, 17));
+        
+        // 校验 UUID
         const expectedID = ctx.userID;
         const expectedIDLow = ctx.userIDLow;
-
         if (uuidStr !== expectedID && (!expectedIDLow || uuidStr !== expectedIDLow)) {
-            return fail('invalid UUID');
+            throw new Error('invalid UUID');
         }
         
+        // 2. 读取元数据长度
         const pb_len = cache[17];
-        const min_len_until_atyp = 22 + pb_len;
+        const min_len_until_atyp = 22 + pb_len; // 18 + pb_len + 1(cmd) + 2(port) + 1(atype)
         
         if (cache.length < min_len_until_atyp) {
-            // [Fix] 传递 deadline
             const r = await read_at_least(reader, min_len_until_atyp, cache, deadline);
             cache = r.value;
-            if (cache.length < min_len_until_atyp) return fail('header too short for metadata');
+            if (cache.length < min_len_until_atyp) throw new Error('header too short for metadata');
         }
 
+        // 3. 解析命令
         const cmdIndex = 18 + pb_len;
-        const cmd = cache[cmdIndex];
-        if (cmd !== 1) return fail('unsupported command: ' + cmd);
+        if (cache[cmdIndex] !== 1) throw new Error('unsupported command: ' + cache[cmdIndex]);
         
         const portIndex = cmdIndex + 1;
         const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
-        const port = view.getUint16(portIndex, false); // Big-Endian
-        
+        const port = view.getUint16(portIndex, false); 
         const atype = cache[portIndex + 2];
         const addr_body_idx = portIndex + 3; 
 
+        // 4. 计算完整头部长度
         let header_len = -1;
-        
         if (atype === CONSTANTS.ADDRESS_TYPE_IPV4) {
             header_len = addr_body_idx + 4;
         } else if (atype === CONSTANTS.ADDRESS_TYPE_IPV6) {
             header_len = addr_body_idx + 16;
         } else if (atype === CONSTANTS.ADDRESS_TYPE_URL) {
+            // 需要读取域名长度
             if (cache.length < addr_body_idx + 1) {
-                 // [Fix] 传递 deadline
                  const r = await read_at_least(reader, addr_body_idx + 1, cache, deadline);
                  cache = r.value;
-                 if (cache.length < addr_body_idx + 1) return fail('header too short for domain len');
+                 if (cache.length < addr_body_idx + 1) throw new Error('header too short for domain len');
             }
-            const domain_len = cache[addr_body_idx];
-            header_len = addr_body_idx + 1 + domain_len;
+            header_len = addr_body_idx + 1 + cache[addr_body_idx];
         } else {
-            return fail('read address type failed: ' + atype);
+            throw new Error('unknown address type: ' + atype);
         }
         
+        // 5. 读取完整头部
         if (cache.length < header_len) {
-            // [Fix] 传递 deadline
             const r = await read_at_least(reader, header_len, cache, deadline);
             cache = r.value;
-            if (cache.length < header_len) return fail('header too short for full address');
+            if (cache.length < header_len) throw new Error('header too short for full address');
         }
         
+        // 6. 解析 Hostname
         let hostname = '';
         const addr_val_idx = addr_body_idx; 
-        
         try {
-            switch (atype) {
-                case CONSTANTS.ADDRESS_TYPE_IPV4:
-                    hostname = cache.subarray(addr_val_idx, addr_val_idx + 4).join('.');
-                    break;
-                case CONSTANTS.ADDRESS_TYPE_URL:
-                    const domain_len = cache[addr_val_idx];
-                    hostname = textDecoder.decode(
-                        cache.subarray(addr_val_idx + 1, addr_val_idx + 1 + domain_len)
-                    );
-                    break;
-                case CONSTANTS.ADDRESS_TYPE_IPV6:
-                    const ipv6 = [];
-                    for (let i = 0; i < 8; i++) {
-                        ipv6.push(view.getUint16(addr_val_idx + i * 2, false).toString(16));
-                    }
-                    hostname = ipv6.join(':');
-                    break;
+            if (atype === CONSTANTS.ADDRESS_TYPE_IPV4) {
+                hostname = cache.subarray(addr_val_idx, addr_val_idx + 4).join('.');
+            } else if (atype === CONSTANTS.ADDRESS_TYPE_URL) {
+                const domain_len = cache[addr_val_idx];
+                hostname = textDecoder.decode(cache.subarray(addr_val_idx + 1, addr_val_idx + 1 + domain_len));
+            } else if (atype === CONSTANTS.ADDRESS_TYPE_IPV6) {
+                const ipv6 = [];
+                for (let i = 0; i < 8; i++) ipv6.push(view.getUint16(addr_val_idx + i * 2, false).toString(16));
+                hostname = ipv6.join(':');
             }
         } catch (e) {
-            return fail('failed to parse hostname: ' + e.message);
+            throw new Error('failed to parse hostname');
         }
         
-        if (!hostname) return fail('failed to parse hostname');
-        
-        const data = cache.subarray(header_len);
+        if (!hostname) throw new Error('empty hostname');
         
         return {
-            hostname,
-            port,
-            atype,
-            data,
+            hostname, port, atype,
+            data: cache.subarray(header_len),
             resp: new Uint8Array([version, 0]),
             reader,
-            done: done && data.length === 0,
+            done: done && cache.subarray(header_len).length === 0,
         };
+
     } catch (error) {
-        try { reader.releaseLock(); } catch (_) {}
+        // 统一在最外层释放 Reader
+        await safe_cancel(reader, error.message);
         throw error;
     }
 }
 
 async function upload_to_remote_xhttp(writer, httpx) {
-    try {
-        if (httpx.data && httpx.data.length > 0) {
-            await writer.write(httpx.data);
-        }
-        
-        if (httpx.done) return;
+    // 写入头部携带的剩余数据
+    if (httpx.data && httpx.data.length > 0) {
+        await writer.write(httpx.data);
+    }
+    if (httpx.done) return;
 
-        while (true) {
+    // 循环写入 Body
+    while (true) {
+        try {
+            // reader 已在 read_xhttp_header 中被获取，这里继续使用
             const { value, done } = await httpx.reader.read();
             if (done) break;
-            if (value && value.length > 0) {
-                await writer.write(value);
-            }
+            if (value) await writer.write(value);
+        } catch (e) {
+            // 读取流出错（如下游断开），停止写入，跳出循环
+            break; 
         }
-    } catch (error) {
-        throw error;
     }
 }
 
+// 创建带空闲超时监控的下载流
 function create_xhttp_downloader(resp, remote_readable, initialData) {
     const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45000;
     let lastActivity = Date.now();
@@ -247,9 +232,9 @@ function create_xhttp_downloader(resp, remote_readable, initialData) {
             if (initialData && initialData.byteLength > 0) {
                 controller.enqueue(initialData);
             }
-            
             idleTimer = setInterval(() => {
                 if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+                    // [Restored] 强制清理逻辑：显式 abort 写入端以关闭上游连接
                     try { monitorStream.writable.abort('idle timeout'); } catch (_) {}
                     try { monitorStream.readable.cancel('idle timeout'); } catch (_) {}
                     clearInterval(idleTimer);
@@ -260,19 +245,12 @@ function create_xhttp_downloader(resp, remote_readable, initialData) {
             lastActivity = Date.now();
             controller.enqueue(chunk);
         },
-        flush() {
-            clearInterval(idleTimer);
-        },
-        cancel() {
-            clearInterval(idleTimer);
-        }
+        flush() { clearInterval(idleTimer); },
+        cancel() { clearInterval(idleTimer); }
     });
 
-    const pipePromise = remote_readable.pipeTo(monitorStream.writable)
-        .catch(() => {}) 
-        .finally(() => {
-            clearInterval(idleTimer);
-        });
+    // 管道连接，并在发生错误时自动处理
+    const pipePromise = remote_readable.pipeTo(monitorStream.writable).catch(() => {});
 
     return {
         readable: monitorStream.readable,
@@ -286,75 +264,67 @@ function create_xhttp_downloader(resp, remote_readable, initialData) {
 }
 
 export async function handleXhttpClient(request, ctx) {
+    // 1. 读取并解析头部
+    let result;
     try {
-        const result = await read_xhttp_header(request.body, ctx);
-        if (typeof result === 'string') {
-            if (result !== 'stream cancelled' && !result.includes('cancelled')) {
-                console.warn('[XHTTP Error] Header parsing failed:', result);
-            }
-            return null;
-        }
-        
-        const { hostname, port, atype, data, resp, reader, done } = result;
-        const httpx = { hostname, port, atype, data, resp, reader, done };
-        
-        if (isHostBanned(hostname, ctx.banHosts)) {
-            console.log('[XHTTP] Blocked:', hostname);
-            return null;
-        }
-
-        const remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, console.log, ctx.proxyIP);
-        
-        const uploader = {
-            done: (async () => {
-                // [Fix] 将 getWriter 移入 try 块，防止同步抛错导致 Promise Reject
-                let writer = null;
-                try {
-                    writer = remoteSocket.writable.getWriter();
-                    await upload_to_remote_xhttp(writer, httpx);
-                } catch (e) {
-                    const errStr = (e && e.message) ? e.message : String(e);
-                    // 仅当错误不是 "Stream was cancelled" 时才记录，避免日志刷屏
-                    if (!errStr.includes('cancelled') && !errStr.includes('aborted')) {
-                        console.warn('[XHTTP Upload Error]:', errStr);
-                    }
-                } finally {
-                    if (writer) {
-                        try { await writer.close(); } catch (_) {}
-                    }
-                }
-            })(),
-            abort: () => { try { remoteSocket.writable.abort(); } catch (_) {} }
-        };
-
-        const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
-        
-        // [Fix] 终极兜底：确保 connectionClosed 永远不会 Reject
-        // 这对于 ctx.waitUntil 是至关重要的，否则任何后台 Rejection 都会被视为 Worker 崩溃
-        const connectionClosed = Promise.race([
-            downloader.done,
-            uploader.done
-        ]).finally(() => {
-            try { remoteSocket.close(); } catch (_) {}
-            try { downloader.abort(); } catch (_) {}
-            try { uploader.abort(); } catch (_) {}
-        }).catch((err) => {
-            // 吞掉所有后台错误，保持 Promise Resolved
-            // console.debug('Ignored XHTTP background error:', err);
-        });
-
-        return {
-            readable: downloader.readable,
-            closed: connectionClosed
-        };
-
+        result = await read_xhttp_header(request.body, ctx);
     } catch (e) {
-        const errStr = (e && e.message) ? e.message : String(e);
-        if (errStr.includes('cancelled') || errStr.includes('aborted')) {
-            return null;
+        // 此时 reader 已经在 read_xhttp_header 内部被安全 cancel 了
+        const errStr = e.message || '';
+        // [Restored] 恢复日志记录，但过滤掉预期的短连接错误
+        if (!errStr.includes('header too short') && !errStr.includes('invalid UUID')) {
+             console.warn('[XHTTP Handshake Error]:', errStr);
         }
-        // 如果是超时错误，在此处被捕获
-        console.error('XHTTP Error:', e);
+        return null; // 握手失败
+    }
+
+    const { hostname, port, atype, data, resp, reader, done } = result;
+
+    // 2. 检查黑名单
+    if (isHostBanned(hostname, ctx.banHosts)) {
+        console.log('[XHTTP] Blocked:', hostname);
+        await safe_cancel(reader, 'blocked');
         return null;
     }
+
+    // 3. 建立远程连接
+    let remoteSocket;
+    try {
+        remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, console.log, ctx.proxyIP);
+    } catch (e) {
+        console.error('[XHTTP] Connect Failed:', e.message);
+        await safe_cancel(reader, 'connect failed');
+        return null;
+    }
+
+    // 4. 双向流处理 (Uploader & Downloader)
+    
+    // 上行: Request Body -> Remote Socket
+    const uploaderPromise = (async () => {
+        let writer = null;
+        try {
+            writer = remoteSocket.writable.getWriter();
+            await upload_to_remote_xhttp(writer, { data, done, reader });
+        } catch (e) {
+            // 忽略写入错误
+        } finally {
+            if (writer) try { await writer.close(); } catch (_) {}
+            await safe_cancel(reader, 'upload finished'); 
+        }
+    })();
+
+    // 下行: Remote Socket -> Response Body
+    const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
+
+    // 5. 生命周期绑定
+    // 使用 Promise.allSettled 确保 connectionClosed 永远 Resolve
+    const connectionClosed = Promise.allSettled([downloader.done, uploaderPromise]).then(() => {
+        try { remoteSocket.close(); } catch (_) {}
+        downloader.abort();
+    });
+
+    return {
+        readable: downloader.readable,
+        closed: connectionClosed 
+    };
 }
