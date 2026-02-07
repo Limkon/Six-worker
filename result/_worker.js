@@ -3890,7 +3890,7 @@ var index_default = {
       else if (isCalculatedHash) subPath = path.substring(("/" + userHash).length);
       const isManagementRoute = isSuperRoute || isFullUserRoute;
       const isLoginRequest = url.searchParams.get("auth") === "login";
-      if (request.method === "GET" && env.KV && hostName && hostName.includes(".")) {
+      if (request.method === "GET" && (isManagementRoute || isCalculatedHash) && env.KV && hostName && hostName.includes(".")) {
         if (hostName !== lastSavedDomain) {
           const now = Date.now();
           if (now - lastPushTime > PUSH_COOLDOWN) {
@@ -3927,10 +3927,8 @@ var index_default = {
             return new Response(getLoginHtml(), { headers: { "Content-Type": "text/html;charset=utf-8" } });
           }
         }
-        if (request.method === "POST") {
-          if (subPath === "/edit") return await handleEditConfig(request, env, ctx);
-          if (subPath === "/bestip") return await handleBestIP(request, env);
-        }
+        if (subPath === "/edit") return await handleEditConfig(request, env, ctx);
+        if (subPath === "/bestip") return await handleBestIP(request, env);
         if (request.method === "GET") {
           const html = await generateHomePage(env, context, hostName);
           return new Response(html, { headers: { "Content-Type": "text/html;charset=utf-8" } });
