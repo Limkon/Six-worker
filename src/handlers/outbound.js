@@ -6,7 +6,7 @@
  * 1. [Critical Fix] SOCKS5 UDP Associate Buffer Loop: 修复粘包/分包导致的数据丢失。
  * 2. [Critical Fix] SOCKS5 Handshake Timeout: 防止握手阶段无限挂起。
  * 3. [Security] 严格的 Cloudflare 防风控机制 (增强了私有/保留 IP 阻断正则).
- * 4. 增强的正则匹配性能.
+ * 4. [Optimization] 增强的正则匹配性能: 区分 IPv4/v6 路径，减少 CPU 消耗。
  * 5. [Fix] SOCKS5 UDP BND.ADDR 内网 IP 自动回退 (Docker 兼容性修复).
  */
 import { connect } from 'cloudflare:sockets';
@@ -23,18 +23,16 @@ const IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/
 function isPrivateIP(address) {
     if (!address) return true; // 空地址视为风险
     
-    // 检查 IPv4 私有网段
-    if (IPV4_PRIVATE_REGEX.test(address)) return true;
-    
-    // 检查 Carrier Grade NAT (通常不应通过公网代理访问)
-    if (IPV4_CGNAT_REGEX.test(address)) return true;
-
-    // 检查 IPv6 (Unique Local, Link Local, Loopback)
-    if (address.includes(':')) {
-        if (IPV6_PRIVATE_REGEX.test(address.toLowerCase())) return true;
+    // [Optimization] 性能优化：根据是否包含冒号快速区分 IPv4/IPv6
+    // 避免对 IPv6 地址运行 IPv4 正则，反之亦然，降低高并发下的 CPU 消耗
+    if (address.indexOf(':') !== -1) {
+        // IPv6 (Unique Local, Link Local, Loopback)
+        return IPV6_PRIVATE_REGEX.test(address.toLowerCase());
     }
-
-    return false;
+    
+    // IPv4 或 域名 (localhost)
+    // 检查 IPv4 私有网段 及 Carrier Grade NAT
+    return IPV4_PRIVATE_REGEX.test(address) || IPV4_CGNAT_REGEX.test(address);
 }
 
 // --- 熔断缓存机制 ---
