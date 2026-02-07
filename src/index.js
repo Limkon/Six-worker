@@ -2,9 +2,7 @@
 /**
  * 文件名: src/index.js
  * 修改说明:
- * 1. [Fix] proxyUrl: 增加防回环检测，防止因配置错误导致 Worker 请求自己引发 loadShed 崩溃。
- * 2. [Optimization] 增强全局错误捕获，防止异常对象为空时导致 Worker 崩溃白屏。
- * 3. [Security] Login Redirect: 增加 login_check=1 标记，配合前端检测 Cookie 写入失败的情况。
+ * 1. [Optimization] 延迟计算 userHash: 仅在非管理路由时才计算 SHA1，减少 CPU 消耗。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -66,7 +64,6 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
         const proxyUrl = new URL(urlStr);
 
         // [Fix] 安全检查：防止回环代理 (Self-Loop Prevention)
-        // 如果配置的 URL 域名与当前请求的域名相同，会导致无限递归 fetch，引发 loadShed 错误
         const currentUrl = new URL(request.url);
         if (proxyUrl.hostname === currentUrl.hostname) {
             console.warn(`[Proxy] Loop detected: URL config points to self (${urlStr}). Aborting proxy to prevent crash.`);
@@ -118,14 +115,22 @@ export default {
                 return await handlePasswordSetup(request, env, ctx);
             }
 
-            // 3. 路由路径计算
+            // 3. 路由路径计算 (优化版)
             const superPassword = CONSTANTS.SUPER_PASSWORD;
             const dynamicID = context.dynamicUUID.toLowerCase();
-            const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
             
+            // [Optimization] 优先判断管理路由，避免不必要的 SHA1 计算
             const isSuperRoute = path.startsWith('/' + superPassword);
             const isUserRoute = path.startsWith('/' + dynamicID);
-            const isSubRoute = path.startsWith('/' + userHash);
+            
+            let userHash = '';
+            let isSubRoute = false;
+
+            // 只有当不是 API/管理 路由时，才计算 Hash 并检查订阅路由
+            if (!isSuperRoute && !isUserRoute) {
+                userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
+                isSubRoute = path.startsWith('/' + userHash);
+            }
             
             let subPath = '';
             if (isSuperRoute) subPath = path.substring(('/' + superPassword).length);
@@ -137,25 +142,14 @@ export default {
 
             // 4. 域名自动发现 (24小时冷静期逻辑)
             if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
-                // 仅当域名变化时才尝试进行后续检查
                 if (hostName !== lastSavedDomain) {
                     const now = Date.now();
-                    
-                    // A. 内存快速检查 (如果内存还在冷却期，跳过)
                     if (now - lastPushTime > PUSH_COOLDOWN) {
-                        
-                        // B. KV 权威检查 (防止重启后内存丢失导致的误判)
-                        // 读取上次推送时间
                         let kvPushTimeStr = await env.KV.get('LAST_PUSH_TIME');
                         let kvPushTime = kvPushTimeStr ? (parseInt(kvPushTimeStr) || 0) : 0;
-                        
-                        // 更新内存时间戳
                         lastPushTime = kvPushTime;
 
                         if (now - kvPushTime > PUSH_COOLDOWN) {
-                            // [Optimization] 关键修复: 读取 KV 里的真实域名进行比对
-                            // 如果 Worker 刚重启，lastSavedDomain 为空，但 KV 可能已经是最新域名
-                            // 此时若不比对 KV，会误认为域名变更而触发推送
                             const currentRealDomain = await env.KV.get('SAVED_DOMAIN');
                             
                             if (hostName !== currentRealDomain) {
@@ -164,7 +158,6 @@ export default {
                                 lastSavedDomain = hostName;
                                 lastPushTime = now;
                                 
-                                // 并发执行
                                 context.waitUntil(Promise.all([
                                     env.KV.put('SAVED_DOMAIN', hostName),
                                     env.KV.put('LAST_PUSH_TIME', now.toString()), 
@@ -172,9 +165,7 @@ export default {
                                     executeWebDavPush(env, context, false)
                                 ]));
                             } else {
-                                // 域名其实没变，只是内存丢失了。静默更新内存即可。
                                 lastSavedDomain = hostName;
-                                // console.log(`[Auto-Discovery] Domain matches KV. Syncing memory only.`);
                             }
                         }
                     }
@@ -219,7 +210,6 @@ export default {
                                         status: 302,
                                         headers: {
                                             'Set-Cookie': `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
-                                            // [Fix] 增加登录成功标记 login_check=1，用于前端检测 Cookie 写入失败的情况
                                             'Location': url.pathname + '?login_check=1'
                                         }
                                     });
@@ -260,14 +250,8 @@ export default {
             return new Response('404 Not Found', { status: 404 });
 
         } catch (e) {
-            // [Fix] 增强型错误处理：
-            // 1. 防止 e 为 null/undefined 导致二次报错。
-            // 2. 优先获取堆栈信息(stack)，方便排查问题。
             const errInfo = (e && (e.stack || e.message || e.toString())) || "Unknown Internal Error";
-            
             console.error(errInfo);
-
-            // 返回带有详细错误信息的 500 响应
             return new Response(errInfo, { 
                 status: 500, 
                 headers: { 
