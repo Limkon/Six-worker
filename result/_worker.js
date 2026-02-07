@@ -3878,14 +3878,16 @@ var index_default = {
       const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
       const isSuperRoute = path.startsWith("/" + superPassword);
       const isFullUserRoute = path.startsWith("/" + dynamicID);
-      const isHashRoute = path.startsWith("/" + userHash);
+      const isCalculatedHash = path.startsWith("/" + userHash);
+      const isHexFeature = /^\/[a-f0-9]{6,12}(\/|$)/i.test(path);
+      const isHashRoute = isCalculatedHash || isHexFeature;
       if (!isSuperRoute && !isFullUserRoute && !isHashRoute) {
         return new Response("404 Not Found", { status: 404 });
       }
       let subPath = "";
       if (isSuperRoute) subPath = path.substring(("/" + superPassword).length);
       else if (isFullUserRoute) subPath = path.substring(("/" + dynamicID).length);
-      else if (isHashRoute) subPath = path.substring(("/" + userHash).length);
+      else if (isCalculatedHash) subPath = path.substring(("/" + userHash).length);
       const isManagementRoute = isSuperRoute || isFullUserRoute;
       const isLoginRequest = url.searchParams.get("auth") === "login";
       if (request.method === "GET" && env.KV && hostName && hostName.includes(".")) {
@@ -3893,10 +3895,8 @@ var index_default = {
           const now = Date.now();
           if (now - lastPushTime > PUSH_COOLDOWN) {
             context.waitUntil((async () => {
-              let kvPushTimeStr = await env.KV.get("LAST_PUSH_TIME");
-              let kvPushTime = kvPushTimeStr ? parseInt(kvPushTimeStr) || 0 : 0;
-              if (now - kvPushTime > PUSH_COOLDOWN) {
-                void(0);
+              let kvPushTime = await env.KV.get("LAST_PUSH_TIME");
+              if (!kvPushTime || now - parseInt(kvPushTime) > PUSH_COOLDOWN) {
                 await env.KV.put("SAVED_DOMAIN", hostName);
                 await env.KV.put("LAST_PUSH_TIME", now.toString());
                 lastSavedDomain = hostName;
@@ -3956,7 +3956,7 @@ var index_default = {
             return new Response("XHTTP Handshake Failed", { status: 400 });
           }
         }
-        if (request.method === "GET") {
+        if (request.method === "GET" && isCalculatedHash) {
           const response = await handleSubscription(request, env, context, subPath, hostName);
           if (response) return response;
         }
