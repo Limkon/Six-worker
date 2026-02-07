@@ -2,9 +2,10 @@
 /**
  * 文件名: src/handlers/websocket.js
  * 审计修复说明:
- * 1. [Fix] 修复 bufferedBytes 计数器同步 Bug: 当底层 Buffer 数组被 outbound.js 清空时，自动重置计数器，防止重试期间误触发熔断。
- * 2. [Optimization] 调整计数器逻辑位置，确保仅在连接成功 accept 后才计数，防止同步错误导致的计数泄漏。
- * 3. [Smart Security] 智能熔断机制: 根据并发数动态调整 Buffer 大小 (10MB -> 128KB)。
+ * 1. [Critical Fix] SOCKS5 握手逻辑: 将成功响应 (0x00) 延迟到上游连接建立后发送，防止"假连接"导致的客户端误判和断流。
+ * 2. [Fix] 错误处理优化: 明确区分"数据不足"和"致命错误"(如阻断/禁用)，防止连接错误挂起 10秒。
+ * 3. [Fix] 修复 bufferedBytes 计数器同步 Bug: 当底层 Buffer 数组被 outbound.js 清空时，自动重置计数器。
+ * 4. [Smart Security] 智能熔断机制: 根据并发数动态调整 Buffer 大小。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -73,7 +74,7 @@ export async function handleWebSocketRequest(request, ctx) {
     let activeSocket = null;
     
     // 安全配置
-    const MAX_HEADER_BUFFER = 2048; // 协议头解析缓冲区
+    const MAX_HEADER_BUFFER = 4096; // [Fix] 调大协议头缓冲区，适应复杂请求
     const PROBE_THRESHOLD = 1024;   // 探测阈值
     const DETECT_TIMEOUT_MS = 10000; // 10秒未识别协议则断开
 
@@ -200,7 +201,11 @@ export async function handleWebSocketRequest(request, ctx) {
                     clientData = result.rawClientData;
                 } else if (protocol === 'socks5') {
                     clientData = result.rawClientData;
-                    webSocket.send(new Uint8Array([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]));
+                    // [Critical Fix] 
+                    // 不要立即发送成功响应！
+                    // 构造 responseHeader，传给 outbound.js，待连接成功后再发送。
+                    // 解决"假连接"导致的断流问题。
+                    responseHeader = new Uint8Array([0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0]); 
                     socks5State = 3;
                 }
 
@@ -214,8 +219,14 @@ export async function handleWebSocketRequest(request, ctx) {
                 }
 
             } catch (e) {
+                // [Fix] 错误处理逻辑优化
+                // 只有当错误不是"致命错误"且缓冲区较小时，才等待更多数据
+                const isFatalError = e.message.startsWith('Blocked') || 
+                                     e.message.startsWith('Protocol mismatch') ||
+                                     e.message.includes('disabled');
+
                 // [Stability] 数据分片处理
-                if (vlessBuffer && vlessBuffer.length < PROBE_THRESHOLD && vlessBuffer.length < MAX_HEADER_BUFFER) {
+                if (!isFatalError && vlessBuffer && vlessBuffer.length < PROBE_THRESHOLD && vlessBuffer.length < MAX_HEADER_BUFFER) {
                     return; 
                 }
                 clearTimeout(timeoutTimer);
