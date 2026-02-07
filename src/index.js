@@ -1,14 +1,11 @@
 // src/index.js
 /**
  * 文件名: src/index.js
- * 状态: 最终审计通过 (Final Verified)
- * 功能对比:
- * 1. [WebSocket] 保留 (最高优先级)
- * 2. [Root] 保留 (设置/302/代理/伪装)
- * 3. [XHTTP] 重构 (仅限 UUID 前段路径触发)
- * 4. [Admin] 保留 (含 API 鉴权 / 登录 / 面板)
- * 5. [Sub] 保留 (订阅下发)
- * 6. [Auto-Discovery] 保留 (支持管理页和订阅触发)
+ * 修复说明:
+ * 1. [Fix] 引入正则特征匹配 /^\/[a-f0-9]{6,12}/，只要路径是 6-12 位 Hex 字符，即视为合法 Hash 路径。
+ * 解决因长度配置(6位 vs 8位)或计算差异导致的客户端连接失败。
+ * 2. [Security] 依然拦截非 Hex 路径 (如 /admin, /login)，防止 CPU 超限。
+ * 3. [Stability] 保持 API 鉴权和 Web 功能。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -34,7 +31,6 @@ function safeWaitUntil(ctx, promise) {
     }
 }
 
-// 统一处理路径：去除末尾斜杠 (除非是根路径)
 function normalizePath(urlObj) {
     let p = urlObj.pathname.toLowerCase();
     if (p.length > 1 && p.endsWith('/')) {
@@ -43,7 +39,7 @@ function normalizePath(urlObj) {
     return p;
 }
 
-// 初始密码设置处理
+// 初始密码设置
 async function handlePasswordSetup(request, env, ctx) {
     if (request.method === 'POST') {
         const formData = await request.formData();
@@ -62,7 +58,6 @@ async function handlePasswordSetup(request, env, ctx) {
             const appCtx = await initializeContext(request, env);
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
-            console.log('[Setup] First time setup completed.');
         } catch (e) {
             console.error('[Setup] Error:', e);
         }
@@ -72,7 +67,6 @@ async function handlePasswordSetup(request, env, ctx) {
     return new Response(getPasswordSetupHtml(), { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
 }
 
-// 简单网页代理
 async function proxyUrl(urlStr, targetUrlObj, request) {
     if (!urlStr) return null;
     try {
@@ -108,18 +102,14 @@ export default {
             const path = normalizePath(url); 
             const hostName = request.headers.get('Host');
 
-            // ============================================================
-            // 1. WebSocket 处理 (最高优先级)
-            // ============================================================
+            // 1. WebSocket (最高优先级)
             const upgradeHeader = request.headers.get('Upgrade');
             if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
                 if (!context.userID) return new Response('UUID not set', { status: 401 });
                 return await handleWebSocketRequest(request, context);
             }
 
-            // ============================================================
-            // 2. 根目录/网页处理
-            // ============================================================
+            // 2. 根目录/网页
             if (path === '/' || path === '/index.html') {
                 const rawUUID = await getConfig(env, 'UUID');
                 const rawKey = await getConfig(env, 'KEY');
@@ -142,45 +132,49 @@ export default {
             }
 
             // ============================================================
-            // 3. 路由特征识别 (分流核心)
+            // 3. 路由特征识别 (关键修复)
             // ============================================================
             const superPassword = CONSTANTS.SUPER_PASSWORD;
             const dynamicID = context.dynamicUUID.toLowerCase();
-            // 计算 UUID 前段 (Hash)
-            const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
             
+            // 计算标准 Hash (供订阅使用)
+            const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
+
+            // 路径判定
             const isSuperRoute = path.startsWith('/' + superPassword);
             const isFullUserRoute = path.startsWith('/' + dynamicID);
-            const isHashRoute = path.startsWith('/' + userHash); // UUID 前段
+            
+            // [Fix] 宽容的 Hash 路径匹配:
+            // 1. 匹配计算出的 Hash
+            // 2. 或者匹配 "6到12位纯 Hex 字符" (覆盖 /8fee08ee 这种情况)
+            // 这确保了只要客户端发的是 UUID 前段，无论长度配置如何，都能命中。
+            const isCalculatedHash = path.startsWith('/' + userHash);
+            const isHexFeature = /^\/[a-f0-9]{6,12}(\/|$)/i.test(path);
+            
+            const isHashRoute = isCalculatedHash || isHexFeature;
 
-            // [Critical Fix] 提前拦截非法路径，防止扫描器消耗 CPU
+            // 提前拦截非相关路径 (防止 CPU 耗尽)
             if (!isSuperRoute && !isFullUserRoute && !isHashRoute) {
                 return new Response('404 Not Found', { status: 404 });
             }
 
-            // 计算子路径 (用于 API 等)
             let subPath = '';
             if (isSuperRoute) subPath = path.substring(('/' + superPassword).length);
             else if (isFullUserRoute) subPath = path.substring(('/' + dynamicID).length);
-            else if (isHashRoute) subPath = path.substring(('/' + userHash).length);
+            else if (isCalculatedHash) subPath = path.substring(('/' + userHash).length);
+            // 对于 Hex 特征路径，我们不需要精确的 subPath 切割来做 API 路由，因为它只用于 XHTTP/Sub
 
             const isManagementRoute = isSuperRoute || isFullUserRoute;
             const isLoginRequest = url.searchParams.get('auth') === 'login';
 
-            // ============================================================
-            // 4. 域名自动发现 (在任何有效路由的 GET 请求中触发)
-            // ============================================================
+            // 4. 自动域名发现 (仅在有效路径访问时触发)
             if (request.method === 'GET' && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     const now = Date.now();
                     if (now - lastPushTime > PUSH_COOLDOWN) {
                         context.waitUntil((async () => {
-                            // 再次检查 KV 防止并发覆盖
-                            let kvPushTimeStr = await env.KV.get('LAST_PUSH_TIME');
-                            let kvPushTime = kvPushTimeStr ? (parseInt(kvPushTimeStr) || 0) : 0;
-                            
-                            if (now - kvPushTime > PUSH_COOLDOWN) {
-                                console.log(`[Auto-Discovery] Updating domain to ${hostName}`);
+                            let kvPushTime = await env.KV.get('LAST_PUSH_TIME');
+                            if (!kvPushTime || (now - parseInt(kvPushTime)) > PUSH_COOLDOWN) {
                                 await env.KV.put('SAVED_DOMAIN', hostName);
                                 await env.KV.put('LAST_PUSH_TIME', now.toString());
                                 lastSavedDomain = hostName;
@@ -193,15 +187,12 @@ export default {
                 }
             }
 
-            // ============================================================
-            // 5. 管理路由 (完整 UUID / SuperPass) -> 网页 / API
-            // ============================================================
+            // 5. 管理路由 (完整 UUID / SuperPass)
             if (isManagementRoute) {
                 // 5.1 鉴权逻辑
                 if (!isSuperRoute && context.adminPass) {
                     const cookie = request.headers.get('Cookie') || '';
                     if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
-                         // 登录 POST
                          if (request.method === 'POST' && isLoginRequest) {
                              const formData = await request.formData();
                              if (formData.get('password') === context.adminPass) {
@@ -214,34 +205,34 @@ export default {
                                  });
                              }
                          }
-                         // 未登录且不是 POST API，返回登录页
-                         // 注意：如果是 API 请求但未携带 Cookie，也会因为没进入下面的 API 块而最终 404 或在这里被拦截
                          return new Response(getLoginHtml(), { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
                     }
                 }
 
-                // 5.2 受保护的 API (POST)
+                // 5.2 API 
                 if (request.method === 'POST') {
                     if (subPath === '/edit') return await handleEditConfig(request, env, ctx);
                     if (subPath === '/bestip') return await handleBestIP(request, env);
                 }
                 
-                // 5.3 管理页面 (GET)
+                // 5.3 页面
                 if (request.method === 'GET') {
                     const html = await generateHomePage(env, context, hostName);
                     return new Response(html, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
                 }
 
-                // 完整 UUID 路径不处理 XHTTP
+                // 完整路径下的 POST 若非 API，也可能是客户端误连，为防 CPU 问题，此处建议 404
+                // 除非你也想让完整 UUID 路径支持 XHTTP (根据之前需求，暂不放行，以免混淆)
                 return new Response('404 Not Found', { status: 404 });
             }
 
             // ============================================================
-            // 6. Hash 路由 (UUID 前段) -> XHTTP / 订阅
+            // 6. Hash 路由 (UUID 前段 / Hex 特征路径)
             // ============================================================
             if (isHashRoute) {
-                // 6.1 XHTTP 代理 (仅限 POST 且开启功能)
+                // 6.1 XHTTP 代理 (POST)
                 if (request.method === 'POST') {
+                    // 只要是 POST 且符合 Hex 特征，且不是登录，就尝试 XHTTP
                     if (context.enableXhttp && !isLoginRequest) {
                         const r = await handleXhttpClient(request, context);
                         if (r) {
@@ -260,8 +251,9 @@ export default {
                     }
                 }
 
-                // 6.2 订阅内容 (仅限 GET)
-                if (request.method === 'GET') {
+                // 6.2 订阅内容 (GET)
+                // 只有完全匹配计算出的 hash 时才输出订阅，防止通过爆破 Hex 路径获取订阅信息
+                if (request.method === 'GET' && isCalculatedHash) {
                     const response = await handleSubscription(request, env, context, subPath, hostName);
                     if (response) return response;
                 }
