@@ -3873,108 +3873,99 @@ var index_default = {
         }
         return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { "Content-Type": "text/html;charset=utf-8" } });
       }
-      const isApiPostPath = path.endsWith("/edit") || path.endsWith("/bestip");
-      const isLoginRequest = url.searchParams.get("auth") === "login";
-      if (request.method === "POST" && context.enableXhttp && !isApiPostPath && !isLoginRequest) {
-        const r = await handleXhttpClient(request, context);
-        if (r) {
-          context.waitUntil(r.closed);
-          return new Response(r.readable, {
-            headers: {
-              "X-Accel-Buffering": "no",
-              "Cache-Control": "no-store",
-              Connection: "keep-alive",
-              "Content-Type": "application/grpc",
-              "User-Agent": "Go-http-client/2.0"
-            }
-          });
-        }
-        return new Response("XHTTP Handshake Failed", { status: 400 });
-      }
       const superPassword = CONSTANTS.SUPER_PASSWORD;
       const dynamicID = context.dynamicUUID.toLowerCase();
+      const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
       const isSuperRoute = path.startsWith("/" + superPassword);
-      const isUserRoute = path.startsWith("/" + dynamicID);
-      let userHash = "";
-      let isSubRoute = false;
-      if (!isSuperRoute && !isUserRoute) {
-        userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
-        isSubRoute = path.startsWith("/" + userHash);
+      const isFullUserRoute = path.startsWith("/" + dynamicID);
+      const isHashRoute = path.startsWith("/" + userHash);
+      if (!isSuperRoute && !isFullUserRoute && !isHashRoute) {
+        return new Response("404 Not Found", { status: 404 });
       }
       let subPath = "";
       if (isSuperRoute) subPath = path.substring(("/" + superPassword).length);
-      else if (isUserRoute) subPath = path.substring(("/" + dynamicID).length);
-      else if (isSubRoute) subPath = path.substring(("/" + userHash).length);
-      const isManagementRoute = isSuperRoute || isUserRoute;
-      if (request.method === "GET" && (isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes(".")) {
+      else if (isFullUserRoute) subPath = path.substring(("/" + dynamicID).length);
+      else if (isHashRoute) subPath = path.substring(("/" + userHash).length);
+      const isManagementRoute = isSuperRoute || isFullUserRoute;
+      const isLoginRequest = url.searchParams.get("auth") === "login";
+      if (request.method === "GET" && env.KV && hostName && hostName.includes(".")) {
         if (hostName !== lastSavedDomain) {
           const now = Date.now();
           if (now - lastPushTime > PUSH_COOLDOWN) {
-            let kvPushTimeStr = await env.KV.get("LAST_PUSH_TIME");
-            let kvPushTime = kvPushTimeStr ? parseInt(kvPushTimeStr) || 0 : 0;
-            lastPushTime = kvPushTime;
-            if (now - kvPushTime > PUSH_COOLDOWN) {
-              const currentRealDomain = await env.KV.get("SAVED_DOMAIN");
-              if (hostName !== currentRealDomain) {
+            context.waitUntil((async () => {
+              let kvPushTimeStr = await env.KV.get("LAST_PUSH_TIME");
+              let kvPushTime = kvPushTimeStr ? parseInt(kvPushTimeStr) || 0 : 0;
+              if (now - kvPushTime > PUSH_COOLDOWN) {
                 void(0);
+                await env.KV.put("SAVED_DOMAIN", hostName);
+                await env.KV.put("LAST_PUSH_TIME", now.toString());
                 lastSavedDomain = hostName;
                 lastPushTime = now;
-                context.waitUntil(Promise.all([
-                  env.KV.put("SAVED_DOMAIN", hostName),
-                  env.KV.put("LAST_PUSH_TIME", now.toString()),
-                  cleanConfigCache(["SAVED_DOMAIN"]),
-                  executeWebDavPush(env, context, false)
-                ]));
-              } else {
-                lastSavedDomain = hostName;
+                await cleanConfigCache(["SAVED_DOMAIN"]);
+                await executeWebDavPush(env, context, false);
               }
-            }
+            })());
           }
         }
       }
       if (isManagementRoute) {
-        if (!path.startsWith("/" + superPassword)) {
-          if (context.adminPass) {
-            const cookie = request.headers.get("Cookie") || "";
-            if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
-              if (request.method === "POST" && isLoginRequest) {
-                const formData = await request.formData();
-                if (formData.get("password") === context.adminPass) {
-                  return new Response(null, {
-                    status: 302,
-                    headers: {
-                      "Set-Cookie": `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
-                      "Location": url.pathname + "?login_check=1"
-                    }
-                  });
-                }
+        if (!isSuperRoute && context.adminPass) {
+          const cookie = request.headers.get("Cookie") || "";
+          if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
+            if (request.method === "POST" && isLoginRequest) {
+              const formData = await request.formData();
+              if (formData.get("password") === context.adminPass) {
+                return new Response(null, {
+                  status: 302,
+                  headers: {
+                    "Set-Cookie": `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
+                    "Location": url.pathname + "?login_check=1"
+                  }
+                });
               }
-              return new Response(getLoginHtml(), { headers: { "Content-Type": "text/html;charset=utf-8" } });
             }
+            return new Response(getLoginHtml(), { headers: { "Content-Type": "text/html;charset=utf-8" } });
           }
         }
-        if (subPath === "/edit") return await handleEditConfig(request, env, ctx);
-        if (subPath === "/bestip") return await handleBestIP(request, env);
+        if (request.method === "POST") {
+          if (subPath === "/edit") return await handleEditConfig(request, env, ctx);
+          if (subPath === "/bestip") return await handleBestIP(request, env);
+        }
         if (request.method === "GET") {
           const html = await generateHomePage(env, context, hostName);
           return new Response(html, { headers: { "Content-Type": "text/html;charset=utf-8" } });
         }
+        return new Response("404 Not Found", { status: 404 });
       }
-      if (isSubRoute && request.method === "GET") {
-        const response = await handleSubscription(request, env, context, subPath, hostName);
-        if (response) return response;
+      if (isHashRoute) {
+        if (request.method === "POST") {
+          if (context.enableXhttp && !isLoginRequest) {
+            const r = await handleXhttpClient(request, context);
+            if (r) {
+              context.waitUntil(r.closed);
+              return new Response(r.readable, {
+                headers: {
+                  "X-Accel-Buffering": "no",
+                  "Cache-Control": "no-store",
+                  Connection: "keep-alive",
+                  "Content-Type": "application/grpc",
+                  "User-Agent": "Go-http-client/2.0"
+                }
+              });
+            }
+            return new Response("XHTTP Handshake Failed", { status: 400 });
+          }
+        }
+        if (request.method === "GET") {
+          const response = await handleSubscription(request, env, context, subPath, hostName);
+          if (response) return response;
+        }
       }
       return new Response("404 Not Found", { status: 404 });
     } catch (e) {
       const errInfo = e && (e.stack || e.message || e.toString()) || "Unknown Internal Error";
       void(0);
-      return new Response(errInfo, {
-        status: 500,
-        headers: {
-          "Content-Type": "text/plain;charset=utf-8",
-          "X-Error-Source": "Six-Worker-Core"
-        }
-      });
+      return new Response(errInfo, { status: 500 });
     }
   },
   async scheduled(event, env, ctx) {
