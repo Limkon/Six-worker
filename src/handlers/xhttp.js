@@ -8,6 +8,7 @@
  * 4. [Feat] 增加 Header 解析错误的日志记录，便于排查。
  * 5. [Fix] 全面增强异常捕获：确保 uploader 和 connectionClosed 永远不会 Reject。
  * 6. [Security] 增加 Header 读取超时控制 (3秒)，防止 Slow Loris 攻击导致资源耗尽。
+ * 7. [Optimization] 重构 read_at_least，优化 Buffer 拼接逻辑，消除 O(N^2) 性能陷阱。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -28,10 +29,19 @@ function concat_typed_arrays(first, ...args) {
 
 // 辅助函数：确保从 reader 读取至少 minBytes 长度的数据
 // [Security Fix] 增加 deadline 参数，实现超时控制
+// [Optimization] 使用 Array 收集 Buffer 分片，避免循环内的重复内存分配和拷贝 (O(N^2) -> O(N))
 async function read_at_least(reader, minBytes, initialBuffer, deadline) {
-    let currentBuffer = initialBuffer || new Uint8Array(0);
-    
-    while (currentBuffer.length < minBytes) {
+    let chunks = []; // 用于收集分片
+    let totalLength = 0;
+
+    // 1. 处理初始 Buffer
+    if (initialBuffer && initialBuffer.byteLength > 0) {
+        chunks.push(initialBuffer);
+        totalLength += initialBuffer.byteLength;
+    }
+
+    // 2. 循环读取直到满足最小长度
+    while (totalLength < minBytes) {
         // 计算剩余时间
         const remainingTime = deadline - Date.now();
         if (remainingTime <= 0) {
@@ -54,13 +64,36 @@ async function read_at_least(reader, minBytes, initialBuffer, deadline) {
 
         const { value, done } = result;
         
-        if (done) return { value: currentBuffer, done: true };
+        if (done) {
+            // 如果流结束，跳出循环进行最终合并
+            break; 
+        }
         
-        if (value) {
-            currentBuffer = concat_typed_arrays(currentBuffer, value);
+        if (value && value.byteLength > 0) {
+            chunks.push(value);
+            totalLength += value.byteLength;
         }
     }
-    return { value: currentBuffer, done: false };
+
+    // 3. 高效合并 (Zero/One Copy)
+    if (chunks.length === 0) {
+        return { value: new Uint8Array(0), done: true };
+    }
+
+    // 如果只有一个块，直接返回，避免复制
+    if (chunks.length === 1) {
+        return { value: chunks[0], done: totalLength < minBytes };
+    }
+
+    // 分配精确大小的内存
+    const resultBuffer = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+        resultBuffer.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+
+    return { value: resultBuffer, done: totalLength < minBytes };
 }
 
 async function read_xhttp_header(readable, ctx) {
