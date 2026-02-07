@@ -1,3 +1,4 @@
+// src/handlers/xhttp.js
 /**
  * 文件名: src/handlers/xhttp.js
  * 修正说明:
@@ -5,8 +6,8 @@
  * 2. [Refactor] 移除未使用的死代码 (get_xhttp_buffer)。
  * 3. [Fix] Header 解析失败时显式 cancel reader，防止资源泄漏。
  * 4. [Feat] 增加 Header 解析错误的日志记录，便于排查。
- * 5. [Fix] 全面增强异常捕获：确保 uploader 和 connectionClosed 永远不会 Reject，
- * 防止 "Stream was cancelled" 导致 Worker 抛出 Uncaught Exception。
+ * 5. [Fix] 全面增强异常捕获：确保 uploader 和 connectionClosed 永远不会 Reject。
+ * 6. [Security] 增加 Header 读取超时控制 (3秒)，防止 Slow Loris 攻击导致资源耗尽。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -26,11 +27,32 @@ function concat_typed_arrays(first, ...args) {
 }
 
 // 辅助函数：确保从 reader 读取至少 minBytes 长度的数据
-async function read_at_least(reader, minBytes, initialBuffer) {
+// [Security Fix] 增加 deadline 参数，实现超时控制
+async function read_at_least(reader, minBytes, initialBuffer, deadline) {
     let currentBuffer = initialBuffer || new Uint8Array(0);
     
     while (currentBuffer.length < minBytes) {
-        const { value, done } = await reader.read();
+        // 计算剩余时间
+        const remainingTime = deadline - Date.now();
+        if (remainingTime <= 0) {
+            throw new Error('Header read timeout');
+        }
+
+        // 创建超时 Promise
+        let timeoutId;
+        const timeoutPromise = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error('Header read timeout')), remainingTime);
+        });
+
+        // 竞争读取
+        let result;
+        try {
+            result = await Promise.race([reader.read(), timeoutPromise]);
+        } finally {
+            clearTimeout(timeoutId);
+        }
+
+        const { value, done } = result;
         
         if (done) return { value: currentBuffer, done: true };
         
@@ -44,13 +66,19 @@ async function read_at_least(reader, minBytes, initialBuffer) {
 async function read_xhttp_header(readable, ctx) {
     const reader = readable.getReader(); 
     
+    // [Security] 定义头部读取的硬性截止时间 (3秒)
+    // 防止恶意客户端通过极慢的发送速度(Slow Loris)占用 Worker 资源
+    const HEADER_TIMEOUT = 3000;
+    const deadline = Date.now() + HEADER_TIMEOUT;
+
     const fail = async (msg) => {
         try { await reader.cancel(msg); } catch (_) {}
         return msg;
     };
 
     try {
-        let { value: cache, done } = await read_at_least(reader, 18);
+        // [Fix] 传递 deadline 到 read_at_least
+        let { value: cache, done } = await read_at_least(reader, 18, null, deadline);
         if (cache.length < 18) return fail('header too short');
 
         const version = cache[0];
@@ -67,7 +95,8 @@ async function read_xhttp_header(readable, ctx) {
         const min_len_until_atyp = 22 + pb_len;
         
         if (cache.length < min_len_until_atyp) {
-            const r = await read_at_least(reader, min_len_until_atyp, cache);
+            // [Fix] 传递 deadline
+            const r = await read_at_least(reader, min_len_until_atyp, cache, deadline);
             cache = r.value;
             if (cache.length < min_len_until_atyp) return fail('header too short for metadata');
         }
@@ -91,7 +120,8 @@ async function read_xhttp_header(readable, ctx) {
             header_len = addr_body_idx + 16;
         } else if (atype === CONSTANTS.ADDRESS_TYPE_URL) {
             if (cache.length < addr_body_idx + 1) {
-                 const r = await read_at_least(reader, addr_body_idx + 1, cache);
+                 // [Fix] 传递 deadline
+                 const r = await read_at_least(reader, addr_body_idx + 1, cache, deadline);
                  cache = r.value;
                  if (cache.length < addr_body_idx + 1) return fail('header too short for domain len');
             }
@@ -102,7 +132,8 @@ async function read_xhttp_header(readable, ctx) {
         }
         
         if (cache.length < header_len) {
-            const r = await read_at_least(reader, header_len, cache);
+            // [Fix] 传递 deadline
+            const r = await read_at_least(reader, header_len, cache, deadline);
             cache = r.value;
             if (cache.length < header_len) return fail('header too short for full address');
         }
@@ -289,6 +320,7 @@ export async function handleXhttpClient(request, ctx) {
         if (errStr.includes('cancelled') || errStr.includes('aborted')) {
             return null;
         }
+        // 如果是超时错误，在此处被捕获
         console.error('XHTTP Error:', e);
         return null;
     }
