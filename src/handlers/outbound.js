@@ -1,28 +1,42 @@
 /**
  * 文件名: src/handlers/outbound.js
- * 修复说明:
- * 1. [Critical Fix] SOCKS5 握手逻辑修正：
- * - 之前错误地强制发送 [5, 1, 2]，导致无密码的 SOCKS5 代理连接失败。
- * - 现在根据是否有 credential 动态发送 [5, 1, 0] 或 [5, 2, 0, 2]，恢复兼容性。
- * 2. 保留了之前所有的 UDP 粘包修复和安全阻断逻辑。
+ * 核心功能: 处理出站连接 (TCP/UDP)，支持 Direct, ProxyIP, SOCKS5, NAT64。
+ * 包含修复: 
+ * 1. SOCKS5 UDP Associate (BND.ADDR 0.0.0.0 Fix).
+ * 2. [Security] 严格的 Cloudflare 防风控机制 (增强了私有/保留 IP 阻断正则).
+ * 3. 增强的正则匹配性能.
+ * 4. [Fix] SOCKS5 UDP Buffer: 修复 UDP 分包导致的断流问题。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
 import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned, textEncoder } from '../utils/helpers.js';
 
-// --- [Security] 安全检查：私有 IP 阻断 ---
+// --- [Security] 安全检查：私有 IP 阻断 (防止风控核心) ---
+// 使用预编译正则提高性能，严格匹配小数点防止误杀公网 IP (如 10.x vs 104.x)
+// [修复说明] 扩展了阻断范围：
+// 1. 198.18.0.0/15: 基准测试专用 (198.18.x.x - 198.19.x.x)
+// 2. 224.0.0.0/4: 组播地址 (224.0.0.0 - 239.255.255.255)
+// 3. 240.0.0.0/4: 保留地址 (240.0.0.0 - 255.255.255.254)
+// 4. 0.0.0.0/8: 当前网络 (0.x.x.x)
 const IPV4_PRIVATE_REGEX = /^(?:127\.|10\.|172\.(?:1[6-9]|2\d|3[0-1])\.|192\.168\.|169\.254\.|198\.1[89]\.|(?:22[4-9]|23\d|24\d|25[0-5])\.|0\.|localhost)/;
-const IPV4_CGNAT_REGEX = /^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./; 
-const IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/i; 
+const IPV4_CGNAT_REGEX = /^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./; // 100.64.0.0/10
+const IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/i; // fc00::, fe80::, ::1
 
 function isPrivateIP(address) {
-    if (!address) return true; 
+    if (!address) return true; // 空地址视为风险
+    
+    // 检查 IPv4 私有网段
     if (IPV4_PRIVATE_REGEX.test(address)) return true;
+    
+    // 检查 Carrier Grade NAT (通常不应通过公网代理访问)
     if (IPV4_CGNAT_REGEX.test(address)) return true;
+
+    // 检查 IPv6 (Unique Local, Link Local, Loopback)
     if (address.includes(':')) {
         if (IPV6_PRIVATE_REGEX.test(address.toLowerCase())) return true;
     }
+
     return false;
 }
 
@@ -100,7 +114,7 @@ function shouldUseSocks5(addressRemote, go2socks5) {
 
 function parseSocks5Config(address) {
     if (!address) return null;
-    if (typeof address === 'object') return address; 
+    if (typeof address === 'object') return address; // 支持直接传入对象
 
     const cleanAddr = address.includes('://') ? address.split('://')[1] : address;
     const lastAtIndex = cleanAddr.lastIndexOf("@");
@@ -133,26 +147,14 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     const reader = socket.readable.getReader();
     const encoder = new TextEncoder();
     
-    // 1. Handshake (Method Selection)
-    // [Fix] 动态构建 Methods 列表
-    // 如果有用户名密码，发送 [5, 2, 0, 2] (支持 NoAuth(0) 和 UserPass(2))
-    // 如果没有，发送 [5, 1, 0] (只支持 NoAuth)
-    const methods = [0];
-    if (username && password) methods.push(2);
-    const handshakeReq = new Uint8Array([5, methods.length, ...methods]);
-    
-    await writer.write(handshakeReq); 
-    
+    // 1. Handshake
+    await writer.write(new Uint8Array([5, 1, 2])); 
     let { value: res } = await reader.read();
-    if (!res || res.length < 2 || res[0] !== 0x05) throw new Error('SOCKS5 greeting failed');
+    if (!res || res.length < 2 || res[0] !== 0x05 || res[1] === 0xff) throw new Error('SOCKS5 greeting failed');
     
-    // 检查服务端选中的 Method
-    const selectedMethod = res[1];
-    if (selectedMethod === 0xff) throw new Error('SOCKS5 no acceptable methods');
-    
-    // 2. Auth (如果服务端选中了 0x02)
-    if (selectedMethod === 0x02) {
-        if (!username || !password) throw new Error('SOCKS5 auth required but credentials missing');
+    // 2. Auth
+    if (res[1] === 0x02) {
+        if (!username || !password) throw new Error('SOCKS5 auth required');
         const uBytes = encoder.encode(username);
         const pBytes = encoder.encode(password);
         const authReq = new Uint8Array([1, uBytes.length, ...uBytes, pBytes.length, ...pBytes]);
@@ -164,6 +166,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
     // 3. Request (CONNECT or UDP ASSOCIATE)
     let DSTADDR;
     if (isUDP) {
+         // UDP Associate 请求：IP/Port 通常设为 0，让服务器决定绑定
          DSTADDR = new Uint8Array([1, 0, 0, 0, 0]);
     } else {
         switch (addressType) {
@@ -228,15 +231,16 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
         writer.releaseLock();
         reader.releaseLock();
 
+        // 标记并保存中继信息
         socket.isUdpControl = true;
         socket.bndAddr = bndAddr;
         socket.bndPort = bndPort;
-        socket.originalHost = hostname; 
+        socket.originalHost = hostname; // 用于 BND.ADDR 0.0.0.0 的 Fallback
         
         return socket;
     }
     
-    // TCP: Skip BND info and keep Initial Data
+    // TCP: Skip BND info
     let headLen = 0;
     if (connRes.length >= 4) {
         if (connRes[3] === 1) headLen = 10; 
@@ -287,9 +291,8 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
 // 创建连接对象 (根据配置选择 直连 / SOCKS5 / NAT64 等)
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    
-    const DIRECT_TIMEOUTS = [4000, 8000]; 
-    const PROXY_TIMEOUT = 10000; 
+    const DIRECT_TIMEOUTS = [1500, 4000]; 
+    const PROXY_TIMEOUT = 5000; 
 
     // Phase 1: Direct or Main SOCKS5
     if (!failureCache.has(addressRemote)) {
@@ -325,7 +328,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
     // Phase 3: NAT64
     if (!useSocks && ctx.dns64) {
         try {
-            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64, ctx);
+            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (v6Address) {
                 return await connectWithTimeout(v6Address, portRemote, PROXY_TIMEOUT, log);
             }
@@ -347,17 +350,18 @@ function concatUint8(a, b) {
     return res;
 }
 
+// 计算 SOCKS5 UDP 头部长度，如果数据不足则返回 -1
 function getSocks5UdpHeaderLength(buffer) {
-    if (buffer.length < 4) return -1; 
+    if (buffer.length < 4) return -1; // Need at least RSV(2)+FRAG(1)+ATYP(1)
     const atyp = buffer[3];
-    if (atyp === 1) return 10; 
-    if (atyp === 4) return 22; 
+    if (atyp === 1) return 10; // IPv4: 4+4+2
+    if (atyp === 4) return 22; // IPv6: 4+16+2
     if (atyp === 3) {
-        if (buffer.length < 5) return -1; 
+        if (buffer.length < 5) return -1; // Need Len byte
         const len = buffer[4];
-        return 7 + len; 
+        return 7 + len; // 4 + 1(Len) + Len + 2(Port)
     }
-    return 0; 
+    return 0; // Unknown/Invalid
 }
 
 function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
@@ -386,7 +390,7 @@ function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
 
 // --- Write Helpers ---
 async function safeWrite(writer, chunk) {
-    const WRITE_TIMEOUT = 30000; 
+    const WRITE_TIMEOUT = 10000; 
     const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Write timeout')), WRITE_TIMEOUT));
     await Promise.race([writer.write(chunk), timeoutPromise]);
 }
@@ -456,9 +460,11 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     }
 }
 
+// [Refactor] 提取通用 SOCKS5 UDP 流量处理
 async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, finalizeConnectionCallback) {
     const { bndAddr, bndPort, originalHost } = controlSocket;
     
+    // [Fix] 处理 BND.ADDR 为 0.0.0.0 或 :: 的情况
     let targetHost = bndAddr;
     const isZeroIP = bndAddr === '0.0.0.0' || bndAddr === '::' || bndAddr.startsWith('0:0:0:0') || bndAddr === '[::]';
     if (isZeroIP && originalHost) {
@@ -468,11 +474,13 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
 
     log(`[SOCKS5] UDP Associate ready. Relay: ${targetHost}:${bndPort}`);
     
+    // Connect to Relay
     const udpSocket = connect({ hostname: targetHost, port: bndPort });
     finalizeConnectionCallback(udpSocket);
     
     const udpWriter = udpSocket.writable.getWriter();
     
+    // Encapsulate & Send Initial Data
     const header = createSocks5UdpHeader(addressType, addressRemote, portRemote);
     if (rawClientData && rawClientData.byteLength > 0) {
         const packet = new Uint8Array(header.length + rawClientData.byteLength);
@@ -482,56 +490,50 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
     }
     udpWriter.releaseLock();
 
+    // Decapsulate & Stream Response
     let responseHeader = vlessResponseHeader;
-    let udpBuffer = new Uint8Array(0); 
-    let isHeaderComplete = false; 
-
-    const MAX_UDP_BUFFER = 65535; 
+    let udpBuffer = new Uint8Array(0); // [Fix] Buffer mechanism for fragmentation
 
     await udpSocket.readable.pipeTo(new WritableStream({
         async write(chunk, controller) {
             if (webSocket.readyState !== 1) { controller.error(new Error('WS Closed')); return; }
             
+            // 1. Accumulate buffer
             udpBuffer = concatUint8(udpBuffer, chunk);
             
-            if (udpBuffer.length > MAX_UDP_BUFFER) {
+            // Safety: Buffer limit
+            if (udpBuffer.length > 4096) {
+                // Buffer overflow or bad protocol, reset
                 udpBuffer = new Uint8Array(0); 
                 return;
             }
 
-            if (!isHeaderComplete) {
-                const headerLen = getSocks5UdpHeaderLength(udpBuffer);
-                
-                if (headerLen > 0) {
-                    if (udpBuffer.length >= headerLen) {
-                        const payload = udpBuffer.subarray(headerLen);
-                        
-                        const dataToSend = responseHeader 
-                            ? new Uint8Array([...responseHeader, ...payload])
-                            : payload;
-                        responseHeader = null;
-                        
-                        if (dataToSend.length > 0) {
-                             webSocket.send(dataToSend);
-                        }
-                        
-                        isHeaderComplete = true;
-                        udpBuffer = new Uint8Array(0);
-                    }
-                } else if (headerLen === 0) {
-                     udpBuffer = new Uint8Array(0);
-                }
-            } else {
-                if (udpBuffer.length > 0) {
+            // 2. Check for complete header
+            const headerLen = getSocks5UdpHeaderLength(udpBuffer);
+            
+            if (headerLen > 0) {
+                // We have enough data for at least the header
+                if (udpBuffer.length >= headerLen) {
+                    // Header is complete
+                    // Extract Payload (Everything after header)
+                    const payload = udpBuffer.subarray(headerLen);
+                    
                     const dataToSend = responseHeader 
-                        ? new Uint8Array([...responseHeader, ...udpBuffer]) 
-                        : udpBuffer;
+                        ? new Uint8Array([...responseHeader, ...payload])
+                        : payload;
                     responseHeader = null;
                     
                     webSocket.send(dataToSend);
+                    
+                    // Reset buffer (Assume 1 packet per flow chunk logic or tolerate loss if concatenated)
                     udpBuffer = new Uint8Array(0);
                 }
+                // Else: Wait for more data
+            } else if (headerLen === 0) {
+                 // Invalid data, reset
+                 udpBuffer = new Uint8Array(0);
             }
+            // headerLen == -1: Need more data, keep buffering
         },
         close() { 
             log('UDP Relay closed'); 
@@ -542,6 +544,7 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
 }
 
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
+    // [Security] 强制阻断私有 IP 或 违禁 Host (核心安全修复)
     if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) { 
         log(`[Block] TCP request blocked: ${addressRemote} is private or banned.`);
         safeCloseWebSocket(webSocket); 
@@ -555,9 +558,9 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         if (!ctx.dns64) { safeCloseWebSocket(webSocket); return; }
         prepareRetry();
         try {
-            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64, ctx);
+            const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 failed');
-            const natSocket = await connectWithTimeout(v6Address, portRemote, 10000, log);
+            const natSocket = await connectWithTimeout(v6Address, portRemote, 5000, log);
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -577,7 +580,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         if (ip) {
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
-                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 10000, log);
+                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5000, log);
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
                 await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -608,6 +611,7 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
 }
 
 export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
+    // [Security] 强制阻断私有 IP 或 违禁 Host
     if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) { 
         log(`[Block] UDP request blocked: ${addressRemote} is private or banned.`);
         safeCloseWebSocket(webSocket); 
@@ -623,7 +627,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 failed');
-            const natSocket = await connectWithTimeout(v6Address, portRemote, 10000, log);
+            const natSocket = await connectWithTimeout(v6Address, portRemote, 5000, log);
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -644,6 +648,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         if (ip) {
             const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
             
+            // [Fix] 尝试 ProxyIP UDP Associate
             try {
                 const socksConfig = { hostname: proxyHost, port: proxyPort, username: '', password: '' };
                 const connectionObj = await socks5Connect(socksConfig, addressType, addressRemote, portRemote, log, true);
@@ -653,8 +658,9 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
                 }
             } catch (socksErr) { }
 
+            // Fallback: TCP Tunnel
             try {
-                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 10000, log);
+                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5000, log);
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
                 await flushBuffer(writer, remoteSocketWrapper.buffer, log);

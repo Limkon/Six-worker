@@ -1,11 +1,4 @@
 // src/protocols/vless.js
-/**
- * 文件名: src/protocols/vless.js
- * 核心功能: 解析 VLESS 协议头部 (Version, UUID, Command, Port, Address)。
- * 审计优化:
- * 1. [Performance] IPv6 解析优化: 移除 DataView 分配，改用位运算直接提取，减少 GC 压力。
- * 2. [Stability] 保持了之前对 Buffer 长度和 UUID 校验的健壮性检查。
- */
 import { CONSTANTS } from '../constants.js';
 import { textDecoder, stringifyUUID } from '../utils/helpers.js';
 
@@ -53,8 +46,6 @@ export async function processVlessHeader(vlessBuffer, expectedUserIDs) {
 
     // 解析端口
     // 确保 DataView 使用正确的 buffer 和 byteOffset
-    // 注意: 这里保留 DataView 是因为只创建一次且读取一次，开销尚可接受，
-    // 若追求极致也可改为 ((buffer[portIndex] << 8) | buffer[portIndex + 1])
     const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     const portRemote = view.getUint16(portIndex, false);
     
@@ -81,16 +72,10 @@ export async function processVlessHeader(vlessBuffer, expectedUserIDs) {
                 break;
             case CONSTANTS.ADDRESS_TYPE_IPV6: 
                 addressLength = 16;
-                // [Optimization] IPv6 解析优化: 移除 DataView，使用位运算
-                // 直接读取 16 字节，每 2 字节合并为一个 Hex 片段
+                // 复用 buffer 创建局部 DataView
+                const ipv6View = new DataView(buffer.buffer, buffer.byteOffset + addressIndex, 16);
                 const ipv6 = [];
-                for (let i = 0; i < 8; i++) {
-                    const idx = addressIndex + (i * 2);
-                    const high = buffer[idx];
-                    const low = buffer[idx + 1];
-                    // (High << 8) | Low 组合成 16 位整数，然后转 16 进制字符串
-                    ipv6.push(((high << 8) | low).toString(16));
-                }
+                for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2, false).toString(16));
                 addressRemote = '[' + ipv6.join(':') + ']';
                 break;
             default: 

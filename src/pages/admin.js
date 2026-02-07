@@ -6,7 +6,6 @@
  * - 读取时：继续使用 getKV (L1/L2 缓存) 以节省额度。
  * - 保存时：调用 clearKVCache 强制清除缓存，确保下次读取为最新值。
  * 2. [Optimization] 动态收集需要清理的 Cache Key，避免维护静态列表。
- * 3. [Security] handleBestIP: 增加输入验证，限制 IP 列表最大 50 行，单行最大 100 字符。
  */
 import { getConfig, cleanConfigCache, initializeContext } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
@@ -190,25 +189,12 @@ export async function handleBestIP(request, env) {
             const data = await request.json();
             const action = url.searchParams.get('action') || 'save';
             
-            // [Security Fix] 限制最大行数为 50，并进行基本格式清洗
-            // 防止恶意提交过大导致 OOM 或 KV 写入失败
-            let inputIps = [];
-            if (data.ips && Array.isArray(data.ips)) {
-                inputIps = data.ips
-                    .slice(0, 50) // 限制输入最多 50 行
-                    .map(line => String(line).trim().substring(0, 100)) // 单行最大 100 字符
-                    .filter(Boolean);
-            }
-            
             if (action === 'append') {
                 const existing = await getKV(env, txt) || ''; 
-                const existingLines = existing.split('\n').map(l => l.trim()).filter(Boolean);
-                // 去重并合并
-                const newContent = [...new Set([...existingLines, ...inputIps])].join('\n');
+                const newContent = [...new Set([...existing.split('\n'), ...data.ips].filter(Boolean))].join('\n');
                 await env.KV.put(txt, newContent);
             } else {
-                // 覆盖保存
-                await env.KV.put(txt, inputIps.join('\n'));
+                await env.KV.put(txt, data.ips.join('\n'));
             }
             
             // 清理缓存
