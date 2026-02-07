@@ -1,11 +1,14 @@
 // src/index.js
 /**
  * 文件名: src/index.js
- * 最终审计修正版:
- * 1. [Fix] 修复 API 路径判定 bug: 兼容带尾部斜杠的请求 (e.g., /edit/)，防止误入 XHTTP 逻辑。
- * 2. [Feat] 根目录增强: 支持 /index.html 映射到主页。
- * 3. [Perf] 极致性能: 确保代理流量 (POST) 在第一层级被拦截，零 CPU 浪费。
- * 4. [Logic] 严格分流: 根目录(Web) vs 非根目录(Proxy/Admin)。
+ * 状态: 最终审计通过 (Final Verified)
+ * 功能对比:
+ * 1. [WebSocket] 保留 (最高优先级)
+ * 2. [Root] 保留 (设置/302/代理/伪装)
+ * 3. [XHTTP] 重构 (仅限 UUID 前段路径触发)
+ * 4. [Admin] 保留 (含 API 鉴权 / 登录 / 面板)
+ * 5. [Sub] 保留 (订阅下发)
+ * 6. [Auto-Discovery] 保留 (支持管理页和订阅触发)
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -19,9 +22,9 @@ import { CONSTANTS } from './constants.js';
 import { getPasswordSetupHtml, getLoginHtml } from './templates/auth.js';
 
 // --- 全局内存缓存 ---
-let lastSavedDomain = ''; // 上次保存的域名 (内存缓存)
-let lastPushTime = 0;     // 上次推送的时间戳 (内存缓存)
-const PUSH_COOLDOWN = 24 * 60 * 60 * 1000; // 冷却时间：24小时
+let lastSavedDomain = ''; 
+let lastPushTime = 0;     
+const PUSH_COOLDOWN = 24 * 60 * 60 * 1000; 
 
 function safeWaitUntil(ctx, promise) {
     if (ctx && typeof ctx.waitUntil === 'function') {
@@ -40,6 +43,7 @@ function normalizePath(urlObj) {
     return p;
 }
 
+// 初始密码设置处理
 async function handlePasswordSetup(request, env, ctx) {
     if (request.method === 'POST') {
         const formData = await request.formData();
@@ -68,12 +72,13 @@ async function handlePasswordSetup(request, env, ctx) {
     return new Response(getPasswordSetupHtml(), { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
 }
 
+// 简单网页代理
 async function proxyUrl(urlStr, targetUrlObj, request) {
     if (!urlStr) return null;
     try {
         const proxyUrl = new URL(urlStr);
         const currentUrl = new URL(request.url);
-        if (proxyUrl.hostname === currentUrl.hostname) return null; // Prevent loops
+        if (proxyUrl.hostname === currentUrl.hostname) return null; 
 
         const path = proxyUrl.pathname === '/' ? '' : proxyUrl.pathname;
         const newUrl = proxyUrl.protocol + '//' + proxyUrl.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
@@ -100,11 +105,12 @@ export default {
             context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
             const url = new URL(request.url);
-            // [Fix] 规范化路径，解决 /edit/ 匹配失败的问题
             const path = normalizePath(url); 
             const hostName = request.headers.get('Host');
 
+            // ============================================================
             // 1. WebSocket 处理 (最高优先级)
+            // ============================================================
             const upgradeHeader = request.headers.get('Upgrade');
             if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
                 if (!context.userID) return new Response('UUID not set', { status: 401 });
@@ -112,11 +118,9 @@ export default {
             }
 
             // ============================================================
-            // 逻辑分流 A: 根目录处理 (普通网页/设置/重定向)
-            // [Fix] 支持 /index.html 别名
+            // 2. 根目录/网页处理
             // ============================================================
             if (path === '/' || path === '/index.html') {
-                // A.1 初始设置
                 const rawUUID = await getConfig(env, 'UUID');
                 const rawKey = await getConfig(env, 'KEY');
                 const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
@@ -125,7 +129,6 @@ export default {
                     return await handlePasswordSetup(request, env, ctx);
                 }
 
-                // A.2 网页功能
                 const url302 = await getConfig(env, 'URL302');
                 if (url302) return Response.redirect(url302, 302);
                 
@@ -139,140 +142,138 @@ export default {
             }
 
             // ============================================================
-            // 逻辑分流 B: 其他路径处理 (默认优先 XHTTP)
+            // 3. 路由特征识别 (分流核心)
             // ============================================================
-            
-            // [Critical Fix] 判定是否为 API 请求。使用 endsWith 配合规范化后的 path。
-            // 这样 /uuid/edit 和 /uuid/edit/ (已被规范化) 都能正确被识别为 API，不会误入 XHTTP。
-            const isApiPostPath = path.endsWith('/edit') || path.endsWith('/bestip');
-            const isLoginRequest = url.searchParams.get('auth') === 'login';
-
-            // B.1 XHTTP 协议拦截 
-            // 只有 POST 且开启 XHTTP 且 不是已知 API/Login 时，才视为 XHTTP 流量
-            if (request.method === 'POST' && context.enableXhttp && !isApiPostPath && !isLoginRequest) {
-                const r = await handleXhttpClient(request, context);
-                if (r) {
-                    context.waitUntil(r.closed);
-                    return new Response(r.readable, {
-                        headers: {
-                            'X-Accel-Buffering': 'no',
-                            'Cache-Control': 'no-store',
-                            Connection: 'keep-alive',
-                            'Content-Type': 'application/grpc',
-                            'User-Agent': 'Go-http-client/2.0'
-                        }
-                    });
-                }
-                // 握手失败，直接返回 400，不再消耗 CPU 去计算 SHA1 或查询 KV
-                return new Response('XHTTP Handshake Failed', { status: 400 });
-            }
-
-            // B.2 路由计算 (仅 GET 请求 或 明确的 API POST 请求才会到达这里)
             const superPassword = CONSTANTS.SUPER_PASSWORD;
             const dynamicID = context.dynamicUUID.toLowerCase();
+            // 计算 UUID 前段 (Hash)
+            const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
             
             const isSuperRoute = path.startsWith('/' + superPassword);
-            const isUserRoute = path.startsWith('/' + dynamicID);
-            
-            let userHash = '';
-            let isSubRoute = false;
+            const isFullUserRoute = path.startsWith('/' + dynamicID);
+            const isHashRoute = path.startsWith('/' + userHash); // UUID 前段
 
-            // 只有当前面不匹配时，才进行 SHA1 计算
-            if (!isSuperRoute && !isUserRoute) {
-                userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
-                isSubRoute = path.startsWith('/' + userHash);
+            // [Critical Fix] 提前拦截非法路径，防止扫描器消耗 CPU
+            if (!isSuperRoute && !isFullUserRoute && !isHashRoute) {
+                return new Response('404 Not Found', { status: 404 });
             }
-            
+
+            // 计算子路径 (用于 API 等)
             let subPath = '';
             if (isSuperRoute) subPath = path.substring(('/' + superPassword).length);
-            else if (isUserRoute) subPath = path.substring(('/' + dynamicID).length);
-            else if (isSubRoute) subPath = path.substring(('/' + userHash).length);
+            else if (isFullUserRoute) subPath = path.substring(('/' + dynamicID).length);
+            else if (isHashRoute) subPath = path.substring(('/' + userHash).length);
 
-            const isManagementRoute = isSuperRoute || isUserRoute;
+            const isManagementRoute = isSuperRoute || isFullUserRoute;
+            const isLoginRequest = url.searchParams.get('auth') === 'login';
 
-            // B.3 域名自动发现 (仅 GET 请求触发)
-            if (request.method === 'GET' && (isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
+            // ============================================================
+            // 4. 域名自动发现 (在任何有效路由的 GET 请求中触发)
+            // ============================================================
+            if (request.method === 'GET' && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     const now = Date.now();
                     if (now - lastPushTime > PUSH_COOLDOWN) {
-                        let kvPushTimeStr = await env.KV.get('LAST_PUSH_TIME');
-                        let kvPushTime = kvPushTimeStr ? (parseInt(kvPushTimeStr) || 0) : 0;
-                        lastPushTime = kvPushTime;
-
-                        if (now - kvPushTime > PUSH_COOLDOWN) {
-                            const currentRealDomain = await env.KV.get('SAVED_DOMAIN');
-                            if (hostName !== currentRealDomain) {
+                        context.waitUntil((async () => {
+                            // 再次检查 KV 防止并发覆盖
+                            let kvPushTimeStr = await env.KV.get('LAST_PUSH_TIME');
+                            let kvPushTime = kvPushTimeStr ? (parseInt(kvPushTimeStr) || 0) : 0;
+                            
+                            if (now - kvPushTime > PUSH_COOLDOWN) {
                                 console.log(`[Auto-Discovery] Updating domain to ${hostName}`);
+                                await env.KV.put('SAVED_DOMAIN', hostName);
+                                await env.KV.put('LAST_PUSH_TIME', now.toString());
                                 lastSavedDomain = hostName;
                                 lastPushTime = now;
-                                context.waitUntil(Promise.all([
-                                    env.KV.put('SAVED_DOMAIN', hostName),
-                                    env.KV.put('LAST_PUSH_TIME', now.toString()), 
-                                    cleanConfigCache(['SAVED_DOMAIN']),
-                                    executeWebDavPush(env, context, false)
-                                ]));
-                            } else {
-                                lastSavedDomain = hostName;
+                                await cleanConfigCache(['SAVED_DOMAIN']);
+                                await executeWebDavPush(env, context, false);
                             }
-                        }
+                        })());
                     }
                 }
             }
 
-            // B.4 管理页面与 API
+            // ============================================================
+            // 5. 管理路由 (完整 UUID / SuperPass) -> 网页 / API
+            // ============================================================
             if (isManagementRoute) {
-                // 鉴权逻辑
-                if (!path.startsWith('/' + superPassword)) {
-                    if (context.adminPass) {
-                        const cookie = request.headers.get('Cookie') || '';
-                        if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
-                            if (request.method === 'POST' && isLoginRequest) {
-                                const formData = await request.formData();
-                                if (formData.get('password') === context.adminPass) {
-                                    return new Response(null, {
-                                        status: 302,
-                                        headers: {
-                                            'Set-Cookie': `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
-                                            'Location': url.pathname + '?login_check=1'
-                                        }
-                                    });
-                                }
-                            }
-                            return new Response(getLoginHtml(), { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
-                        }
+                // 5.1 鉴权逻辑
+                if (!isSuperRoute && context.adminPass) {
+                    const cookie = request.headers.get('Cookie') || '';
+                    if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
+                         // 登录 POST
+                         if (request.method === 'POST' && isLoginRequest) {
+                             const formData = await request.formData();
+                             if (formData.get('password') === context.adminPass) {
+                                 return new Response(null, {
+                                     status: 302,
+                                     headers: {
+                                         'Set-Cookie': `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
+                                         'Location': url.pathname + '?login_check=1'
+                                     }
+                                 });
+                             }
+                         }
+                         // 未登录且不是 POST API，返回登录页
+                         // 注意：如果是 API 请求但未携带 Cookie，也会因为没进入下面的 API 块而最终 404 或在这里被拦截
+                         return new Response(getLoginHtml(), { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
                     }
                 }
 
-                // 处理 API POST 请求
-                if (subPath === '/edit') return await handleEditConfig(request, env, ctx);
-                if (subPath === '/bestip') return await handleBestIP(request, env);
+                // 5.2 受保护的 API (POST)
+                if (request.method === 'POST') {
+                    if (subPath === '/edit') return await handleEditConfig(request, env, ctx);
+                    if (subPath === '/bestip') return await handleBestIP(request, env);
+                }
                 
-                // 处理 页面 GET 请求
+                // 5.3 管理页面 (GET)
                 if (request.method === 'GET') {
                     const html = await generateHomePage(env, context, hostName);
                     return new Response(html, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
                 }
+
+                // 完整 UUID 路径不处理 XHTTP
+                return new Response('404 Not Found', { status: 404 });
             }
 
-            // B.5 订阅处理 (仅 GET)
-            if (isSubRoute && request.method === 'GET') {
-                const response = await handleSubscription(request, env, context, subPath, hostName);
-                if (response) return response;
+            // ============================================================
+            // 6. Hash 路由 (UUID 前段) -> XHTTP / 订阅
+            // ============================================================
+            if (isHashRoute) {
+                // 6.1 XHTTP 代理 (仅限 POST 且开启功能)
+                if (request.method === 'POST') {
+                    if (context.enableXhttp && !isLoginRequest) {
+                        const r = await handleXhttpClient(request, context);
+                        if (r) {
+                            context.waitUntil(r.closed);
+                            return new Response(r.readable, {
+                                headers: {
+                                    'X-Accel-Buffering': 'no',
+                                    'Cache-Control': 'no-store',
+                                    Connection: 'keep-alive',
+                                    'Content-Type': 'application/grpc',
+                                    'User-Agent': 'Go-http-client/2.0'
+                                }
+                            });
+                        }
+                        return new Response('XHTTP Handshake Failed', { status: 400 });
+                    }
+                }
+
+                // 6.2 订阅内容 (仅限 GET)
+                if (request.method === 'GET') {
+                    const response = await handleSubscription(request, env, context, subPath, hostName);
+                    if (response) return response;
+                }
             }
 
-            // B.6 兜底 (非根路径，非XHTTP，非API，非订阅 -> 404)
+            // 7. 兜底
             return new Response('404 Not Found', { status: 404 });
 
         } catch (e) {
             const errInfo = (e && (e.stack || e.message || e.toString())) || "Unknown Internal Error";
             console.error(errInfo);
-            return new Response(errInfo, { 
-                status: 500, 
-                headers: { 
-                    'Content-Type': 'text/plain;charset=utf-8',
-                    'X-Error-Source': 'Six-Worker-Core'
-                } 
-            });
+            return new Response(errInfo, { status: 500 });
         }
     },
     
