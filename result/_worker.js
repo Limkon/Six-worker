@@ -422,7 +422,7 @@ var StreamCipher = class {
 };
 
 var configCache = {};
-var REMOTE_CONFIG_TTL = 5 * 60 * 1e3;
+var REMOTE_CONFIG_TTL = 560 * 60 * 1e3;
 var remoteConfigCache = {
   data: {},
   lastFetch: 0
@@ -1362,11 +1362,17 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
   const encoder = new TextEncoder();
-  await writer.write(new Uint8Array([5, 1, 2]));
+  if (username && password) {
+    await writer.write(new Uint8Array([5, 1, 2]));
+  } else {
+    await writer.write(new Uint8Array([5, 1, 0]));
+  }
   let { value: res } = await reader.read();
-  if (!res || res.length < 2 || res[0] !== 5 || res[1] === 255) throw new Error("SOCKS5 greeting failed");
-  if (res[1] === 2) {
-    if (!username || !password) throw new Error("SOCKS5 auth required");
+  if (!res || res.length < 2 || res[0] !== 5) throw new Error("SOCKS5 greeting failed");
+  const selectedMethod = res[1];
+  if (selectedMethod === 255) throw new Error("SOCKS5 no acceptable methods");
+  if (selectedMethod === 2) {
+    if (!username || !password) throw new Error("SOCKS5 auth required but credentials missing");
     const uBytes = encoder.encode(username);
     const pBytes = encoder.encode(password);
     const authReq = new Uint8Array([1, uBytes.length, ...uBytes, pBytes.length, ...pBytes]);
