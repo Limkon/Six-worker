@@ -2,17 +2,19 @@
 /**
  * 文件名: src/config.js
  * 审计优化说明:
- * 1. [Fix] Race Condition Fix 保留: 继续保持 initializeContext 中的原子更新逻辑。
+ * 1. [Fix] Race Condition Fix: 引入 configGeneration 版本号控制，解决并发写入时的竞争冒险问题。
+ * 防止 cleanConfigCache 清理后，旧的 getConfig 请求返回并覆盖写入陈旧数据。
  * 2. [Optimization] ProxyIP 防惊群: 引入 proxyIPFetchingPromise，防止缓存过期瞬间爆发大量重复 fetch 请求。
- * 3. [Feature] Remote Config TTL: 增加远程配置 5 分钟自动过期机制，避免配置长期不更新。
- * 4. [Config] 策略保持: 继续维持 ProxyIP 单一 IP 策略。
- * 5. [Optimization] UUID 计算缓存: 增加 uuidCache，避免每次请求都重复进行 SHA-256 计算 (Crypto API)。
+ * 3. [Feature] Remote Config TTL: 增加远程配置 6 小时自动过期机制。
+ * 4. [Optimization] UUID 计算缓存: 增加 uuidCache，避免每次请求都重复进行 SHA-256 计算。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID, getKV, clearKVCache } from './utils/helpers.js';
 
 // 内存缓存对象 (处理后的配置)
 let configCache = {};
+// [Fix] 配置版本号 (用于并发控制)
+let configGeneration = 0;
 
 // 远程配置缓存
 const REMOTE_CONFIG_TTL = 360 * 60 * 1000; // 360分钟自动过期
@@ -34,12 +36,15 @@ let uuidCache = {
     data: null,     // [userID, userIDLow]
     lastUpdate: 0   // 上次更新时间戳
 };
-const UUID_CACHE_TTL = 10 * 60 * 1000; // 10分钟缓存，足以覆盖大多数请求间隙，同时允许动态轮换
+const UUID_CACHE_TTL = 10 * 60 * 1000; // 10分钟缓存
 
 /**
  * 清理配置缓存
  */
 export async function cleanConfigCache(updatedKeys) {
+    // [Fix] 标记当前缓存失效 (递增版本号)
+    configGeneration++;
+
     if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes('REMOTE_CONFIG_URL')) {
         configCache = {};
         remoteConfigCache = { data: {}, lastFetch: 0 };
@@ -76,8 +81,7 @@ export async function loadRemoteConfig(env, forceReload = false) {
     
     if (remoteConfigUrl) {
         try {
-            // 简单的 fetch 逻辑，无需复杂的锁，因为 initializeContext 通常串行控制了刷新流程
-            // 且配置文件的体积通常很小，重复 fetch 影响不如 ProxyIP 列表大
+            // 简单的 fetch 逻辑
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
             
@@ -90,29 +94,36 @@ export async function loadRemoteConfig(env, forceReload = false) {
             if (response.ok) {
                 const text = await response.text();
                 const updateTime = Date.now();
-                try {
-                    const newData = JSON.parse(text);
-                    remoteConfigCache.data = newData;
-                    remoteConfigCache.lastFetch = updateTime;
-                    configCache = {}; 
-                } catch (e) {
-                    console.warn('Remote config is not JSON, trying line parse');
-                    const lines = text.split('\n');
-                    const newData = {};
-                    lines.forEach(line => {
-                        const trimmedLine = line.trim();
-                        if (!trimmedLine || trimmedLine.startsWith('#') || trimmedLine.startsWith('//')) return;
-                        const eqIndex = trimmedLine.indexOf('=');
-                        if (eqIndex > 0) {
-                            const k = trimmedLine.substring(0, eqIndex).trim();
-                            const v = trimmedLine.substring(eqIndex + 1).trim();
-                            if (k && v) newData[k] = v;
-                        }
-                    });
-                    remoteConfigCache.data = newData;
-                    remoteConfigCache.lastFetch = updateTime;
-                    configCache = {}; 
-                }
+                
+                // 辅助解析函数
+                const parseConfig = (txt) => {
+                    try {
+                        return JSON.parse(txt);
+                    } catch (e) {
+                        console.warn('Remote config is not JSON, trying line parse');
+                        const lines = txt.split('\n');
+                        const newData = {};
+                        lines.forEach(line => {
+                            const trimmedLine = line.trim();
+                            if (!trimmedLine || trimmedLine.startsWith('#') || trimmedLine.startsWith('//')) return;
+                            const eqIndex = trimmedLine.indexOf('=');
+                            if (eqIndex > 0) {
+                                const k = trimmedLine.substring(0, eqIndex).trim();
+                                const v = trimmedLine.substring(eqIndex + 1).trim();
+                                if (k && v) newData[k] = v;
+                            }
+                        });
+                        return newData;
+                    }
+                };
+
+                const newData = parseConfig(text);
+                remoteConfigCache.data = newData;
+                remoteConfigCache.lastFetch = updateTime;
+                
+                // [Fix] 更新缓存时清理旧缓存并递增版本号
+                configCache = {}; 
+                configGeneration++;
             }
         } catch (e) {
             console.error('Failed to load remote config', e);
@@ -125,6 +136,9 @@ export async function getConfig(env, key, defaultValue = undefined) {
     if (configCache[key] !== undefined) {
         return configCache[key];
     }
+
+    // [Fix] 捕获当前操作开始时的配置版本
+    const currentGen = configGeneration;
 
     let val = undefined;
     
@@ -146,7 +160,13 @@ export async function getConfig(env, key, defaultValue = undefined) {
     if (!val && key === 'KEY') val = env.KEY || env.TOKEN;
     
     const finalVal = (val !== undefined && val !== null) ? val : defaultValue;
-    configCache[key] = finalVal;
+    
+    // [Fix] 仅当版本号未发生变化时才写入缓存
+    // 这避免了: 请求A开始 -> 请求B清理缓存(Bump Gen) -> 请求A结束并写入陈旧数据
+    if (currentGen === configGeneration) {
+        configCache[key] = finalVal;
+    }
+    
     return finalVal;
 }
 
@@ -178,8 +198,10 @@ export async function initializeContext(request, env) {
 
     if (forceReload) {
         console.log('[Config] Flush requested via URL parameter. Purging caches...');
-        // [Fix] Race Condition Fix: 仅清理派生缓存和 KV，保留 remoteConfigCache
+        // [Fix] 递增版本号
         configCache = {};
+        configGeneration++;
+        
         // 强制重置 ProxyIP 缓存和锁
         proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
         // [Optimization] 重置 UUID 缓存
@@ -196,6 +218,7 @@ export async function initializeContext(request, env) {
             remoteConfigCache.data = {};
             remoteConfigCache.lastFetch = 0;
             configCache = {}; 
+            configGeneration++; // [Fix] Invalidate
         }
     }
 
@@ -287,7 +310,6 @@ export async function initializeContext(request, env) {
                  rawList = proxyIPRemoteCache.data;
              } else {
                  // [Optimization] 防止惊群效应 (Thundering Herd)
-                 // 如果已有请求正在 fetch，后续请求直接复用该 Promise
                  if (!proxyIPRemoteCache.fetchingPromise) {
                      proxyIPRemoteCache.fetchingPromise = (async () => {
                          try {
@@ -298,7 +320,6 @@ export async function initializeContext(request, env) {
                              if (response.ok) {
                                  const text = await response.text();
                                  const list = await cleanList(text);
-                                 // 更新缓存
                                  proxyIPRemoteCache.data = list;
                                  proxyIPRemoteCache.expires = Date.now() + 600000; // 10分钟缓存
                                  return list;
@@ -307,13 +328,11 @@ export async function initializeContext(request, env) {
                              }
                          } catch (e) {
                              console.error('Failed to fetch remote ProxyIP:', e);
-                             // 失败时的兜底：使用默认列表，缓存 1 分钟
                              const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
                              proxyIPRemoteCache.data = defParams;
                              proxyIPRemoteCache.expires = Date.now() + 60000; 
                              return defParams;
                          } finally {
-                             // 无论成功失败，结束后释放锁
                              proxyIPRemoteCache.fetchingPromise = null;
                          }
                      })();
