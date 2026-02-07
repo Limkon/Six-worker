@@ -2,22 +2,26 @@
 /**
  * 文件名: src/config.js
  * 审计优化说明:
- * 1. [Fix] Race Condition Fix: 引入 configGeneration 版本号控制，解决并发写入时的竞争冒险问题。
- * 防止 cleanConfigCache 清理后，旧的 getConfig 请求返回并覆盖写入陈旧数据。
- * 2. [Optimization] ProxyIP 防惊群: 引入 proxyIPFetchingPromise，防止缓存过期瞬间爆发大量重复 fetch 请求。
- * 3. [Feature] Remote Config TTL: 增加远程配置 6 小时自动过期机制。
- * 4. [Optimization] UUID 计算缓存: 增加 uuidCache，避免每次请求都重复进行 SHA-256 计算。
+ * 1. [Optimization] 增加 parsedListCache: 缓存解析后的数组对象(BAN/PROXYIP等)，避免每次请求重复 split/map。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID, getKV, clearKVCache } from './utils/helpers.js';
 
 // 内存缓存对象 (处理后的配置)
 let configCache = {};
-// [Fix] 配置版本号 (用于并发控制)
+// 配置版本号 (用于并发控制)
 let configGeneration = 0;
 
+// [Optimization] 解析后的列表缓存 (避免重复 split/map)
+let parsedListCache = {
+    proxyIP: null,     // Array
+    banHosts: null,    // Array
+    disabledProtocols: null, // Array
+    go2socks5: null    // Array
+};
+
 // 远程配置缓存
-const REMOTE_CONFIG_TTL = 360 * 60 * 1000; // 360分钟自动过期
+const REMOTE_CONFIG_TTL = 360 * 60 * 1000; 
 let remoteConfigCache = {
     data: {},
     lastFetch: 0
@@ -27,31 +31,30 @@ let remoteConfigCache = {
 let proxyIPRemoteCache = {
     data: [],
     expires: 0,
-    fetchingPromise: null // [Optimization] 防止惊群效应的 Promise 锁
+    fetchingPromise: null
 };
 
-// [Optimization] UUID 计算缓存 (避免每次请求重复计算 SHA-256)
+// UUID 计算缓存
 let uuidCache = {
-    key: null,      // 缓存键: seed|timeDays|updateHour
-    data: null,     // [userID, userIDLow]
-    lastUpdate: 0   // 上次更新时间戳
+    key: null,      
+    data: null,     
+    lastUpdate: 0   
 };
-const UUID_CACHE_TTL = 10 * 60 * 1000; // 10分钟缓存
+const UUID_CACHE_TTL = 10 * 60 * 1000; 
 
 /**
  * 清理配置缓存
  */
 export async function cleanConfigCache(updatedKeys) {
-    // [Fix] 标记当前缓存失效 (递增版本号)
     configGeneration++;
 
     if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes('REMOTE_CONFIG_URL')) {
         configCache = {};
         remoteConfigCache = { data: {}, lastFetch: 0 };
-        // 清理 ProxyIP 缓存时，也要重置 fetchingPromise
         proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
-        // [Optimization] 重置 UUID 缓存
         uuidCache = { key: null, data: null, lastUpdate: 0 };
+        // [Optimization] 清理列表缓存
+        parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
         await clearKVCache();
         return;
     }
@@ -59,10 +62,16 @@ export async function cleanConfigCache(updatedKeys) {
         delete configCache[key];
     }
     await clearKVCache(updatedKeys);
+    
+    // [Optimization] 定向清理列表缓存
     if (updatedKeys.includes('PROXYIP')) {
         proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
+        parsedListCache.proxyIP = null;
     }
-    // 如果更新了 UUID/KEY/TIME/UPTIME，需要清理 UUID 缓存
+    if (updatedKeys.includes('BAN')) parsedListCache.banHosts = null;
+    if (updatedKeys.includes('DIS')) parsedListCache.disabledProtocols = null;
+    if (updatedKeys.includes('GO2SOCKS5')) parsedListCache.go2socks5 = null;
+
     if (updatedKeys.some(k => ['UUID', 'KEY', 'TIME', 'UPTIME', 'SUPER_PASSWORD'].includes(k))) {
         uuidCache = { key: null, data: null, lastUpdate: 0 };
     }
@@ -70,8 +79,6 @@ export async function cleanConfigCache(updatedKeys) {
 
 export async function loadRemoteConfig(env, forceReload = false) {
     const remoteConfigUrl = await getKV(env, 'REMOTE_CONFIG_URL');
-    
-    // [Feature] 增加 TTL 检查
     const now = Date.now();
     const isExpired = (now - remoteConfigCache.lastFetch) > REMOTE_CONFIG_TTL;
 
@@ -81,7 +88,6 @@ export async function loadRemoteConfig(env, forceReload = false) {
     
     if (remoteConfigUrl) {
         try {
-            // 简单的 fetch 逻辑
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000);
             
@@ -95,7 +101,6 @@ export async function loadRemoteConfig(env, forceReload = false) {
                 const text = await response.text();
                 const updateTime = Date.now();
                 
-                // 辅助解析函数
                 const parseConfig = (txt) => {
                     try {
                         return JSON.parse(txt);
@@ -121,9 +126,10 @@ export async function loadRemoteConfig(env, forceReload = false) {
                 remoteConfigCache.data = newData;
                 remoteConfigCache.lastFetch = updateTime;
                 
-                // [Fix] 更新缓存时清理旧缓存并递增版本号
                 configCache = {}; 
                 configGeneration++;
+                // [Optimization] 远程配置更新后，也要清理列表缓存，因为可能包含相关配置
+                parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
             }
         } catch (e) {
             console.error('Failed to load remote config', e);
@@ -136,59 +142,32 @@ export async function getConfig(env, key, defaultValue = undefined) {
     if (configCache[key] !== undefined) {
         return configCache[key];
     }
-
-    // [Fix] 捕获当前操作开始时的配置版本
     const currentGen = configGeneration;
-
     let val = undefined;
     
-    if (env.KV) {
-        val = await getKV(env, key);
-    }
-
-    if ((val === null || val === undefined) && remoteConfigCache.data && remoteConfigCache.data[key]) {
-        val = remoteConfigCache.data[key];
-    }
+    if (env.KV) val = await getKV(env, key);
+    if ((val === null || val === undefined) && remoteConfigCache.data && remoteConfigCache.data[key]) val = remoteConfigCache.data[key];
+    if ((val === null || val === undefined) && env[key]) val = env[key];
     
-    if ((val === null || val === undefined) && env[key]) {
-        val = env[key];
-    }
-    
-    if (!val && key === 'UUID') {
-         val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
-    }
+    if (!val && key === 'UUID') val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
     if (!val && key === 'KEY') val = env.KEY || env.TOKEN;
     
     const finalVal = (val !== undefined && val !== null) ? val : defaultValue;
     
-    // [Fix] 仅当版本号未发生变化时才写入缓存
-    // 这避免了: 请求A开始 -> 请求B清理缓存(Bump Gen) -> 请求A结束并写入陈旧数据
     if (currentGen === configGeneration) {
         configCache[key] = finalVal;
     }
-    
     return finalVal;
 }
 
-// [Optimization] 封装带缓存的 UUID 生成逻辑
 async function getCachedUUID(seed, timeDays, updateHour) {
     const cacheKey = `${seed}|${timeDays}|${updateHour}`;
     const now = Date.now();
-
-    // 检查缓存命中且未过期
     if (uuidCache.key === cacheKey && uuidCache.data && (now - uuidCache.lastUpdate < UUID_CACHE_TTL)) {
         return uuidCache.data;
     }
-
-    // 缓存未命中或过期，执行计算
     const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
-    
-    // 更新缓存
-    uuidCache = {
-        key: cacheKey,
-        data: userIDs,
-        lastUpdate: now
-    };
+    uuidCache = { key: cacheKey, data: userIDs, lastUpdate: now };
     return userIDs;
 }
 
@@ -198,14 +177,11 @@ export async function initializeContext(request, env) {
 
     if (forceReload) {
         console.log('[Config] Flush requested via URL parameter. Purging caches...');
-        // [Fix] 递增版本号
         configCache = {};
         configGeneration++;
-        
-        // 强制重置 ProxyIP 缓存和锁
         proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
-        // [Optimization] 重置 UUID 缓存
         uuidCache = { key: null, data: null, lastUpdate: 0 };
+        parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
         await clearKVCache();
     }
 
@@ -218,11 +194,11 @@ export async function initializeContext(request, env) {
             remoteConfigCache.data = {};
             remoteConfigCache.lastFetch = 0;
             configCache = {}; 
-            configGeneration++; // [Fix] Invalidate
+            configGeneration++; 
+            parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
         }
     }
 
-    // Batch 1
     const [adminPass, rawUUID, rawKey, timeDaysStr, updateHourStr] = await Promise.all([
         getConfig(env, 'ADMIN_PASS'),
         getConfig(env, 'UUID'),
@@ -231,7 +207,6 @@ export async function initializeContext(request, env) {
         getConfig(env, 'UPTIME')
     ]);
 
-    // Batch 2
     const [proxyIPStr, dns64, socks5Addr, go2socksStr, banStr] = await Promise.all([
         getConfig(env, 'PROXYIP'),
         getConfig(env, 'DNS64'),
@@ -240,7 +215,6 @@ export async function initializeContext(request, env) {
         getConfig(env, 'BAN')
     ]);
 
-    // Batch 3
     const disStrRaw = await getConfig(env, 'DIS', '');
 
     const ctx = {
@@ -268,11 +242,9 @@ export async function initializeContext(request, env) {
 
     if (rawKey || (rawUUID && !isStrictV4UUID(rawUUID))) {
         const seed = rawKey || rawUUID;
-        
         if (seed) {
             const timeDays = Number(timeDaysStr) || 0;
             const updateHour = Number(updateHourStr) || 0;
-            // [Optimization] 使用带缓存的 UUID 生成器
             const userIDs = await getCachedUUID(seed, timeDays, updateHour);
             ctx.userID = userIDs[0]; 
             ctx.userIDLow = userIDs[1]; 
@@ -285,7 +257,6 @@ export async function initializeContext(request, env) {
         if (superPass) {
              const timeDays = Number(timeDaysStr) || 0;
              const updateHour = Number(updateHourStr) || 0;
-             // [Optimization] 使用带缓存的 UUID 生成器
              const userIDs = await getCachedUUID(superPass, timeDays, updateHour);
              ctx.userID = userIDs[0]; 
              ctx.userIDLow = userIDs[1]; 
@@ -309,7 +280,6 @@ export async function initializeContext(request, env) {
              if (Date.now() < proxyIPRemoteCache.expires && proxyIPRemoteCache.data.length > 0) {
                  rawList = proxyIPRemoteCache.data;
              } else {
-                 // [Optimization] 防止惊群效应 (Thundering Herd)
                  if (!proxyIPRemoteCache.fetchingPromise) {
                      proxyIPRemoteCache.fetchingPromise = (async () => {
                          try {
@@ -321,7 +291,7 @@ export async function initializeContext(request, env) {
                                  const text = await response.text();
                                  const list = await cleanList(text);
                                  proxyIPRemoteCache.data = list;
-                                 proxyIPRemoteCache.expires = Date.now() + 600000; // 10分钟缓存
+                                 proxyIPRemoteCache.expires = Date.now() + 600000; 
                                  return list;
                              } else {
                                  throw new Error(`ProxyIP fetch failed: ${response.status}`);
@@ -337,35 +307,57 @@ export async function initializeContext(request, env) {
                          }
                      })();
                  }
-                 
-                 // 等待 fetch 结果
                  rawList = await proxyIPRemoteCache.fetchingPromise;
              }
         } else {
-             rawList = rawProxyIP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+            // [Optimization] 使用静态列表缓存
+            if (parsedListCache.proxyIP) {
+                rawList = parsedListCache.proxyIP;
+            } else {
+                rawList = rawProxyIP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
+                parsedListCache.proxyIP = rawList;
+            }
         }
     }
 
     if (rawList && rawList.length > 0) {
         const selectedIP = rawList[Math.floor(Math.random() * rawList.length)];
         ctx.proxyIP = selectedIP;
-        ctx.proxyIPList = [selectedIP]; // 保持单一 IP 策略
+        ctx.proxyIPList = [selectedIP]; 
     } else {
         ctx.proxyIP = '';
         ctx.proxyIPList = [];
     }
 
-    ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
-    if (banStr) ctx.banHosts = await cleanList(banStr);
-    
-    let disStr = disStrRaw;
-    if (disStr) disStr = disStr.replace(/，/g, ',');
+    // [Optimization] 使用缓存优化列表解析
+    if (parsedListCache.go2socks5) {
+        ctx.go2socks5 = parsedListCache.go2socks5;
+    } else {
+        ctx.go2socks5 = go2socksStr ? await cleanList(go2socksStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
+        parsedListCache.go2socks5 = ctx.go2socks5;
+    }
 
-    ctx.disabledProtocols = (await cleanList(disStr)).map(p => {
-        const protocol = p.trim().toLowerCase();
-        if (protocol === 'shadowsocks') return 'ss';
-        return protocol;
-    });
+    if (parsedListCache.banHosts) {
+        ctx.banHosts = parsedListCache.banHosts;
+    } else if (banStr) {
+        ctx.banHosts = await cleanList(banStr);
+        parsedListCache.banHosts = ctx.banHosts;
+    }
+    
+    // [Optimization] 禁用协议缓存
+    if (parsedListCache.disabledProtocols) {
+        ctx.disabledProtocols = parsedListCache.disabledProtocols;
+    } else {
+        let disStr = disStrRaw;
+        if (disStr) disStr = disStr.replace(/，/g, ',');
+        const disList = await cleanList(disStr);
+        ctx.disabledProtocols = disList.map(p => {
+            const protocol = p.trim().toLowerCase();
+            if (protocol === 'shadowsocks') return 'ss';
+            return protocol;
+        });
+        parsedListCache.disabledProtocols = ctx.disabledProtocols;
+    }
 
     ctx.enableXhttp = !ctx.disabledProtocols.includes('xhttp');
 
