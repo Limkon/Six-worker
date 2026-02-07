@@ -2,9 +2,11 @@
 /**
  * 文件名: src/handlers/websocket.js
  * 审计修复说明:
- * 1. [Fix] 修复 bufferedBytes 计数器同步 Bug: 当底层 Buffer 数组被 outbound.js 清空时，自动重置计数器，防止重试期间误触发熔断。
- * 2. [Optimization] 调整计数器逻辑位置，确保仅在连接成功 accept 后才计数，防止同步错误导致的计数泄漏。
- * 3. [Smart Security] 智能熔断机制: 根据并发数动态调整 Buffer 大小 (10MB -> 128KB)。
+ * 1. [Fix] 语义修正: 将 activeWebSocketConnections 重命名为 activeConnectionsInInstance，明确仅统计当前实例。
+ * 2. [Security] 硬性熔断: 引入 CONSTANTS.MAX_CONCURRENT。当单实例连接数超限(默认512)时，直接拒绝新连接(429)，防止 OOM。
+ * 3. [Fix] 修复 bufferedBytes 计数器同步 Bug: 当底层 Buffer 数组被 outbound.js 清空时，自动重置计数器。
+ * 4. [Optimization] 调整计数器逻辑位置，确保仅在连接成功 accept 后才计数。
+ * 5. [Smart Security] 智能熔断机制: 根据并发数动态调整 Buffer 大小 (10MB -> 128KB)。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -14,6 +16,7 @@ import { parseSocks5Header } from '../protocols/socks5.js';
 import { parseShadowsocksHeader } from '../protocols/shadowsocks.js';
 import { handleTCPOutBound, handleUDPOutBound } from './outbound.js';
 import { safeCloseWebSocket, base64ToArrayBuffer, isHostBanned } from '../utils/helpers.js';
+import { CONSTANTS } from '../constants.js'; // [Fix] 确保引入常量
 
 // 注册支持的协议解析器
 const protocolManager = new ProtocolManager()
@@ -23,8 +26,10 @@ const protocolManager = new ProtocolManager()
     .register('socks5', parseSocks5Header)
     .register('ss', parseShadowsocksHeader);
 
-// [Smart Global State] 全局活跃连接计数器
-let activeWebSocketConnections = 0;
+// [Smart Global State] 当前 Worker 实例活跃连接计数器
+// 注意：Cloudflare Worker 是分布式的，此变量仅统计当前 Isolate (隔离实例) 的连接数。
+// 无法用于统计全局总并发，但对于防止单实例 OOM (内存溢出) 至关重要。
+let activeConnectionsInInstance = 0;
 
 // 工具：合并 Uint8Array
 function concatUint8(a, b) {
@@ -39,13 +44,20 @@ function concatUint8(a, b) {
 // 依据: Cloudflare Worker 限制 128MB 内存。
 // 策略: 并发越高，单连接允许的 Buffer 越小，防止总内存溢出。
 function getDynamicBufferSize() {
-    if (activeWebSocketConnections < 5) return 10 * 1024 * 1024; // <5 并发: 10MB
-    if (activeWebSocketConnections < 20) return 2 * 1024 * 1024; // <20 并发: 2MB (标准)
-    if (activeWebSocketConnections < 50) return 512 * 1024;      // <50 并发: 512KB
-    return 128 * 1024;                                           // >50 并发: 128KB (保命模式)
+    if (activeConnectionsInInstance < 5) return 10 * 1024 * 1024; // <5 并发: 10MB
+    if (activeConnectionsInInstance < 20) return 2 * 1024 * 1024; // <20 并发: 2MB (标准)
+    if (activeConnectionsInInstance < 50) return 512 * 1024;      // <50 并发: 512KB
+    return 128 * 1024;                                            // >50 并发: 128KB (保命模式)
 }
 
 export async function handleWebSocketRequest(request, ctx) {
+    // [Security Fix] 实例级硬性熔断
+    // 如果当前实例已经过载，拒绝新连接。客户端重试时可能会被调度到其他空闲实例。
+    if (activeConnectionsInInstance >= CONSTANTS.MAX_CONCURRENT) {
+        console.warn(`[WS] Instance Overloaded (${activeConnectionsInInstance} conns). Rejecting new request.`);
+        return new Response('Error: Instance Too Busy (Rate Limit)', { status: 429 });
+    }
+
     const webSocketPair = new WebSocketPair();
     const [client, webSocket] = Object.values(webSocketPair);
     
@@ -57,8 +69,8 @@ export async function handleWebSocketRequest(request, ctx) {
         return new Response('WebSocket Accept Failed', { status: 500 });
     }
 
-    // 1. 成功建立连接后，增加计数
-    activeWebSocketConnections++;
+    // 1. 成功建立连接后，增加计数 (仅限当前实例)
+    activeConnectionsInInstance++;
 
     // 连接状态包装器 (通过对象引用传递给 outbound.js)
     // [Fix] 增加 bufferedBytes 用于追踪当前缓冲区大小
@@ -77,7 +89,7 @@ export async function handleWebSocketRequest(request, ctx) {
     const PROBE_THRESHOLD = 1024;   // 探测阈值
     const DETECT_TIMEOUT_MS = 10000; // 10秒未识别协议则断开
 
-    const log = (info, event) => console.log(`[WS][Conns:${activeWebSocketConnections}] ${info}`, event || '');
+    const log = (info, event) => console.log(`[WS][Conns:${activeConnectionsInInstance}] ${info}`, event || '');
 
     // 协议检测超时熔断
     const timeoutTimer = setTimeout(() => {
@@ -128,7 +140,7 @@ export async function handleWebSocketRequest(request, ctx) {
                     
                     if (newSize > dynamicLimit) {
                         clearTimeout(timeoutTimer);
-                        throw new Error(`Smart Buffer Limit Exceeded: ${newSize} > ${dynamicLimit} (ActiveConns: ${activeWebSocketConnections})`);
+                        throw new Error(`Smart Buffer Limit Exceeded: ${newSize} > ${dynamicLimit} (ActiveConns: ${activeConnectionsInInstance})`);
                     }
 
                     remoteSocketWrapper.buffer.push(chunkArr);
@@ -241,13 +253,13 @@ export async function handleWebSocketRequest(request, ctx) {
     // 维持 Worker 生命周期并在结束时减少连接计数
     if (ctx.waitUntil) {
         ctx.waitUntil(streamPromise.finally(() => {
-            activeWebSocketConnections--;
-            if (activeWebSocketConnections < 0) activeWebSocketConnections = 0;
+            activeConnectionsInInstance--;
+            if (activeConnectionsInInstance < 0) activeConnectionsInInstance = 0;
         }));
     } else {
         streamPromise.finally(() => {
-            activeWebSocketConnections--;
-            if (activeWebSocketConnections < 0) activeWebSocketConnections = 0;
+            activeConnectionsInInstance--;
+            if (activeConnectionsInInstance < 0) activeConnectionsInInstance = 0;
         });
     }
 
