@@ -5,7 +5,7 @@
  * 1. SOCKS5 UDP Associate (BND.ADDR 0.0.0.0 Fix).
  * 2. [Security] 严格的 Cloudflare 防风控机制 (增强了私有/保留 IP 阻断正则).
  * 3. 增强的正则匹配性能.
- * 4. [Fix] SOCKS5 UDP Buffer: 修复 UDP 分包导致的断流问题。
+ * 4. [Fix] SOCKS5 UDP Buffer: 修复 UDP 分包导致的断流问题 (引入 isHeaderComplete 状态机).
  * 5. [New Fix] 优化连接超时与写入超时，解决网络波动断连问题。
  */
 import { connect } from 'cloudflare:sockets';
@@ -497,8 +497,9 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
 
     // Decapsulate & Stream Response
     let responseHeader = vlessResponseHeader;
-    let udpBuffer = new Uint8Array(0); // [Fix] Buffer mechanism for fragmentation
-    
+    let udpBuffer = new Uint8Array(0); 
+    let isHeaderComplete = false; // [Fix] 状态标记：标记是否已处理过头部
+
     // [Fix] 扩大 UDP 缓冲区限制，防止高并发丢包
     const MAX_UDP_BUFFER = 65535; // 原代码为 4096 (硬编码)，现提升至 64KB
 
@@ -511,37 +512,61 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
             
             // Safety: Buffer limit
             if (udpBuffer.length > MAX_UDP_BUFFER) {
-                // Buffer overflow or bad protocol, reset
+                // Buffer overflow protection, treat as payload if header already handled? 
+                // But better to reset to avoid OOM
                 udpBuffer = new Uint8Array(0); 
                 return;
             }
 
-            // 2. Check for complete header
-            const headerLen = getSocks5UdpHeaderLength(udpBuffer);
-            
-            if (headerLen > 0) {
-                // We have enough data for at least the header
-                if (udpBuffer.length >= headerLen) {
-                    // Header is complete
-                    // Extract Payload (Everything after header)
-                    const payload = udpBuffer.subarray(headerLen);
-                    
+            // 2. Process Buffer based on State
+            if (!isHeaderComplete) {
+                // Header state: Try to parse SOCKS5 UDP header
+                const headerLen = getSocks5UdpHeaderLength(udpBuffer);
+                
+                if (headerLen > 0) {
+                    // Valid header format detected
+                    if (udpBuffer.length >= headerLen) {
+                        // Header is completely received
+                        // Extract Payload (Everything after header)
+                        const payload = udpBuffer.subarray(headerLen);
+                        
+                        const dataToSend = responseHeader 
+                            ? new Uint8Array([...responseHeader, ...payload])
+                            : payload;
+                        responseHeader = null;
+                        
+                        // Send whatever payload we have
+                        if (dataToSend.length > 0) {
+                             webSocket.send(dataToSend);
+                        }
+                        
+                        // [Critical Fix] 切换状态到 "Payload Mode"。
+                        // 后续所有数据都视为 Payload 直接转发，不再解析 Header。
+                        // 这解决了 "Header 之后是分包 Payload" 导致的断流问题。
+                        isHeaderComplete = true;
+                        
+                        // Reset buffer (consumed)
+                        udpBuffer = new Uint8Array(0);
+                    }
+                    // else: Header incomplete, wait for more chunks
+                } else if (headerLen === 0) {
+                     // Invalid data / Protocol error, reset buffer
+                     udpBuffer = new Uint8Array(0);
+                }
+                // headerLen == -1: Data too short to determine header, wait.
+            } else {
+                // Payload state: Direct streaming
+                // 一旦头部处理完毕，剩余流均为数据
+                if (udpBuffer.length > 0) {
                     const dataToSend = responseHeader 
-                        ? new Uint8Array([...responseHeader, ...payload])
-                        : payload;
+                        ? new Uint8Array([...responseHeader, ...udpBuffer]) // Should rarely happen if header consumed
+                        : udpBuffer;
                     responseHeader = null;
                     
                     webSocket.send(dataToSend);
-                    
-                    // Reset buffer (Assume 1 packet per flow chunk logic or tolerate loss if concatenated)
                     udpBuffer = new Uint8Array(0);
                 }
-                // Else: Wait for more data
-            } else if (headerLen === 0) {
-                 // Invalid data, reset
-                 udpBuffer = new Uint8Array(0);
             }
-            // headerLen == -1: Need more data, keep buffering
         },
         close() { 
             log('UDP Relay closed'); 
