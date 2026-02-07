@@ -2215,6 +2215,39 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   });
 }
 
+async function safe_cancel(reader, reason) {
+  if (!reader) return;
+  try {
+    await reader.cancel(reason);
+  } catch (_) {
+  }
+}
+async function safe_read(reader, deadline) {
+  if (!reader) return { done: true };
+  const remainingTime = deadline - Date.now();
+  if (remainingTime <= 0) {
+    return { done: true, error: new Error("Read timeout") };
+  }
+  let timeoutId;
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve({ timeout: true }), remainingTime);
+  });
+  try {
+    const result = await Promise.race([reader.read(), timeoutPromise]);
+    if (result.timeout) {
+      return { done: true, error: new Error("Read timeout") };
+    }
+    return result;
+  } catch (e) {
+    const msg = (e.message || "").toLowerCase();
+    if (msg.includes("cancelled") || msg.includes("aborted") || msg.includes("closed")) {
+      return { done: true };
+    }
+    throw e;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
 async function read_at_least(reader, minBytes, initialBuffer, deadline) {
   let chunks = [];
   let totalLength = 0;
@@ -2223,35 +2256,16 @@ async function read_at_least(reader, minBytes, initialBuffer, deadline) {
     totalLength += initialBuffer.byteLength;
   }
   while (totalLength < minBytes) {
-    const remainingTime = deadline - Date.now();
-    if (remainingTime <= 0) {
-      throw new Error("Header read timeout");
-    }
-    let timeoutId;
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error("Header read timeout")), remainingTime);
-    });
-    let result;
-    try {
-      result = await Promise.race([reader.read(), timeoutPromise]);
-    } finally {
-      clearTimeout(timeoutId);
-    }
-    const { value, done } = result;
-    if (done) {
-      break;
-    }
+    const { value, done, error } = await safe_read(reader, deadline);
+    if (error) throw error;
+    if (done) break;
     if (value && value.byteLength > 0) {
       chunks.push(value);
       totalLength += value.byteLength;
     }
   }
-  if (chunks.length === 0) {
-    return { value: new Uint8Array(0), done: true };
-  }
-  if (chunks.length === 1) {
-    return { value: chunks[0], done: totalLength < minBytes };
-  }
+  if (chunks.length === 0) return { value: new Uint8Array(0), done: true };
+  if (chunks.length === 1) return { value: chunks[0], done: totalLength < minBytes };
   const resultBuffer = new Uint8Array(totalLength);
   let offset = 0;
   for (const chunk of chunks) {
@@ -2262,35 +2276,26 @@ async function read_at_least(reader, minBytes, initialBuffer, deadline) {
 }
 async function read_xhttp_header(readable, ctx) {
   const reader = readable.getReader();
-  const HEADER_TIMEOUT = 3e3;
-  const deadline = Date.now() + HEADER_TIMEOUT;
-  const fail = async (msg) => {
-    try {
-      await reader.cancel(msg);
-    } catch (_) {
-    }
-    return msg;
-  };
+  const deadline = Date.now() + 3e3;
   try {
     let { value: cache, done } = await read_at_least(reader, 18, null, deadline);
-    if (cache.length < 18) return fail("header too short");
+    if (cache.length < 18) throw new Error("header too short");
     const version = cache[0];
     const uuidStr = stringifyUUID(cache.subarray(1, 17));
     const expectedID = ctx.userID;
     const expectedIDLow = ctx.userIDLow;
     if (uuidStr !== expectedID && (!expectedIDLow || uuidStr !== expectedIDLow)) {
-      return fail("invalid UUID");
+      throw new Error("invalid UUID");
     }
     const pb_len = cache[17];
     const min_len_until_atyp = 22 + pb_len;
     if (cache.length < min_len_until_atyp) {
       const r = await read_at_least(reader, min_len_until_atyp, cache, deadline);
       cache = r.value;
-      if (cache.length < min_len_until_atyp) return fail("header too short for metadata");
+      if (cache.length < min_len_until_atyp) throw new Error("header too short for metadata");
     }
     const cmdIndex = 18 + pb_len;
-    const cmd = cache[cmdIndex];
-    if (cmd !== 1) return fail("unsupported command: " + cmd);
+    if (cache[cmdIndex] !== 1) throw new Error("unsupported command: " + cache[cmdIndex]);
     const portIndex = cmdIndex + 1;
     const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
     const port = view.getUint16(portIndex, false);
@@ -2305,76 +2310,61 @@ async function read_xhttp_header(readable, ctx) {
       if (cache.length < addr_body_idx + 1) {
         const r = await read_at_least(reader, addr_body_idx + 1, cache, deadline);
         cache = r.value;
-        if (cache.length < addr_body_idx + 1) return fail("header too short for domain len");
+        if (cache.length < addr_body_idx + 1) throw new Error("header too short for domain len");
       }
-      const domain_len = cache[addr_body_idx];
-      header_len = addr_body_idx + 1 + domain_len;
+      header_len = addr_body_idx + 1 + cache[addr_body_idx];
     } else {
-      return fail("read address type failed: " + atype);
+      throw new Error("unknown address type: " + atype);
     }
     if (cache.length < header_len) {
       const r = await read_at_least(reader, header_len, cache, deadline);
       cache = r.value;
-      if (cache.length < header_len) return fail("header too short for full address");
+      if (cache.length < header_len) throw new Error("header too short for full address");
     }
     let hostname = "";
     const addr_val_idx = addr_body_idx;
     try {
-      switch (atype) {
-        case CONSTANTS.ADDRESS_TYPE_IPV4:
-          hostname = cache.subarray(addr_val_idx, addr_val_idx + 4).join(".");
-          break;
-        case CONSTANTS.ADDRESS_TYPE_URL:
-          const domain_len = cache[addr_val_idx];
-          hostname = textDecoder.decode(
-            cache.subarray(addr_val_idx + 1, addr_val_idx + 1 + domain_len)
-          );
-          break;
-        case CONSTANTS.ADDRESS_TYPE_IPV6:
-          const ipv6 = [];
-          for (let i = 0; i < 8; i++) {
-            ipv6.push(view.getUint16(addr_val_idx + i * 2, false).toString(16));
-          }
-          hostname = ipv6.join(":");
-          break;
+      if (atype === CONSTANTS.ADDRESS_TYPE_IPV4) {
+        hostname = cache.subarray(addr_val_idx, addr_val_idx + 4).join(".");
+      } else if (atype === CONSTANTS.ADDRESS_TYPE_URL) {
+        const domain_len = cache[addr_val_idx];
+        hostname = textDecoder.decode(cache.subarray(addr_val_idx + 1, addr_val_idx + 1 + domain_len));
+      } else if (atype === CONSTANTS.ADDRESS_TYPE_IPV6) {
+        const ipv6 = [];
+        for (let i = 0; i < 8; i++) ipv6.push(view.getUint16(addr_val_idx + i * 2, false).toString(16));
+        hostname = ipv6.join(":");
       }
     } catch (e) {
-      return fail("failed to parse hostname: " + e.message);
+      throw new Error("failed to parse hostname");
     }
-    if (!hostname) return fail("failed to parse hostname");
-    const data = cache.subarray(header_len);
+    if (!hostname) throw new Error("empty hostname");
     return {
       hostname,
       port,
       atype,
-      data,
+      data: cache.subarray(header_len),
       resp: new Uint8Array([version, 0]),
       reader,
-      done: done && data.length === 0
+      done: done && cache.subarray(header_len).length === 0
     };
   } catch (error) {
-    try {
-      reader.releaseLock();
-    } catch (_) {
-    }
+    await safe_cancel(reader, error.message);
     throw error;
   }
 }
 async function upload_to_remote_xhttp(writer, httpx) {
-  try {
-    if (httpx.data && httpx.data.length > 0) {
-      await writer.write(httpx.data);
-    }
-    if (httpx.done) return;
-    while (true) {
+  if (httpx.data && httpx.data.length > 0) {
+    await writer.write(httpx.data);
+  }
+  if (httpx.done) return;
+  while (true) {
+    try {
       const { value, done } = await httpx.reader.read();
       if (done) break;
-      if (value && value.length > 0) {
-        await writer.write(value);
-      }
+      if (value) await writer.write(value);
+    } catch (e) {
+      break;
     }
-  } catch (error) {
-    throw error;
   }
 }
 function create_xhttp_downloader(resp, remote_readable, initialData) {
@@ -2413,8 +2403,6 @@ function create_xhttp_downloader(resp, remote_readable, initialData) {
     }
   });
   const pipePromise = remote_readable.pipeTo(monitorStream.writable).catch(() => {
-  }).finally(() => {
-    clearInterval(idleTimer);
   });
   return {
     readable: monitorStream.readable,
@@ -2433,79 +2421,56 @@ function create_xhttp_downloader(resp, remote_readable, initialData) {
   };
 }
 async function handleXhttpClient(request, ctx) {
+  let result;
   try {
-    const result = await read_xhttp_header(request.body, ctx);
-    if (typeof result === "string") {
-      if (result !== "stream cancelled" && !result.includes("cancelled")) {
-        void(0);
-      }
-      return null;
-    }
-    const { hostname, port, atype, data, resp, reader, done } = result;
-    const httpx = { hostname, port, atype, data, resp, reader, done };
-    if (isHostBanned(hostname, ctx.banHosts)) {
-      void(0);
-      return null;
-    }
-    const remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, (()=>{}), ctx.proxyIP);
-    const uploader = {
-      done: (async () => {
-        let writer = null;
-        try {
-          writer = remoteSocket.writable.getWriter();
-          await upload_to_remote_xhttp(writer, httpx);
-        } catch (e) {
-          const errStr = e && e.message ? e.message : String(e);
-          if (!errStr.includes("cancelled") && !errStr.includes("aborted")) {
-            void(0);
-          }
-        } finally {
-          if (writer) {
-            try {
-              await writer.close();
-            } catch (_) {
-            }
-          }
-        }
-      })(),
-      abort: () => {
-        try {
-          remoteSocket.writable.abort();
-        } catch (_) {
-        }
-      }
-    };
-    const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
-    const connectionClosed = Promise.race([
-      downloader.done,
-      uploader.done
-    ]).finally(() => {
-      try {
-        remoteSocket.close();
-      } catch (_) {
-      }
-      try {
-        downloader.abort();
-      } catch (_) {
-      }
-      try {
-        uploader.abort();
-      } catch (_) {
-      }
-    }).catch((err) => {
-    });
-    return {
-      readable: downloader.readable,
-      closed: connectionClosed
-    };
+    result = await read_xhttp_header(request.body, ctx);
   } catch (e) {
-    const errStr = e && e.message ? e.message : String(e);
-    if (errStr.includes("cancelled") || errStr.includes("aborted")) {
-      return null;
+    const errStr = e.message || "";
+    if (!errStr.includes("header too short") && !errStr.includes("invalid UUID")) {
+      void(0);
     }
-    void(0);
     return null;
   }
+  const { hostname, port, atype, data, resp, reader, done } = result;
+  if (isHostBanned(hostname, ctx.banHosts)) {
+    void(0);
+    await safe_cancel(reader, "blocked");
+    return null;
+  }
+  let remoteSocket;
+  try {
+    remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, (()=>{}), ctx.proxyIP);
+  } catch (e) {
+    void(0);
+    await safe_cancel(reader, "connect failed");
+    return null;
+  }
+  const uploaderPromise = (async () => {
+    let writer = null;
+    try {
+      writer = remoteSocket.writable.getWriter();
+      await upload_to_remote_xhttp(writer, { data, done, reader });
+    } catch (e) {
+    } finally {
+      if (writer) try {
+        await writer.close();
+      } catch (_) {
+      }
+      await safe_cancel(reader, "upload finished");
+    }
+  })();
+  const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
+  const connectionClosed = Promise.allSettled([downloader.done, uploaderPromise]).then(() => {
+    try {
+      remoteSocket.close();
+    } catch (_) {
+    }
+    downloader.abort();
+  });
+  return {
+    readable: downloader.readable,
+    closed: connectionClosed
+  };
 }
 
 function getAdminConfigHtml(FileName, formHtml) {
