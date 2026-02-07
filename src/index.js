@@ -1,8 +1,11 @@
 // src/index.js
 /**
  * 文件名: src/index.js
- * 修改说明:
- * 1. [Optimization] 延迟计算 userHash: 仅在非管理路由时才计算 SHA1，减少 CPU 消耗。
+ * 最终审计修正版:
+ * 1. [Fix] 修复 API 路径判定 bug: 兼容带尾部斜杠的请求 (e.g., /edit/)，防止误入 XHTTP 逻辑。
+ * 2. [Feat] 根目录增强: 支持 /index.html 映射到主页。
+ * 3. [Perf] 极致性能: 确保代理流量 (POST) 在第一层级被拦截，零 CPU 浪费。
+ * 4. [Logic] 严格分流: 根目录(Web) vs 非根目录(Proxy/Admin)。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -28,6 +31,15 @@ function safeWaitUntil(ctx, promise) {
     }
 }
 
+// 统一处理路径：去除末尾斜杠 (除非是根路径)
+function normalizePath(urlObj) {
+    let p = urlObj.pathname.toLowerCase();
+    if (p.length > 1 && p.endsWith('/')) {
+        p = p.slice(0, -1);
+    }
+    return p;
+}
+
 async function handlePasswordSetup(request, env, ctx) {
     if (request.method === 'POST') {
         const formData = await request.formData();
@@ -36,7 +48,6 @@ async function handlePasswordSetup(request, env, ctx) {
         if (!env.KV) return new Response('未绑定 KV', { status: 500 });
         await env.KV.put('UUID', password);
         
-        // 初始设置时，强制更新时间戳，确保立即推送
         const now = Date.now();
         await env.KV.put('LAST_PUSH_TIME', now.toString());
         lastPushTime = now;
@@ -46,11 +57,10 @@ async function handlePasswordSetup(request, env, ctx) {
         try {
             const appCtx = await initializeContext(request, env);
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
-            
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
-            console.log('[Setup] First time setup completed, WebDAV push triggered.');
+            console.log('[Setup] First time setup completed.');
         } catch (e) {
-            console.error('[Setup] Failed to trigger WebDAV push:', e);
+            console.error('[Setup] Error:', e);
         }
 
         return new Response('设置成功，请刷新页面', { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8' } });
@@ -62,13 +72,8 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
     if (!urlStr) return null;
     try {
         const proxyUrl = new URL(urlStr);
-
-        // [Fix] 安全检查：防止回环代理 (Self-Loop Prevention)
         const currentUrl = new URL(request.url);
-        if (proxyUrl.hostname === currentUrl.hostname) {
-            console.warn(`[Proxy] Loop detected: URL config points to self (${urlStr}). Aborting proxy to prevent crash.`);
-            return null;
-        }
+        if (proxyUrl.hostname === currentUrl.hostname) return null; // Prevent loops
 
         const path = proxyUrl.pathname === '/' ? '' : proxyUrl.pathname;
         const newUrl = proxyUrl.protocol + '//' + proxyUrl.hostname + path + targetUrlObj.pathname + targetUrlObj.search;
@@ -92,11 +97,11 @@ export default {
     async fetch(request, env, ctx) {
         try {
             const context = await initializeContext(request, env);
-            
             context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
             const url = new URL(request.url);
-            const path = url.pathname.toLowerCase();
+            // [Fix] 规范化路径，解决 /edit/ 匹配失败的问题
+            const path = normalizePath(url); 
             const hostName = request.headers.get('Host');
 
             // 1. WebSocket 处理 (最高优先级)
@@ -106,27 +111,73 @@ export default {
                 return await handleWebSocketRequest(request, context);
             }
 
-            // 2. 初始密码设置
-            const rawUUID = await getConfig(env, 'UUID');
-            const rawKey = await getConfig(env, 'KEY');
-            const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
+            // ============================================================
+            // 逻辑分流 A: 根目录处理 (普通网页/设置/重定向)
+            // [Fix] 支持 /index.html 别名
+            // ============================================================
+            if (path === '/' || path === '/index.html') {
+                // A.1 初始设置
+                const rawUUID = await getConfig(env, 'UUID');
+                const rawKey = await getConfig(env, 'KEY');
+                const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
 
-            if (isUninitialized && env.KV && path === '/') {
-                return await handlePasswordSetup(request, env, ctx);
+                if (isUninitialized && env.KV) {
+                    return await handlePasswordSetup(request, env, ctx);
+                }
+
+                // A.2 网页功能
+                const url302 = await getConfig(env, 'URL302');
+                if (url302) return Response.redirect(url302, 302);
+                
+                const urlProxy = await getConfig(env, 'URL');
+                if (urlProxy) {
+                    const resp = await proxyUrl(urlProxy, url, request);
+                    if (resp) return resp;
+                }
+
+                return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
             }
 
-            // 3. 路由路径计算 (优化版)
+            // ============================================================
+            // 逻辑分流 B: 其他路径处理 (默认优先 XHTTP)
+            // ============================================================
+            
+            // [Critical Fix] 判定是否为 API 请求。使用 endsWith 配合规范化后的 path。
+            // 这样 /uuid/edit 和 /uuid/edit/ (已被规范化) 都能正确被识别为 API，不会误入 XHTTP。
+            const isApiPostPath = path.endsWith('/edit') || path.endsWith('/bestip');
+            const isLoginRequest = url.searchParams.get('auth') === 'login';
+
+            // B.1 XHTTP 协议拦截 
+            // 只有 POST 且开启 XHTTP 且 不是已知 API/Login 时，才视为 XHTTP 流量
+            if (request.method === 'POST' && context.enableXhttp && !isApiPostPath && !isLoginRequest) {
+                const r = await handleXhttpClient(request, context);
+                if (r) {
+                    context.waitUntil(r.closed);
+                    return new Response(r.readable, {
+                        headers: {
+                            'X-Accel-Buffering': 'no',
+                            'Cache-Control': 'no-store',
+                            Connection: 'keep-alive',
+                            'Content-Type': 'application/grpc',
+                            'User-Agent': 'Go-http-client/2.0'
+                        }
+                    });
+                }
+                // 握手失败，直接返回 400，不再消耗 CPU 去计算 SHA1 或查询 KV
+                return new Response('XHTTP Handshake Failed', { status: 400 });
+            }
+
+            // B.2 路由计算 (仅 GET 请求 或 明确的 API POST 请求才会到达这里)
             const superPassword = CONSTANTS.SUPER_PASSWORD;
             const dynamicID = context.dynamicUUID.toLowerCase();
             
-            // [Optimization] 优先判断管理路由，避免不必要的 SHA1 计算
             const isSuperRoute = path.startsWith('/' + superPassword);
             const isUserRoute = path.startsWith('/' + dynamicID);
             
             let userHash = '';
             let isSubRoute = false;
 
-            // 只有当不是 API/管理 路由时，才计算 Hash 并检查订阅路由
+            // 只有当前面不匹配时，才进行 SHA1 计算
             if (!isSuperRoute && !isUserRoute) {
                 userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
                 isSubRoute = path.startsWith('/' + userHash);
@@ -138,10 +189,9 @@ export default {
             else if (isSubRoute) subPath = path.substring(('/' + userHash).length);
 
             const isManagementRoute = isSuperRoute || isUserRoute;
-            const isApiPostPath = isManagementRoute && (subPath === '/edit' || subPath === '/bestip');
 
-            // 4. 域名自动发现 (24小时冷静期逻辑)
-            if ((isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
+            // B.3 域名自动发现 (仅 GET 请求触发)
+            if (request.method === 'GET' && (isManagementRoute || isSubRoute) && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     const now = Date.now();
                     if (now - lastPushTime > PUSH_COOLDOWN) {
@@ -151,13 +201,10 @@ export default {
 
                         if (now - kvPushTime > PUSH_COOLDOWN) {
                             const currentRealDomain = await env.KV.get('SAVED_DOMAIN');
-                            
                             if (hostName !== currentRealDomain) {
-                                console.log(`[Auto-Discovery] Cooldown passed. Updating domain to ${hostName}`);
-                                
+                                console.log(`[Auto-Discovery] Updating domain to ${hostName}`);
                                 lastSavedDomain = hostName;
                                 lastPushTime = now;
-                                
                                 context.waitUntil(Promise.all([
                                     env.KV.put('SAVED_DOMAIN', hostName),
                                     env.KV.put('LAST_PUSH_TIME', now.toString()), 
@@ -172,38 +219,14 @@ export default {
                 }
             }
 
-            // 5. XHTTP 协议拦截
-            if (request.method === 'POST' && context.enableXhttp && !isApiPostPath && url.searchParams.get('auth') !== 'login' && path !== '/') {
-                const r = await handleXhttpClient(request, context);
-                if (r) {
-                    context.waitUntil(r.closed);
-                    return new Response(r.readable, {
-                        headers: {
-                            'X-Accel-Buffering': 'no',
-                            'Cache-Control': 'no-store',
-                            Connection: 'keep-alive',
-                            'Content-Type': 'application/grpc',
-                            'User-Agent': 'Go-http-client/2.0'
-                        }
-                    });
-                }
-                
-                if (!isManagementRoute) {
-                    const contentType = request.headers.get('content-type') || '';
-                    if (contentType.includes('application/x-www-form-urlencoded') || contentType.includes('multipart/form-data')) {
-                        return new Response('Error: Detected Form submission on XHTTP path. Missing "?auth=login" param?', { status: 400 });
-                    }
-                    return new Response('Internal Server Error (XHTTP Handshake Failed)', { status: 500 });
-                }
-            }
-
-            // 6. 管理页面鉴权
+            // B.4 管理页面与 API
             if (isManagementRoute) {
+                // 鉴权逻辑
                 if (!path.startsWith('/' + superPassword)) {
                     if (context.adminPass) {
                         const cookie = request.headers.get('Cookie') || '';
                         if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
-                            if (request.method === 'POST' && url.searchParams.get('auth') === 'login') {
+                            if (request.method === 'POST' && isLoginRequest) {
                                 const formData = await request.formData();
                                 if (formData.get('password') === context.adminPass) {
                                     return new Response(null, {
@@ -220,33 +243,24 @@ export default {
                     }
                 }
 
+                // 处理 API POST 请求
                 if (subPath === '/edit') return await handleEditConfig(request, env, ctx);
                 if (subPath === '/bestip') return await handleBestIP(request, env);
                 
-                const html = await generateHomePage(env, context, hostName);
-                return new Response(html, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+                // 处理 页面 GET 请求
+                if (request.method === 'GET') {
+                    const html = await generateHomePage(env, context, hostName);
+                    return new Response(html, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+                }
             }
 
-            // 7. 订阅处理
-            if (isSubRoute) {
+            // B.5 订阅处理 (仅 GET)
+            if (isSubRoute && request.method === 'GET') {
                 const response = await handleSubscription(request, env, context, subPath, hostName);
                 if (response) return response;
             }
 
-            // 8. 根路径与回落
-            if (path === '/') {
-                const url302 = await getConfig(env, 'URL302');
-                if (url302) return Response.redirect(url302, 302);
-                
-                const urlProxy = await getConfig(env, 'URL');
-                if (urlProxy) {
-                    const resp = await proxyUrl(urlProxy, url, request);
-                    if (resp) return resp;
-                }
-
-                return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
-            }
-
+            // B.6 兜底 (非根路径，非XHTTP，非API，非订阅 -> 404)
             return new Response('404 Not Found', { status: 404 });
 
         } catch (e) {
