@@ -1333,17 +1333,11 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
   const encoder = new TextEncoder();
-  if (username && password) {
-    await writer.write(new Uint8Array([5, 1, 2]));
-  } else {
-    await writer.write(new Uint8Array([5, 1, 0]));
-  }
+  await writer.write(new Uint8Array([5, 1, 2]));
   let { value: res } = await reader.read();
-  if (!res || res.length < 2 || res[0] !== 5) throw new Error("SOCKS5 greeting failed");
-  const selectedMethod = res[1];
-  if (selectedMethod === 255) throw new Error("SOCKS5 no acceptable methods");
-  if (selectedMethod === 2) {
-    if (!username || !password) throw new Error("SOCKS5 auth required but credentials missing");
+  if (!res || res.length < 2 || res[0] !== 5 || res[1] === 255) throw new Error("SOCKS5 greeting failed");
+  if (res[1] === 2) {
+    if (!username || !password) throw new Error("SOCKS5 auth required");
     const uBytes = encoder.encode(username);
     const pBytes = encoder.encode(password);
     const authReq = new Uint8Array([1, uBytes.length, ...uBytes, pBytes.length, ...pBytes]);
@@ -1466,8 +1460,8 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
 }
 async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
   const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-  const DIRECT_TIMEOUTS = [4e3, 8e3];
-  const PROXY_TIMEOUT = 1e4;
+  const DIRECT_TIMEOUTS = [1500, 4e3];
+  const PROXY_TIMEOUT = 5e3;
   if (!failureCache.has(addressRemote)) {
     const currentTimeout = DIRECT_TIMEOUTS[0];
     try {
@@ -1496,7 +1490,7 @@ async function createUnifiedConnection(ctx, addressRemote, portRemote, addressTy
   }
   if (!useSocks && ctx.dns64) {
     try {
-      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64, ctx);
+      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
       if (v6Address) {
         return await connectWithTimeout(v6Address, portRemote, PROXY_TIMEOUT, log);
       }
@@ -1549,7 +1543,7 @@ function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
   return new Uint8Array([...rsvFrag, atyp, ...addrBytes, ...portBytes]);
 }
 async function safeWrite(writer, chunk) {
-  const WRITE_TIMEOUT = 3e4;
+  const WRITE_TIMEOUT = 1e4;
   const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Write timeout")), WRITE_TIMEOUT));
   await Promise.race([writer.write(chunk), timeoutPromise]);
 }
@@ -1649,8 +1643,6 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
   udpWriter.releaseLock();
   let responseHeader = vlessResponseHeader;
   let udpBuffer = new Uint8Array(0);
-  let isHeaderComplete = false;
-  const MAX_UDP_BUFFER = 65535;
   await udpSocket.readable.pipeTo(new WritableStream({
     async write(chunk, controller) {
       if (webSocket.readyState !== 1) {
@@ -1658,33 +1650,21 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
         return;
       }
       udpBuffer = concatUint8(udpBuffer, chunk);
-      if (udpBuffer.length > MAX_UDP_BUFFER) {
+      if (udpBuffer.length > 4096) {
         udpBuffer = new Uint8Array(0);
         return;
       }
-      if (!isHeaderComplete) {
-        const headerLen = getSocks5UdpHeaderLength(udpBuffer);
-        if (headerLen > 0) {
-          if (udpBuffer.length >= headerLen) {
-            const payload = udpBuffer.subarray(headerLen);
-            const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
-            responseHeader = null;
-            if (dataToSend.length > 0) {
-              webSocket.send(dataToSend);
-            }
-            isHeaderComplete = true;
-            udpBuffer = new Uint8Array(0);
-          }
-        } else if (headerLen === 0) {
-          udpBuffer = new Uint8Array(0);
-        }
-      } else {
-        if (udpBuffer.length > 0) {
-          const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...udpBuffer]) : udpBuffer;
+      const headerLen = getSocks5UdpHeaderLength(udpBuffer);
+      if (headerLen > 0) {
+        if (udpBuffer.length >= headerLen) {
+          const payload = udpBuffer.subarray(headerLen);
+          const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
           responseHeader = null;
           webSocket.send(dataToSend);
           udpBuffer = new Uint8Array(0);
         }
+      } else if (headerLen === 0) {
+        udpBuffer = new Uint8Array(0);
       }
     },
     close() {
@@ -1720,9 +1700,9 @@ async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressR
     }
     prepareRetry();
     try {
-      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64, ctx);
+      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
       if (!v6Address) throw new Error("DNS64 failed");
-      const natSocket = await connectWithTimeout(v6Address, portRemote, 1e4, log);
+      const natSocket = await connectWithTimeout(v6Address, portRemote, 5e3, log);
       const writer = natSocket.writable.getWriter();
       if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
       await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -1743,7 +1723,7 @@ async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressR
     if (ip) {
       try {
         const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
-        const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 1e4, log);
+        const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5e3, log);
         const writer = proxySocket.writable.getWriter();
         if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
         await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -1795,7 +1775,7 @@ async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressR
     try {
       const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
       if (!v6Address) throw new Error("DNS64 failed");
-      const natSocket = await connectWithTimeout(v6Address, portRemote, 1e4, log);
+      const natSocket = await connectWithTimeout(v6Address, portRemote, 5e3, log);
       const writer = natSocket.writable.getWriter();
       if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
       await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -1825,7 +1805,7 @@ async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressR
       } catch (socksErr) {
       }
       try {
-        const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 1e4, log);
+        const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5e3, log);
         const writer = proxySocket.writable.getWriter();
         if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
         await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -1889,7 +1869,7 @@ async function handleWebSocketRequest(request, ctx) {
   let vlessBuffer = new Uint8Array(0);
   let activeWriter = null;
   let activeSocket = null;
-  const MAX_HEADER_BUFFER = 4096;
+  const MAX_HEADER_BUFFER = 2048;
   const PROBE_THRESHOLD = 1024;
   const DETECT_TIMEOUT_MS = 1e4;
   const log = (info, event) => void(0);
@@ -1986,7 +1966,7 @@ async function handleWebSocketRequest(request, ctx) {
           clientData = result.rawClientData;
         } else if (protocol === "socks5") {
           clientData = result.rawClientData;
-          responseHeader = new Uint8Array([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+          webSocket.send(new Uint8Array([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
           socks5State = 3;
         }
         vlessBuffer = null;
@@ -1996,8 +1976,7 @@ async function handleWebSocketRequest(request, ctx) {
           handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
         }
       } catch (e) {
-        const isFatalError = e.message.startsWith("Blocked") || e.message.startsWith("Protocol mismatch") || e.message.includes("disabled");
-        if (!isFatalError && vlessBuffer && vlessBuffer.length < PROBE_THRESHOLD && vlessBuffer.length < MAX_HEADER_BUFFER) {
+        if (vlessBuffer && vlessBuffer.length < PROBE_THRESHOLD && vlessBuffer.length < MAX_HEADER_BUFFER) {
           return;
         }
         clearTimeout(timeoutTimer);
