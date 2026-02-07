@@ -2923,12 +2923,12 @@ async function fetchAndParseAPI(apiUrl, httpsPorts) {
   if (!apiUrl) return [];
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5e3);
+    const timeout2 = setTimeout(() => controller.abort(), 5e3);
     const response = await fetch(apiUrl, {
       signal: controller.signal,
       headers: { "User-Agent": "Mozilla/5.0" }
     });
-    clearTimeout(timeout);
+    clearTimeout(timeout2);
     if (response.ok) {
       const text = await response.text();
       return await cleanList(text);
@@ -3808,6 +3808,29 @@ function getLoginHtml() {
 var lastSavedDomain = "";
 var lastPushTime = 0;
 var PUSH_COOLDOWN = 24 * 60 * 60 * 1e3;
+function timeout(promise, ms, errorMsg = "Operation timed out") {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(errorMsg)), ms);
+  });
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    timeoutPromise
+  ]);
+}
+async function execWithRetry(taskFn, maxRetries = 3, timeoutMs = 3e3) {
+  let lastError;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await timeout(taskFn(), timeoutMs, `Attempt ${i + 1} timeout`);
+    } catch (e) {
+      void(0);
+      lastError = e;
+      if (i < maxRetries - 1) await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  throw lastError;
+}
 function safeWaitUntil(ctx, promise) {
   if (ctx && typeof ctx.waitUntil === "function") {
     ctx.waitUntil(promise);
@@ -3834,10 +3857,9 @@ async function handlePasswordSetup(request, env, ctx) {
     lastPushTime = now;
     await cleanConfigCache();
     try {
-      const appCtx = await initializeContext(request, env);
+      const appCtx = await execWithRetry(() => initializeContext(request, env), 2, 5e3);
       appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
       safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
-      void(0);
     } catch (e) {
       void(0);
     }
@@ -3868,125 +3890,127 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
 }
 var index_default = {
   async fetch(request, env, ctx) {
-    try {
-      const context = await initializeContext(request, env);
-      context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
-      const url = new URL(request.url);
-      const path = normalizePath(url);
-      const hostName = request.headers.get("Host");
-      const upgradeHeader = request.headers.get("Upgrade");
-      if (upgradeHeader && upgradeHeader.toLowerCase() === "websocket") {
-        if (!context.userID) return new Response("UUID not set", { status: 401 });
-        return await handleWebSocketRequest(request, context);
-      }
-      if (path === "/" || path === "/index.html") {
-        const rawUUID = await getConfig(env, "UUID");
-        const rawKey = await getConfig(env, "KEY");
-        const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
-        if (isUninitialized && env.KV) {
-          return await handlePasswordSetup(request, env, ctx);
+    return await timeout((async () => {
+      try {
+        const context = await execWithRetry(() => initializeContext(request, env), 3, 3e3);
+        context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
+        const url = new URL(request.url);
+        const path = normalizePath(url);
+        const hostName = request.headers.get("Host");
+        const upgradeHeader = request.headers.get("Upgrade");
+        if (upgradeHeader && upgradeHeader.toLowerCase() === "websocket") {
+          if (!context.userID) return new Response("UUID not set", { status: 401 });
+          return await handleWebSocketRequest(request, context);
         }
-        const url302 = await getConfig(env, "URL302");
-        if (url302) return Response.redirect(url302, 302);
-        const urlProxy = await getConfig(env, "URL");
-        if (urlProxy) {
-          const resp = await proxyUrl(urlProxy, url, request);
-          if (resp) return resp;
+        if (path === "/" || path === "/index.html") {
+          const rawUUID = await getConfig(env, "UUID");
+          const rawKey = await getConfig(env, "KEY");
+          const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
+          if (isUninitialized && env.KV) {
+            return await handlePasswordSetup(request, env, ctx);
+          }
+          const url302 = await getConfig(env, "URL302");
+          if (url302) return Response.redirect(url302, 302);
+          const urlProxy = await getConfig(env, "URL");
+          if (urlProxy) {
+            const resp = await proxyUrl(urlProxy, url, request);
+            if (resp) return resp;
+          }
+          return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { "Content-Type": "text/html;charset=utf-8" } });
         }
-        return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { "Content-Type": "text/html;charset=utf-8" } });
-      }
-      const superPassword = CONSTANTS.SUPER_PASSWORD;
-      const dynamicID = context.dynamicUUID.toLowerCase();
-      const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
-      const isSuperRoute = path.startsWith("/" + superPassword);
-      const isFullUserRoute = path.startsWith("/" + dynamicID);
-      const isCalculatedHash = path.startsWith("/" + userHash);
-      const isHexFeature = /^\/[a-f0-9]{6,12}(\/|$)/i.test(path);
-      const isHashRoute = isCalculatedHash || isHexFeature;
-      if (!isSuperRoute && !isFullUserRoute && !isHashRoute) {
-        return new Response("404 Not Found", { status: 404 });
-      }
-      let subPath = "";
-      if (isSuperRoute) subPath = path.substring(("/" + superPassword).length);
-      else if (isFullUserRoute) subPath = path.substring(("/" + dynamicID).length);
-      else if (isCalculatedHash) subPath = path.substring(("/" + userHash).length);
-      const isManagementRoute = isSuperRoute || isFullUserRoute;
-      const isLoginRequest = url.searchParams.get("auth") === "login";
-      if (request.method === "GET" && (isManagementRoute || isCalculatedHash) && env.KV && hostName && hostName.includes(".")) {
-        if (hostName !== lastSavedDomain) {
-          const now = Date.now();
-          if (now - lastPushTime > PUSH_COOLDOWN) {
-            context.waitUntil((async () => {
-              let kvPushTime = await env.KV.get("LAST_PUSH_TIME");
-              if (!kvPushTime || now - parseInt(kvPushTime) > PUSH_COOLDOWN) {
-                await env.KV.put("SAVED_DOMAIN", hostName);
-                await env.KV.put("LAST_PUSH_TIME", now.toString());
-                lastSavedDomain = hostName;
-                lastPushTime = now;
-                await cleanConfigCache(["SAVED_DOMAIN"]);
-                await executeWebDavPush(env, context, false);
-              }
-            })());
+        const superPassword = CONSTANTS.SUPER_PASSWORD;
+        const dynamicID = context.dynamicUUID.toLowerCase();
+        const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
+        const isSuperRoute = path.startsWith("/" + superPassword);
+        const isFullUserRoute = path.startsWith("/" + dynamicID);
+        const isCalculatedHash = path.startsWith("/" + userHash);
+        const isHexFeature = /^\/[a-f0-9]{6,12}(\/|$)/i.test(path);
+        const isHashRoute = isCalculatedHash || isHexFeature;
+        if (!isSuperRoute && !isFullUserRoute && !isHashRoute) {
+          return new Response("404 Not Found", { status: 404 });
+        }
+        let subPath = "";
+        if (isSuperRoute) subPath = path.substring(("/" + superPassword).length);
+        else if (isFullUserRoute) subPath = path.substring(("/" + dynamicID).length);
+        else if (isCalculatedHash) subPath = path.substring(("/" + userHash).length);
+        const isManagementRoute = isSuperRoute || isFullUserRoute;
+        const isLoginRequest = url.searchParams.get("auth") === "login";
+        if (request.method === "GET" && (isManagementRoute || isCalculatedHash) && env.KV && hostName && hostName.includes(".")) {
+          if (hostName !== lastSavedDomain) {
+            const now = Date.now();
+            if (now - lastPushTime > PUSH_COOLDOWN) {
+              context.waitUntil((async () => {
+                let kvPushTime = await env.KV.get("LAST_PUSH_TIME");
+                if (!kvPushTime || now - parseInt(kvPushTime) > PUSH_COOLDOWN) {
+                  await env.KV.put("SAVED_DOMAIN", hostName);
+                  await env.KV.put("LAST_PUSH_TIME", now.toString());
+                  lastSavedDomain = hostName;
+                  lastPushTime = now;
+                  await cleanConfigCache(["SAVED_DOMAIN"]);
+                  await executeWebDavPush(env, context, false);
+                }
+              })());
+            }
           }
         }
-      }
-      if (isManagementRoute) {
-        if (!isSuperRoute && context.adminPass) {
-          const cookie = request.headers.get("Cookie") || "";
-          if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
-            if (request.method === "POST" && isLoginRequest) {
-              const formData = await request.formData();
-              if (formData.get("password") === context.adminPass) {
-                return new Response(null, {
-                  status: 302,
+        if (isManagementRoute) {
+          if (!isSuperRoute && context.adminPass) {
+            const cookie = request.headers.get("Cookie") || "";
+            if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
+              if (request.method === "POST" && isLoginRequest) {
+                const formData = await request.formData();
+                if (formData.get("password") === context.adminPass) {
+                  return new Response(null, {
+                    status: 302,
+                    headers: {
+                      "Set-Cookie": `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
+                      "Location": url.pathname + "?login_check=1"
+                    }
+                  });
+                }
+              }
+              return new Response(getLoginHtml(), { headers: { "Content-Type": "text/html;charset=utf-8" } });
+            }
+          }
+          if (subPath === "/edit") return await handleEditConfig(request, env, ctx);
+          if (subPath === "/bestip") return await handleBestIP(request, env);
+          if (request.method === "GET") {
+            const html = await generateHomePage(env, context, hostName);
+            return new Response(html, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+          }
+          return new Response("404 Not Found", { status: 404 });
+        }
+        if (isHashRoute) {
+          if (request.method === "POST") {
+            if (context.enableXhttp && !isLoginRequest) {
+              const r = await handleXhttpClient(request, context);
+              if (r) {
+                context.waitUntil(r.closed);
+                return new Response(r.readable, {
                   headers: {
-                    "Set-Cookie": `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
-                    "Location": url.pathname + "?login_check=1"
+                    "X-Accel-Buffering": "no",
+                    "Cache-Control": "no-store",
+                    Connection: "keep-alive",
+                    "Content-Type": "application/grpc",
+                    "User-Agent": "Go-http-client/2.0"
                   }
                 });
               }
+              return new Response("XHTTP Handshake Failed", { status: 400 });
             }
-            return new Response(getLoginHtml(), { headers: { "Content-Type": "text/html;charset=utf-8" } });
           }
-        }
-        if (subPath === "/edit") return await handleEditConfig(request, env, ctx);
-        if (subPath === "/bestip") return await handleBestIP(request, env);
-        if (request.method === "GET") {
-          const html = await generateHomePage(env, context, hostName);
-          return new Response(html, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+          if (request.method === "GET" && isCalculatedHash) {
+            const response = await handleSubscription(request, env, context, subPath, hostName);
+            if (response) return response;
+          }
         }
         return new Response("404 Not Found", { status: 404 });
+      } catch (e) {
+        const errInfo = e && (e.stack || e.message || e.toString()) || "Unknown Internal Error";
+        void(0);
+        return new Response("Internal Server Error (Watchdog Catch)", { status: 500 });
       }
-      if (isHashRoute) {
-        if (request.method === "POST") {
-          if (context.enableXhttp && !isLoginRequest) {
-            const r = await handleXhttpClient(request, context);
-            if (r) {
-              context.waitUntil(r.closed);
-              return new Response(r.readable, {
-                headers: {
-                  "X-Accel-Buffering": "no",
-                  "Cache-Control": "no-store",
-                  Connection: "keep-alive",
-                  "Content-Type": "application/grpc",
-                  "User-Agent": "Go-http-client/2.0"
-                }
-              });
-            }
-            return new Response("XHTTP Handshake Failed", { status: 400 });
-          }
-        }
-        if (request.method === "GET" && isCalculatedHash) {
-          const response = await handleSubscription(request, env, context, subPath, hostName);
-          if (response) return response;
-        }
-      }
-      return new Response("404 Not Found", { status: 404 });
-    } catch (e) {
-      const errInfo = e && (e.stack || e.message || e.toString()) || "Unknown Internal Error";
-      void(0);
-      return new Response(errInfo, { status: 500 });
-    }
+    })(), 45e3, "Worker Execution Timeout");
   },
   async scheduled(event, env, ctx) {
   }
