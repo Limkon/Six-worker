@@ -3,7 +3,8 @@
  * 审计确认: 
  * 1. 确认已实现 Stale-While-Revalidate 缓存策略，大幅提升订阅响应速度。
  * 2. 确认去重逻辑使用了 Set，优化了内存占用。
- * 3. 逻辑稳健，当 KV 不可用时会自动降级为实时获取。
+ * 3. [Fix] 修复 fetchAndParseCSV 的健壮性问题 (BOM处理/大小写忽略)。
+ * 4. 逻辑稳健，当 KV 不可用时会自动降级为实时获取。
  */
 import { cleanList, sha1 } from '../utils/helpers.js';
 import { getConfig } from '../config.js';
@@ -38,22 +39,38 @@ async function fetchAndParseCSV(csvUrl, isTLS, httpsPorts, DLS, remarkIndex) {
         const response = await fetch(csvUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
         if (!response.ok) return [];
         const text = await response.text();
-        const lines = text.split(/\r?\n/);
+        const lines = text.split(/\r?\n/).filter(l => l.trim() !== ''); // [Fix] 过滤空行
         if (lines.length === 0) return [];
-        const header = lines[0].split(',');
+
+        // [Fix] 健壮性修复：处理 BOM 头并统一转大写
+        let headerLine = lines[0];
+        if (headerLine.charCodeAt(0) === 0xFEFF) {
+            headerLine = headerLine.slice(1);
+        }
+        // 统一转大写并去空格，确保能匹配到 "TLS", "tls", "TLS " 等
+        const header = headerLine.split(',').map(h => h.trim().toUpperCase());
         const tlsIndex = header.indexOf('TLS');
-        if (tlsIndex === -1) return [];
+        
+        if (tlsIndex === -1) {
+            console.warn(`[CSV] 'TLS' column not found in ${csvUrl}`);
+            return [];
+        }
         
         const results = [];
         for (let i = 1; i < lines.length; i++) {
             const columns = lines[i].split(',');
-            if (columns.length > tlsIndex && columns[tlsIndex] && columns[tlsIndex].toUpperCase() === (isTLS ? 'TRUE' : 'FALSE')) {
-                const speed = parseFloat(columns[columns.length - 1]);
-                if (speed > DLS) {
-                    const ip = columns[0];
-                    const port = columns[1];
-                    const remark = columns[tlsIndex + remarkIndex] || 'CSV';
-                    results.push(`${ip}:${port}#${remark}`);
+            // 确保列数足够且 TLS 列存在
+            if (columns.length > tlsIndex && columns[tlsIndex]) {
+                const tlsValue = columns[tlsIndex].trim().toUpperCase();
+                // 兼容 "TRUE" / "FALSE" 的大小写
+                if (tlsValue === (isTLS ? 'TRUE' : 'FALSE')) {
+                    const speed = parseFloat(columns[columns.length - 1]);
+                    if (speed > DLS) {
+                        const ip = columns[0].trim();
+                        const port = columns[1].trim();
+                        const remark = (columns[tlsIndex + remarkIndex] || 'CSV').trim();
+                        results.push(`${ip}:${port}#${remark}`);
+                    }
                 }
             }
         }
