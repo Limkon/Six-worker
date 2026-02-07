@@ -6,6 +6,7 @@
  * 2. [Security] 严格的 Cloudflare 防风控机制 (增强了私有/保留 IP 阻断正则).
  * 3. 增强的正则匹配性能.
  * 4. [Fix] SOCKS5 UDP Buffer: 修复 UDP 分包导致的断流问题。
+ * 5. [New Fix] 优化连接超时与写入超时，解决网络波动断连问题。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
@@ -291,8 +292,11 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
 // 创建连接对象 (根据配置选择 直连 / SOCKS5 / NAT64 等)
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
-    const DIRECT_TIMEOUTS = [1500, 4000]; 
-    const PROXY_TIMEOUT = 5000; 
+    
+    // [Fix] 调大超时时间，原为 [1500, 4000]，现改为 [4000, 8000]
+    const DIRECT_TIMEOUTS = [4000, 8000]; 
+    // [Fix] 调大代理超时时间，原为 5000，现改为 10000
+    const PROXY_TIMEOUT = 10000; 
 
     // Phase 1: Direct or Main SOCKS5
     if (!failureCache.has(addressRemote)) {
@@ -390,7 +394,8 @@ function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
 
 // --- Write Helpers ---
 async function safeWrite(writer, chunk) {
-    const WRITE_TIMEOUT = 10000; 
+    // [Fix] 调大写入超时时间，防止弱网环境下断流
+    const WRITE_TIMEOUT = 30000; // 原: 10000
     const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Write timeout')), WRITE_TIMEOUT));
     await Promise.race([writer.write(chunk), timeoutPromise]);
 }
@@ -493,6 +498,9 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
     // Decapsulate & Stream Response
     let responseHeader = vlessResponseHeader;
     let udpBuffer = new Uint8Array(0); // [Fix] Buffer mechanism for fragmentation
+    
+    // [Fix] 扩大 UDP 缓冲区限制，防止高并发丢包
+    const MAX_UDP_BUFFER = 65535; // 原代码为 4096 (硬编码)，现提升至 64KB
 
     await udpSocket.readable.pipeTo(new WritableStream({
         async write(chunk, controller) {
@@ -502,7 +510,7 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
             udpBuffer = concatUint8(udpBuffer, chunk);
             
             // Safety: Buffer limit
-            if (udpBuffer.length > 4096) {
+            if (udpBuffer.length > MAX_UDP_BUFFER) {
                 // Buffer overflow or bad protocol, reset
                 udpBuffer = new Uint8Array(0); 
                 return;
@@ -560,7 +568,8 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 failed');
-            const natSocket = await connectWithTimeout(v6Address, portRemote, 5000, log);
+            // [Fix] 超时时间 5000 -> 10000
+            const natSocket = await connectWithTimeout(v6Address, portRemote, 10000, log);
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -580,7 +589,8 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
         if (ip) {
             try {
                 const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
-                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5000, log);
+                // [Fix] 超时时间 5000 -> 10000
+                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 10000, log);
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
                 await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -627,7 +637,8 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
             if (!v6Address) throw new Error('DNS64 failed');
-            const natSocket = await connectWithTimeout(v6Address, portRemote, 5000, log);
+            // [Fix] 超时时间 5000 -> 10000
+            const natSocket = await connectWithTimeout(v6Address, portRemote, 10000, log);
             const writer = natSocket.writable.getWriter();
             if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
             await flushBuffer(writer, remoteSocketWrapper.buffer, log);
@@ -660,7 +671,8 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
 
             // Fallback: TCP Tunnel
             try {
-                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5000, log);
+                // [Fix] 超时时间 5000 -> 10000
+                const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 10000, log);
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
                 await flushBuffer(writer, remoteSocketWrapper.buffer, log);
