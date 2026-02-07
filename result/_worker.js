@@ -1,6 +1,6 @@
 var CONSTANTS = {
   SUPER_PASSWORD: "771571215.",
-  DEFAULT_PROXY_IP: "soho.perslist.com:443",
+  DEFAULT_PROXY_IP: "xioo.mooo.com",
   SUB_HASH_LENGTH: 6,
   IDLE_TIMEOUT_MS: 45e3,
   MAX_CONCURRENT: 512,
@@ -125,8 +125,10 @@ var computeSha224Core = (inputStr) => {
   let hState = [3238371032, 914150663, 812702999, 4144912697, 4290775857, 1750603025, 1694076839, 3204075428];
   const messageBitLength = inputStr.length * 8;
   inputStr += String.fromCharCode(128);
-  while (inputStr.length * 8 % 512 !== 448) {
-    inputStr += String.fromCharCode(0);
+  const currentLen = inputStr.length;
+  const padLen = (56 - currentLen % 64 + 64) % 64;
+  if (padLen > 0) {
+    inputStr += String.fromCharCode(0).repeat(padLen);
   }
   const highBits = Math.floor(messageBitLength / 4294967296);
   const lowBits = messageBitLength & 4294967295;
@@ -204,9 +206,8 @@ function base64ToArrayBuffer(base64Str) {
   }
   try {
     base64Str = base64Str.replace(/-/g, "+").replace(/_/g, "/");
-    while (base64Str.length % 4) {
-      base64Str += "=";
-    }
+    const padLen = (4 - base64Str.length % 4) % 4;
+    if (padLen > 0) base64Str = base64Str.padEnd(base64Str.length + padLen, "=");
     const decode = atob(base64Str);
     const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
     return { earlyData: arryBuffer.buffer, error: null };
@@ -216,10 +217,7 @@ function base64ToArrayBuffer(base64Str) {
 }
 async function cleanList(content) {
   if (!content) return [];
-  let replaced = content.replace(/[\t"'\r\n]+/g, ",").replace(/,+/g, ",");
-  if (replaced.startsWith(",")) replaced = replaced.slice(1);
-  if (replaced.endsWith(",")) replaced = replaced.slice(0, -1);
-  return replaced.split(",").filter(Boolean);
+  return content.split(/[\t"'\r\n,]+/).filter(Boolean);
 }
 function safeCloseWebSocket(socket) {
   try {
@@ -311,19 +309,16 @@ async function getKV(env, key) {
     if (match) {
       const val2 = await match.text();
       if (val2 === CACHE_NULL_SENTINEL) {
-        void(0);
         GLOBAL_KV_CACHE.set(key, null);
         return null;
       }
       if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
       GLOBAL_KV_CACHE.set(key, val2);
-      void(0);
       return val2;
     }
   } catch (e) {
     void(0);
   }
-  void(0);
   let val = null;
   try {
     val = await env.KV.get(key);
@@ -341,7 +336,6 @@ async function getKV(env, key) {
   });
   try {
     cache.put(cacheKeyUrl, response).catch((e) => void(0));
-    void(0);
   } catch (e) {
     void(0);
   }
