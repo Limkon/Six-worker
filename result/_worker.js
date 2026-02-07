@@ -422,7 +422,7 @@ var StreamCipher = class {
 };
 
 var configCache = {};
-var REMOTE_CONFIG_TTL = 5 * 60 * 1e3;
+var REMOTE_CONFIG_TTL = 360 * 60 * 1e3;
 var remoteConfigCache = {
   data: {},
   lastFetch: 0
@@ -1353,101 +1353,122 @@ function parseSocks5Config(address) {
   if (hostname.startsWith("[") && hostname.endsWith("]")) hostname = hostname.slice(1, -1);
   return { username, password, hostname, port };
 }
+async function readWithTimeout(reader, timeoutMs = 5e3) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`Read timeout (${timeoutMs}ms)`)), timeoutMs);
+  });
+  try {
+    const result = await Promise.race([reader.read(), timeoutPromise]);
+    return result;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote, log, isUDP = false) {
   const config = parseSocks5Config(socks5Addr);
   if (!config) throw new Error("Socks5 config missing");
   const { username, password, hostname, port } = config;
+  const HANDSHAKE_TIMEOUT = 5e3;
   const socket = connect({ hostname, port });
-  await socket.opened;
-  const writer = socket.writable.getWriter();
-  const reader = socket.readable.getReader();
-  const encoder = new TextEncoder();
-  await writer.write(new Uint8Array([5, 1, 2]));
-  let { value: res } = await reader.read();
-  if (!res || res.length < 2 || res[0] !== 5 || res[1] === 255) throw new Error("SOCKS5 greeting failed");
-  if (res[1] === 2) {
-    if (!username || !password) throw new Error("SOCKS5 auth required");
-    const uBytes = encoder.encode(username);
-    const pBytes = encoder.encode(password);
-    const authReq = new Uint8Array([1, uBytes.length, ...uBytes, pBytes.length, ...pBytes]);
-    await writer.write(authReq);
-    const { value: authRes } = await reader.read();
-    if (!authRes || authRes.length < 2 || authRes[0] !== 1 || authRes[1] !== 0) throw new Error("SOCKS5 auth failed");
-  }
-  let DSTADDR;
-  if (isUDP) {
-    DSTADDR = new Uint8Array([1, 0, 0, 0, 0]);
-  } else {
-    switch (addressType) {
-      case CONSTANTS.ADDRESS_TYPE_IPV4:
-        DSTADDR = new Uint8Array([1, ...addressRemote.split(".").map(Number)]);
-        break;
-      case CONSTANTS.ADDRESS_TYPE_IPV6:
-      case CONSTANTS.ATYP_TROJAN_IPV6:
-        const v6Parts = parseIPv6(addressRemote.replace(/[\[\]]/g, ""));
-        if (!v6Parts) throw new Error("Invalid IPv6 address");
-        const v6Bytes = new Uint8Array(16);
-        for (let i = 0; i < 8; i++) {
-          v6Bytes[i * 2] = v6Parts[i] >> 8 & 255;
-          v6Bytes[i * 2 + 1] = v6Parts[i] & 255;
-        }
-        DSTADDR = new Uint8Array([4, ...v6Bytes]);
-        break;
-      default:
-        const domainBytes = encoder.encode(addressRemote);
-        DSTADDR = new Uint8Array([3, domainBytes.length, ...domainBytes]);
+  try {
+    await socket.opened;
+    const writer = socket.writable.getWriter();
+    const reader = socket.readable.getReader();
+    const encoder = new TextEncoder();
+    await writer.write(new Uint8Array([5, 1, 2]));
+    let { value: res } = await readWithTimeout(reader, HANDSHAKE_TIMEOUT);
+    if (!res || res.length < 2 || res[0] !== 5 || res[1] === 255) throw new Error("SOCKS5 greeting failed");
+    if (res[1] === 2) {
+      if (!username || !password) throw new Error("SOCKS5 auth required");
+      const uBytes = encoder.encode(username);
+      const pBytes = encoder.encode(password);
+      const authReq = new Uint8Array([1, uBytes.length, ...uBytes, pBytes.length, ...pBytes]);
+      await writer.write(authReq);
+      const { value: authRes } = await readWithTimeout(reader, HANDSHAKE_TIMEOUT);
+      if (!authRes || authRes.length < 2 || authRes[0] !== 1 || authRes[1] !== 0) throw new Error("SOCKS5 auth failed");
     }
-  }
-  const cmd = isUDP ? 3 : 1;
-  const portBytes = isUDP ? [0, 0] : [portRemote >> 8, portRemote & 255];
-  const socksRequest = new Uint8Array([5, cmd, 0, ...DSTADDR, ...portBytes]);
-  await writer.write(socksRequest);
-  const { value: connRes } = await reader.read();
-  if (!connRes || connRes.length < 2 || connRes[0] !== 5 || connRes[1] !== 0) {
-    throw new Error(`SOCKS5 connection failed (CMD: ${cmd}, REP: ${connRes ? connRes[1] : "empty"})`);
-  }
-  if (isUDP) {
-    let bndAddr = "";
-    let bndPort = 0;
-    let addrType = connRes[3];
-    let offset = 4;
-    if (addrType === 1) {
-      bndAddr = connRes.slice(offset, offset + 4).join(".");
-      offset += 4;
-    } else if (addrType === 3) {
-      const len = connRes[offset];
-      offset++;
-      bndAddr = new TextDecoder().decode(connRes.slice(offset, offset + len));
-      offset += len;
-    } else if (addrType === 4) {
-      const hex = [];
-      for (let i = 0; i < 16; i++) hex.push(connRes[offset + i].toString(16).padStart(2, "0"));
-      bndAddr = `[${hex.join("").match(/.{1,4}/g).join(":")}]`;
-      offset += 16;
+    let DSTADDR;
+    if (isUDP) {
+      DSTADDR = new Uint8Array([1, 0, 0, 0, 0]);
+    } else {
+      switch (addressType) {
+        case CONSTANTS.ADDRESS_TYPE_IPV4:
+          DSTADDR = new Uint8Array([1, ...addressRemote.split(".").map(Number)]);
+          break;
+        case CONSTANTS.ADDRESS_TYPE_IPV6:
+        case CONSTANTS.ATYP_TROJAN_IPV6:
+          const v6Parts = parseIPv6(addressRemote.replace(/[\[\]]/g, ""));
+          if (!v6Parts) throw new Error("Invalid IPv6 address");
+          const v6Bytes = new Uint8Array(16);
+          for (let i = 0; i < 8; i++) {
+            v6Bytes[i * 2] = v6Parts[i] >> 8 & 255;
+            v6Bytes[i * 2 + 1] = v6Parts[i] & 255;
+          }
+          DSTADDR = new Uint8Array([4, ...v6Bytes]);
+          break;
+        default:
+          const domainBytes = encoder.encode(addressRemote);
+          DSTADDR = new Uint8Array([3, domainBytes.length, ...domainBytes]);
+      }
     }
-    const p1 = connRes[offset];
-    const p2 = connRes[offset + 1];
-    bndPort = p1 << 8 | p2;
+    const cmd = isUDP ? 3 : 1;
+    const portBytes = isUDP ? [0, 0] : [portRemote >> 8, portRemote & 255];
+    const socksRequest = new Uint8Array([5, cmd, 0, ...DSTADDR, ...portBytes]);
+    await writer.write(socksRequest);
+    const { value: connRes } = await readWithTimeout(reader, HANDSHAKE_TIMEOUT);
+    if (!connRes || connRes.length < 2 || connRes[0] !== 5 || connRes[1] !== 0) {
+      throw new Error(`SOCKS5 connection failed (CMD: ${cmd}, REP: ${connRes ? connRes[1] : "empty"})`);
+    }
+    if (isUDP) {
+      let bndAddr = "";
+      let bndPort = 0;
+      let addrType = connRes[3];
+      let offset = 4;
+      if (addrType === 1) {
+        bndAddr = connRes.slice(offset, offset + 4).join(".");
+        offset += 4;
+      } else if (addrType === 3) {
+        const len = connRes[offset];
+        offset++;
+        bndAddr = new TextDecoder().decode(connRes.slice(offset, offset + len));
+        offset += len;
+      } else if (addrType === 4) {
+        const hex = [];
+        for (let i = 0; i < 16; i++) hex.push(connRes[offset + i].toString(16).padStart(2, "0"));
+        bndAddr = `[${hex.join("").match(/.{1,4}/g).join(":")}]`;
+        offset += 16;
+      }
+      const p1 = connRes[offset];
+      const p2 = connRes[offset + 1];
+      bndPort = p1 << 8 | p2;
+      writer.releaseLock();
+      reader.releaseLock();
+      socket.isUdpControl = true;
+      socket.bndAddr = bndAddr;
+      socket.bndPort = bndPort;
+      socket.originalHost = hostname;
+      return socket;
+    }
+    let headLen = 0;
+    if (connRes.length >= 4) {
+      if (connRes[3] === 1) headLen = 10;
+      else if (connRes[3] === 4) headLen = 22;
+      else if (connRes[3] === 3) headLen = 7 + connRes[4];
+    }
+    if (headLen > 0 && connRes.length > headLen) {
+      socket.initialData = connRes.subarray(headLen);
+    }
     writer.releaseLock();
     reader.releaseLock();
-    socket.isUdpControl = true;
-    socket.bndAddr = bndAddr;
-    socket.bndPort = bndPort;
-    socket.originalHost = hostname;
     return socket;
+  } catch (err) {
+    try {
+      socket.close();
+    } catch (e) {
+    }
+    throw err;
   }
-  let headLen = 0;
-  if (connRes.length >= 4) {
-    if (connRes[3] === 1) headLen = 10;
-    else if (connRes[3] === 4) headLen = 22;
-    else if (connRes[3] === 3) headLen = 7 + connRes[4];
-  }
-  if (headLen > 0 && connRes.length > headLen) {
-    socket.initialData = connRes.subarray(headLen);
-  }
-  writer.releaseLock();
-  reader.releaseLock();
-  return socket;
 }
 async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null, isUDP = false) {
   let isTimedOut = false;
@@ -1679,21 +1700,29 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
         return;
       }
       udpBuffer = concatUint8(udpBuffer, chunk);
-      if (udpBuffer.length > 4096) {
+      if (udpBuffer.length > 16384) {
         udpBuffer = new Uint8Array(0);
         return;
       }
-      const headerLen = getSocks5UdpHeaderLength(udpBuffer);
-      if (headerLen > 0) {
+      while (udpBuffer.length > 0) {
+        const headerLen = getSocks5UdpHeaderLength(udpBuffer);
+        if (headerLen === 0) {
+          udpBuffer = new Uint8Array(0);
+          break;
+        }
+        if (headerLen === -1) {
+          break;
+        }
         if (udpBuffer.length >= headerLen) {
           const payload = udpBuffer.subarray(headerLen);
           const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
           responseHeader = null;
           webSocket.send(dataToSend);
           udpBuffer = new Uint8Array(0);
+          break;
+        } else {
+          break;
         }
-      } else if (headerLen === 0) {
-        udpBuffer = new Uint8Array(0);
       }
     },
     close() {
@@ -2992,7 +3021,6 @@ async function prepareSubscriptionData(ctx, env) {
   ctx.hardcodedLinks = hardcodedLinks;
   if (ctx.addresses.length === 0 && ctx.hardcodedLinks.length === 0) {
     ctx.addresses.push("www.visa.com.tw:443#CF-Default-1");
-    ctx.addresses.push("usa.visa.com:8443#CF-Default-2");
   }
 }
 async function handleSubscription(request, env, ctx, subPath, hostName) {
