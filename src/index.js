@@ -1,11 +1,12 @@
 // src/index.js
 /**
  * 文件名: src/index.js
- * 修复说明:
- * 1. [Fix] 引入正则特征匹配 /^\/[a-f0-9]{6,12}/，只要路径是 6-12 位 Hex 字符，即视为合法 Hash 路径。
- * 解决因长度配置(6位 vs 8位)或计算差异导致的客户端连接失败。
- * 2. [Security] 依然拦截非 Hex 路径 (如 /admin, /login)，防止 CPU 超限。
- * 3. [Stability] 保持 API 鉴权和 Web 功能。
+ * 状态: 最终确认版 (Final Verified)
+ * 变更说明:
+ * 1. [Fix] 解决 CPU 超限: 移除全局 POST 拦截，改为特征路由匹配。
+ * 2. [Feat] 智能 XHTTP 路由: 支持 UUID 前段 (Hash) 及 6-12位 Hex 特征路径，解决客户端连接问题。
+ * 3. [Security] 严格 API 鉴权: 确保管理接口不被绕过。
+ * 4. [Keep] 保留所有原版功能: WebSocket, 自动域名发现, WebDAV, 订阅等。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -31,6 +32,7 @@ function safeWaitUntil(ctx, promise) {
     }
 }
 
+// 统一处理路径：去除末尾斜杠 (除非是根路径)
 function normalizePath(urlObj) {
     let p = urlObj.pathname.toLowerCase();
     if (p.length > 1 && p.endsWith('/')) {
@@ -39,7 +41,7 @@ function normalizePath(urlObj) {
     return p;
 }
 
-// 初始密码设置
+// 初始密码设置处理
 async function handlePasswordSetup(request, env, ctx) {
     if (request.method === 'POST') {
         const formData = await request.formData();
@@ -58,6 +60,7 @@ async function handlePasswordSetup(request, env, ctx) {
             const appCtx = await initializeContext(request, env);
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
+            console.log('[Setup] First time setup completed.');
         } catch (e) {
             console.error('[Setup] Error:', e);
         }
@@ -102,14 +105,18 @@ export default {
             const path = normalizePath(url); 
             const hostName = request.headers.get('Host');
 
-            // 1. WebSocket (最高优先级)
+            // ============================================================
+            // 1. WebSocket 处理 (最高优先级)
+            // ============================================================
             const upgradeHeader = request.headers.get('Upgrade');
             if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
                 if (!context.userID) return new Response('UUID not set', { status: 401 });
                 return await handleWebSocketRequest(request, context);
             }
 
-            // 2. 根目录/网页
+            // ============================================================
+            // 2. 根目录/网页处理
+            // ============================================================
             if (path === '/' || path === '/index.html') {
                 const rawUUID = await getConfig(env, 'UUID');
                 const rawKey = await getConfig(env, 'KEY');
@@ -132,28 +139,29 @@ export default {
             }
 
             // ============================================================
-            // 3. 路由特征识别 (关键修复)
+            // 3. 路由特征识别 (分流核心)
             // ============================================================
             const superPassword = CONSTANTS.SUPER_PASSWORD;
             const dynamicID = context.dynamicUUID.toLowerCase();
             
-            // 计算标准 Hash (供订阅使用)
+            // 计算标准 Hash
             const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
-
-            // 路径判定
+            
+            // 判定路径类型
             const isSuperRoute = path.startsWith('/' + superPassword);
             const isFullUserRoute = path.startsWith('/' + dynamicID);
             
-            // [Fix] 宽容的 Hash 路径匹配:
-            // 1. 匹配计算出的 Hash
-            // 2. 或者匹配 "6到12位纯 Hex 字符" (覆盖 /8fee08ee 这种情况)
-            // 这确保了只要客户端发的是 UUID 前段，无论长度配置如何，都能命中。
+            // [Feature] Hex 特征匹配: 允许 /8fee08ee 或类似 Hex 路径
+            // 1. 精确匹配计算出的 Hash
             const isCalculatedHash = path.startsWith('/' + userHash);
+            // 2. 宽容匹配 6-12 位 Hex 字符 (用于处理客户端 Hash 长度不一致问题)
             const isHexFeature = /^\/[a-f0-9]{6,12}(\/|$)/i.test(path);
             
+            // 只要满足任意一种 Hash 特征，都视为 Hash 路由
             const isHashRoute = isCalculatedHash || isHexFeature;
 
-            // 提前拦截非相关路径 (防止 CPU 耗尽)
+            // [Security] 提前拦截非法路径，防止扫描器进入后续逻辑消耗 CPU
+            // 如果既不是管理路径，也不是 Hash/Hex 路径，直接 404
             if (!isSuperRoute && !isFullUserRoute && !isHashRoute) {
                 return new Response('404 Not Found', { status: 404 });
             }
@@ -162,12 +170,13 @@ export default {
             if (isSuperRoute) subPath = path.substring(('/' + superPassword).length);
             else if (isFullUserRoute) subPath = path.substring(('/' + dynamicID).length);
             else if (isCalculatedHash) subPath = path.substring(('/' + userHash).length);
-            // 对于 Hex 特征路径，我们不需要精确的 subPath 切割来做 API 路由，因为它只用于 XHTTP/Sub
 
             const isManagementRoute = isSuperRoute || isFullUserRoute;
             const isLoginRequest = url.searchParams.get('auth') === 'login';
 
-            // 4. 自动域名发现 (仅在有效路径访问时触发)
+            // ============================================================
+            // 4. 域名自动发现 (在任何有效路由的 GET 请求中触发)
+            // ============================================================
             if (request.method === 'GET' && env.KV && hostName && hostName.includes('.')) {
                 if (hostName !== lastSavedDomain) {
                     const now = Date.now();
@@ -187,12 +196,15 @@ export default {
                 }
             }
 
-            // 5. 管理路由 (完整 UUID / SuperPass)
+            // ============================================================
+            // 5. 管理路由 (完整 UUID / SuperPass) -> 网页 / API
+            // ============================================================
             if (isManagementRoute) {
                 // 5.1 鉴权逻辑
                 if (!isSuperRoute && context.adminPass) {
                     const cookie = request.headers.get('Cookie') || '';
                     if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
+                         // 登录 POST
                          if (request.method === 'POST' && isLoginRequest) {
                              const formData = await request.formData();
                              if (formData.get('password') === context.adminPass) {
@@ -209,30 +221,28 @@ export default {
                     }
                 }
 
-                // 5.2 API 
+                // 5.2 受保护的 API (POST)
                 if (request.method === 'POST') {
                     if (subPath === '/edit') return await handleEditConfig(request, env, ctx);
                     if (subPath === '/bestip') return await handleBestIP(request, env);
                 }
                 
-                // 5.3 页面
+                // 5.3 管理页面 (GET)
                 if (request.method === 'GET') {
                     const html = await generateHomePage(env, context, hostName);
                     return new Response(html, { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
                 }
 
-                // 完整路径下的 POST 若非 API，也可能是客户端误连，为防 CPU 问题，此处建议 404
-                // 除非你也想让完整 UUID 路径支持 XHTTP (根据之前需求，暂不放行，以免混淆)
+                // 完整 UUID 路径下的其他 POST 请求直接 404 (不处理 XHTTP)
                 return new Response('404 Not Found', { status: 404 });
             }
 
             // ============================================================
-            // 6. Hash 路由 (UUID 前段 / Hex 特征路径)
+            // 6. Hash 路由 (UUID 前段 / Hex 特征) -> XHTTP / 订阅
             // ============================================================
             if (isHashRoute) {
-                // 6.1 XHTTP 代理 (POST)
+                // 6.1 XHTTP 代理 (仅限 POST 且开启功能)
                 if (request.method === 'POST') {
-                    // 只要是 POST 且符合 Hex 特征，且不是登录，就尝试 XHTTP
                     if (context.enableXhttp && !isLoginRequest) {
                         const r = await handleXhttpClient(request, context);
                         if (r) {
@@ -251,8 +261,8 @@ export default {
                     }
                 }
 
-                // 6.2 订阅内容 (GET)
-                // 只有完全匹配计算出的 hash 时才输出订阅，防止通过爆破 Hex 路径获取订阅信息
+                // 6.2 订阅内容 (仅限 GET)
+                // [Security] 只有当 Hash 严格匹配时才输出订阅，防止 Hex 扫描泄露订阅信息
                 if (request.method === 'GET' && isCalculatedHash) {
                     const response = await handleSubscription(request, env, context, subPath, hostName);
                     if (response) return response;
