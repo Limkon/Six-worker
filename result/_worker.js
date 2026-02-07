@@ -422,7 +422,7 @@ var StreamCipher = class {
 };
 
 var configCache = {};
-var REMOTE_CONFIG_TTL = 560 * 60 * 1e3;
+var REMOTE_CONFIG_TTL = 5 * 60 * 1e3;
 var remoteConfigCache = {
   data: {},
   lastFetch: 0
@@ -2874,21 +2874,31 @@ async function fetchAndParseCSV(csvUrl, isTLS, httpsPorts, DLS, remarkIndex) {
     const response = await fetch(csvUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
     if (!response.ok) return [];
     const text = await response.text();
-    const lines = text.split(/\r?\n/);
+    const lines = text.split(/\r?\n/).filter((l) => l.trim() !== "");
     if (lines.length === 0) return [];
-    const header = lines[0].split(",");
+    let headerLine = lines[0];
+    if (headerLine.charCodeAt(0) === 65279) {
+      headerLine = headerLine.slice(1);
+    }
+    const header = headerLine.split(",").map((h) => h.trim().toUpperCase());
     const tlsIndex = header.indexOf("TLS");
-    if (tlsIndex === -1) return [];
+    if (tlsIndex === -1) {
+      void(0);
+      return [];
+    }
     const results = [];
     for (let i = 1; i < lines.length; i++) {
       const columns = lines[i].split(",");
-      if (columns.length > tlsIndex && columns[tlsIndex] && columns[tlsIndex].toUpperCase() === (isTLS ? "TRUE" : "FALSE")) {
-        const speed = parseFloat(columns[columns.length - 1]);
-        if (speed > DLS) {
-          const ip = columns[0];
-          const port = columns[1];
-          const remark = columns[tlsIndex + remarkIndex] || "CSV";
-          results.push(`${ip}:${port}#${remark}`);
+      if (columns.length > tlsIndex && columns[tlsIndex]) {
+        const tlsValue = columns[tlsIndex].trim().toUpperCase();
+        if (tlsValue === (isTLS ? "TRUE" : "FALSE")) {
+          const speed = parseFloat(columns[columns.length - 1]);
+          if (speed > DLS) {
+            const ip = columns[0].trim();
+            const port = columns[1].trim();
+            const remark = (columns[tlsIndex + remarkIndex] || "CSV").trim();
+            results.push(`${ip}:${port}#${remark}`);
+          }
         }
       }
     }
@@ -3335,12 +3345,17 @@ async function handleBestIP(request, env) {
     try {
       const data = await request.json();
       const action = url.searchParams.get("action") || "save";
+      let inputIps = [];
+      if (data.ips && Array.isArray(data.ips)) {
+        inputIps = data.ips.slice(0, 50).map((line) => String(line).trim().substring(0, 100)).filter(Boolean);
+      }
       if (action === "append") {
         const existing = await getKV(env, txt) || "";
-        const newContent = [...new Set([...existing.split("\n"), ...data.ips].filter(Boolean))].join("\n");
+        const existingLines = existing.split("\n").map((l) => l.trim()).filter(Boolean);
+        const newContent = [...  new Set([...existingLines, ...inputIps])].join("\n");
         await env.KV.put(txt, newContent);
       } else {
-        await env.KV.put(txt, data.ips.join("\n"));
+        await env.KV.put(txt, inputIps.join("\n"));
       }
       await cleanConfigCache([txt]);
       if (typeof clearKVCache === "function") await clearKVCache([txt]);
