@@ -1362,11 +1362,17 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
   const encoder = new TextEncoder();
-  await writer.write(new Uint8Array([5, 1, 2]));
+  if (username && password) {
+    await writer.write(new Uint8Array([5, 1, 2]));
+  } else {
+    await writer.write(new Uint8Array([5, 1, 0]));
+  }
   let { value: res } = await reader.read();
-  if (!res || res.length < 2 || res[0] !== 5 || res[1] === 255) throw new Error("SOCKS5 greeting failed");
-  if (res[1] === 2) {
-    if (!username || !password) throw new Error("SOCKS5 auth required");
+  if (!res || res.length < 2 || res[0] !== 5) throw new Error("SOCKS5 greeting failed");
+  const selectedMethod = res[1];
+  if (selectedMethod === 255) throw new Error("SOCKS5 no acceptable methods");
+  if (selectedMethod === 2) {
+    if (!username || !password) throw new Error("SOCKS5 auth required but credentials missing");
     const uBytes = encoder.encode(username);
     const pBytes = encoder.encode(password);
     const authReq = new Uint8Array([1, uBytes.length, ...uBytes, pBytes.length, ...pBytes]);
@@ -1519,7 +1525,7 @@ async function createUnifiedConnection(ctx, addressRemote, portRemote, addressTy
   }
   if (!useSocks && ctx.dns64) {
     try {
-      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64, ctx);
       if (v6Address) {
         return await connectWithTimeout(v6Address, portRemote, PROXY_TIMEOUT, log);
       }
@@ -1672,6 +1678,7 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
   udpWriter.releaseLock();
   let responseHeader = vlessResponseHeader;
   let udpBuffer = new Uint8Array(0);
+  let isHeaderComplete = false;
   const MAX_UDP_BUFFER = 65535;
   await udpSocket.readable.pipeTo(new WritableStream({
     async write(chunk, controller) {
@@ -1684,17 +1691,29 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
         udpBuffer = new Uint8Array(0);
         return;
       }
-      const headerLen = getSocks5UdpHeaderLength(udpBuffer);
-      if (headerLen > 0) {
-        if (udpBuffer.length >= headerLen) {
-          const payload = udpBuffer.subarray(headerLen);
-          const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
+      if (!isHeaderComplete) {
+        const headerLen = getSocks5UdpHeaderLength(udpBuffer);
+        if (headerLen > 0) {
+          if (udpBuffer.length >= headerLen) {
+            const payload = udpBuffer.subarray(headerLen);
+            const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
+            responseHeader = null;
+            if (dataToSend.length > 0) {
+              webSocket.send(dataToSend);
+            }
+            isHeaderComplete = true;
+            udpBuffer = new Uint8Array(0);
+          }
+        } else if (headerLen === 0) {
+          udpBuffer = new Uint8Array(0);
+        }
+      } else {
+        if (udpBuffer.length > 0) {
+          const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...udpBuffer]) : udpBuffer;
           responseHeader = null;
           webSocket.send(dataToSend);
           udpBuffer = new Uint8Array(0);
         }
-      } else if (headerLen === 0) {
-        udpBuffer = new Uint8Array(0);
       }
     },
     close() {
@@ -1730,7 +1749,7 @@ async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressR
     }
     prepareRetry();
     try {
-      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
+      const v6Address = await resolveToIPv6(addressRemote, ctx.dns64, ctx);
       if (!v6Address) throw new Error("DNS64 failed");
       const natSocket = await connectWithTimeout(v6Address, portRemote, 1e4, log);
       const writer = natSocket.writable.getWriter();
