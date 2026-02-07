@@ -422,7 +422,7 @@ var StreamCipher = class {
 };
 
 var configCache = {};
-var REMOTE_CONFIG_TTL = 5 * 60 * 1e3;
+var REMOTE_CONFIG_TTL = 560 * 60 * 1e3;
 var remoteConfigCache = {
   data: {},
   lastFetch: 0
@@ -432,11 +432,18 @@ var proxyIPRemoteCache = {
   expires: 0,
   fetchingPromise: null
 };
+var uuidCache = {
+  key: null,
+  data: null,
+  lastUpdate: 0
+};
+var UUID_CACHE_TTL = 10 * 60 * 1e3;
 async function cleanConfigCache(updatedKeys) {
   if (!updatedKeys || !Array.isArray(updatedKeys) || updatedKeys.includes("REMOTE_CONFIG_URL")) {
     configCache = {};
     remoteConfigCache = { data: {}, lastFetch: 0 };
     proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
+    uuidCache = { key: null, data: null, lastUpdate: 0 };
     await clearKVCache();
     return;
   }
@@ -446,6 +453,9 @@ async function cleanConfigCache(updatedKeys) {
   await clearKVCache(updatedKeys);
   if (updatedKeys.includes("PROXYIP")) {
     proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
+  }
+  if (updatedKeys.some((k) => ["UUID", "KEY", "TIME", "UPTIME", "SUPER_PASSWORD"].includes(k))) {
+    uuidCache = { key: null, data: null, lastUpdate: 0 };
   }
 }
 async function loadRemoteConfig(env, forceReload = false) {
@@ -519,6 +529,20 @@ async function getConfig(env, key, defaultValue = void 0) {
   configCache[key] = finalVal;
   return finalVal;
 }
+async function getCachedUUID(seed, timeDays, updateHour) {
+  const cacheKey = `${seed}|${timeDays}|${updateHour}`;
+  const now = Date.now();
+  if (uuidCache.key === cacheKey && uuidCache.data && now - uuidCache.lastUpdate < UUID_CACHE_TTL) {
+    return uuidCache.data;
+  }
+  const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
+  uuidCache = {
+    key: cacheKey,
+    data: userIDs,
+    lastUpdate: now
+  };
+  return userIDs;
+}
 async function initializeContext(request, env) {
   const url = new URL(request ? request.url : "http://localhost");
   const forceReload = url.searchParams.get("flush") === "1";
@@ -526,6 +550,7 @@ async function initializeContext(request, env) {
     void(0);
     configCache = {};
     proxyIPRemoteCache = { data: [], expires: 0, fetchingPromise: null };
+    uuidCache = { key: null, data: null, lastUpdate: 0 };
     await clearKVCache();
   }
   const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0");
@@ -580,7 +605,7 @@ async function initializeContext(request, env) {
     if (seed) {
       const timeDays = Number(timeDaysStr) || 0;
       const updateHour = Number(updateHourStr) || 0;
-      const userIDs = await generateDynamicUUID(seed, timeDays, updateHour);
+      const userIDs = await getCachedUUID(seed, timeDays, updateHour);
       ctx.userID = userIDs[0];
       ctx.userIDLow = userIDs[1];
       ctx.dynamicUUID = seed;
@@ -591,7 +616,7 @@ async function initializeContext(request, env) {
     if (superPass) {
       const timeDays = Number(timeDaysStr) || 0;
       const updateHour = Number(updateHourStr) || 0;
-      const userIDs = await generateDynamicUUID(superPass, timeDays, updateHour);
+      const userIDs = await getCachedUUID(superPass, timeDays, updateHour);
       ctx.userID = userIDs[0];
       ctx.userIDLow = userIDs[1];
       ctx.dynamicUUID = superPass;
@@ -740,9 +765,13 @@ async function processVlessHeader(vlessBuffer, expectedUserIDs) {
         break;
       case CONSTANTS.ADDRESS_TYPE_IPV6:
         addressLength = 16;
-        const ipv6View = new DataView(buffer.buffer, buffer.byteOffset + addressIndex, 16);
         const ipv6 = [];
-        for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2, false).toString(16));
+        for (let i = 0; i < 8; i++) {
+          const idx = addressIndex + i * 2;
+          const high = buffer[idx];
+          const low = buffer[idx + 1];
+          ipv6.push((high << 8 | low).toString(16));
+        }
         addressRemote = "[" + ipv6.join(":") + "]";
         break;
       default:
