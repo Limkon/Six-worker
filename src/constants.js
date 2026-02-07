@@ -1,7 +1,7 @@
 export const CONSTANTS = {
   SUPER_PASSWORD: '771571215.',
   // 支持配置多个默认 ProxyIP，使用英文逗号分隔，例如: 'xio.hpc.tw, 1.2.3.4, [2001:db8::1]'
-  DEFAULT_PROXY_IP: 'soho.perslist.com:443',
+  DEFAULT_PROXY_IP: 'xioo.mooo.com',
   SUB_HASH_LENGTH: 6,
   IDLE_TIMEOUT_MS: 45000,
   MAX_CONCURRENT: 512,
