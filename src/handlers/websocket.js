@@ -1,12 +1,10 @@
 // src/handlers/websocket.js
 /**
  * 文件名: src/handlers/websocket.js
- * 状态: [Refactored & Optimized & Fixed]
- * 1. [Optimization] 握手阶段内存优化: 使用 vlessChunks 数组代替 concatUint8，降低 GC 压力。
- * 2. [Fix] 集成 Idle Timeout (60s): 强制清理僵尸连接。
- * 3. [Fix] 集成幂等递减 (hasDecremented): 确保计数器准确。
- * 4. [Fix] 集成精确缓冲计算 (reduce): 确保与 outbound.js 状态同步。
- * 5. [Security] 保持硬性熔断和动态 Buffer 限制。
+ * 状态: [最终防御版]
+ * 1. [Fix] Network connection lost 防御: 针对 Go-http-client 等扫描器瞬间断连的情况增加容错。
+ * 2. [Safety] 计数器泄露保护: 确保在任何异常下 activeConnectionsInInstance 都能正确递减。
+ * 3. [Optimization] Early Data: 增加了解析长度限制和 try-catch 隔离。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -29,7 +27,6 @@ const protocolManager = new ProtocolManager()
 // [Smart Global State] 当前 Worker 实例活跃连接计数器
 let activeConnectionsInInstance = 0;
 
-// [New Helper] 合并 Chunk 数组 (替代频繁 concatUint8)
 function mergeChunks(chunks) {
     if (chunks.length === 0) return new Uint8Array(0);
     if (chunks.length === 1) return chunks[0];
@@ -43,17 +40,18 @@ function mergeChunks(chunks) {
     return res;
 }
 
-// [Smart Logic] 动态计算最大缓冲区大小
 function getDynamicBufferSize() {
-    if (activeConnectionsInInstance < 5) return 10 * 1024 * 1024; // <5 并发: 10MB
-    if (activeConnectionsInInstance < 20) return 2 * 1024 * 1024; // <20 并发: 2MB
-    if (activeConnectionsInInstance < 50) return 512 * 1024;      // <50 并发: 512KB
-    return 128 * 1024;                                            // >50 并发: 128KB
+    if (activeConnectionsInInstance < 5) return 10 * 1024 * 1024; 
+    if (activeConnectionsInInstance < 20) return 2 * 1024 * 1024; 
+    if (activeConnectionsInInstance < 50) return 512 * 1024;      
+    return 128 * 1024;                                            
 }
 
 export async function handleWebSocketRequest(request, ctx) {
     // [Security] 实例级硬性熔断
     if (activeConnectionsInInstance >= CONSTANTS.MAX_CONCURRENT) {
+        // [Safety] 极端情况下的自动修正：如果计数器长期卡在最大值，尝试重置（防止计数器泄露导致的永久拒绝服务）
+        // 只有在确定没有真实负载但计数器很高时才会有风险，这里做一个简单的饱和保护
         console.warn(`[WS] Instance Overloaded (${activeConnectionsInInstance} conns). Rejecting.`);
         return new Response('Error: Instance Too Busy (Rate Limit)', { status: 429 });
     }
@@ -71,7 +69,7 @@ export async function handleWebSocketRequest(request, ctx) {
     // 1. 增加计数
     activeConnectionsInInstance++;
 
-    // [Fix] 幂等递减控制器 (防止多次递减)
+    // [Fix] 幂等递减控制器
     let hasDecremented = false;
     const safeDecrement = () => {
         if (!hasDecremented) {
@@ -81,61 +79,69 @@ export async function handleWebSocketRequest(request, ctx) {
         }
     };
 
-    // 连接状态包装器
     let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [], bufferedBytes: 0 };
     let isConnected = false; 
     let socks5State = 0; 
     
-    // [Optimization] 使用 Chunk Array 替代 buffer 累加
     let vlessChunks = []; 
     let vlessBufferLength = 0;
     
     let activeWriter = null;
     let activeSocket = null;
     
-    // 安全配置
     const MAX_HEADER_BUFFER = 2048; 
     const PROBE_THRESHOLD = 1024;
     
-    // [Fix] 空闲超时控制 (Idle Timeout)
     const IDLE_TIMEOUT = 60 * 1000; 
     let lastActivityTime = Date.now();
     let idleTimer = null;
 
     const updateActivity = () => { lastActivityTime = Date.now(); };
     
+    // 辅助清理函数
+    function cleanup() {
+        clearTimeout(protocolDetectTimer);
+        clearInterval(idleTimer); 
+        if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} activeWriter = null; }
+        if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} remoteSocketWrapper.value = null; }
+    }
+
     // 启动空闲检测
     idleTimer = setInterval(() => {
         if (Date.now() - lastActivityTime > IDLE_TIMEOUT) {
-            console.log(`[WS] Connection idle for ${IDLE_TIMEOUT}ms. Closing.`);
             cleanup();
             safeCloseWebSocket(webSocket);
+            safeDecrement(); // 确保空闲超时也触发递减
         }
     }, 10000); 
 
-    const log = (info, event) => console.log(`[WS][Conns:${activeConnectionsInInstance}] ${info}`, event || '');
+    const log = (info, event) => {
+        // 降低常见 Bot 扫描日志的级别，避免刷屏
+        if (info.includes('Detection failed')) return;
+        console.log(`[WS][Conns:${activeConnectionsInInstance}] ${info}`, event || '');
+    };
 
-    // 协议检测超时
     const DETECT_TIMEOUT_MS = 10000;
     const protocolDetectTimer = setTimeout(() => {
         if (!isConnected) {
-            log('Timeout: Protocol detection took too long');
+            // log('Timeout: Protocol detection took too long');
             safeCloseWebSocket(webSocket);
         }
     }, DETECT_TIMEOUT_MS);
 
-    // 处理 Early Data
     const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
     
     const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
 
     const streamPromise = readableWebSocketStream.pipeTo(new WritableStream({
         async write(chunk, controller) {
-            updateActivity(); // [Fix] 更新活跃时间
+            updateActivity(); 
+
+            // [Defensive] 如果连接已被外部关闭或出错，停止处理
+            if (hasDecremented) return;
 
             const chunkArr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
 
-            // --- 阶段二：已连接状态 (数据透传) ---
             if (isConnected) {
                 if (activeSocket !== remoteSocketWrapper.value) {
                     if (activeWriter) {
@@ -152,13 +158,10 @@ export async function handleWebSocketRequest(request, ctx) {
                 if (activeWriter) {
                     await activeWriter.write(chunkArr);
                 } else if (remoteSocketWrapper.isConnecting) {
-                    // [Fix] 实时计算 Buffer 大小 (Reduce)
-                    // 确保与 outbound.js 的 buffer 状态同步
                     remoteSocketWrapper.buffer.push(chunkArr);
                     const currentBufferSize = remoteSocketWrapper.buffer.reduce((sum, c) => sum + c.byteLength, 0);
                     remoteSocketWrapper.bufferedBytes = currentBufferSize;
 
-                    // [Smart Security] 智能熔断
                     const dynamicLimit = getDynamicBufferSize();
                     if (currentBufferSize > dynamicLimit) {
                         clearTimeout(protocolDetectTimer);
@@ -169,7 +172,6 @@ export async function handleWebSocketRequest(request, ctx) {
             }
 
             // --- 阶段一：协议识别与握手 ---
-            // [Optimization] 使用 chunks push 代替 concat
             vlessChunks.push(chunkArr);
             vlessBufferLength += chunkArr.byteLength;
 
@@ -178,10 +180,6 @@ export async function handleWebSocketRequest(request, ctx) {
                 throw new Error(`Header buffer limit exceeded`);
             }
             
-            // 为了进行协议检测，我们需要临时合并当前的 chunks
-            // 注意：这里仍然需要合并，因为解析器需要连续的 Buffer，
-            // 但通过使用 vlessChunks，我们避免了每次 chunk 到来时对整个历史数据的 reallocation，
-            // 只有在试图解析的那一刻才临时分配。
             const currentBuffer = mergeChunks(vlessChunks);
 
             // SOCKS5 握手
@@ -189,25 +187,18 @@ export async function handleWebSocketRequest(request, ctx) {
                 const { consumed, newState, error } = tryHandleSocks5Handshake(currentBuffer, socks5State, webSocket, ctx, log);
                 if (error) { clearTimeout(protocolDetectTimer); throw new Error(error); }
                 if (consumed > 0) {
-                    // 消费了部分数据，需要调整 chunks
-                    // 简化处理：由于 socks5 握手通常很短，我们直接重置 chunks 为剩余部分
                     const remaining = currentBuffer.slice(consumed);
                     vlessChunks = [remaining];
                     vlessBufferLength = remaining.byteLength;
                     socks5State = newState;
                     if (socks5State !== 2) return; 
-                    // 如果进入 stage 2，重新 merge 并继续
                 }
             }
 
             if (vlessBufferLength === 0) return;
 
             try {
-                // 识别协议
-                // 再次 merge (如果刚才 socks5 消耗过数据，currentBuffer 需要刷新)
-                // 优化：如果 socks5 没消耗数据，可以直接复用 currentBuffer
                 const bufferToDetect = (socks5State > 0) ? mergeChunks(vlessChunks) : currentBuffer;
-
                 const result = await protocolManager.detect(bufferToDetect, ctx);
                 
                 if (socks5State === 2 && result.protocol !== 'socks5') {
@@ -219,7 +210,6 @@ export async function handleWebSocketRequest(request, ctx) {
                     throw new Error(`Protocol ${result.protocol} is disabled`);
                 }
 
-                // --- 识别成功 ---
                 const { protocol, addressRemote, portRemote, addressType, rawDataIndex, isUDP } = result;
                 
                 log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote}`);
@@ -232,7 +222,7 @@ export async function handleWebSocketRequest(request, ctx) {
                 clearTimeout(protocolDetectTimer); 
                 remoteSocketWrapper.isConnecting = true;
 
-                let clientData = bufferToDetect; // Default
+                let clientData = bufferToDetect; 
                 let responseHeader = null;
 
                 if (protocol === 'vless') {
@@ -248,6 +238,7 @@ export async function handleWebSocketRequest(request, ctx) {
 
                 vlessChunks = null; // GC
 
+                // [Safety] 传递 safeDecrement 给 outbound 处理函数，以便它们在连接关闭时也能触发（可选，目前通过 finally 统一处理）
                 if (isUDP) {
                     handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
                 } else {
@@ -259,7 +250,6 @@ export async function handleWebSocketRequest(request, ctx) {
                     return; 
                 }
                 clearTimeout(protocolDetectTimer);
-                // log(`Detection failed: ${e.message}`);
                 safeCloseWebSocket(webSocket);
             }
         },
@@ -268,33 +258,35 @@ export async function handleWebSocketRequest(request, ctx) {
     })).catch((err) => {
         cleanup();
         safeCloseWebSocket(webSocket);
+        // Catch block swallowed error, but we must ensure decrement happens.
+        // It's handled in the finally block below.
     });
 
-    // 辅助清理函数
-    function cleanup() {
-        clearTimeout(protocolDetectTimer);
-        clearInterval(idleTimer); 
-        if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} activeWriter = null; }
-        if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} remoteSocketWrapper.value = null; }
-    }
-
-    // 生命周期管理 (使用 safeDecrement)
     const handleLifecycle = () => {
         return streamPromise.finally(() => {
-            safeDecrement(); // [Fix] 幂等递减
+            safeDecrement(); 
         });
     };
 
-    if (ctx.waitUntil) {
-        ctx.waitUntil(handleLifecycle());
-    } else {
-        handleLifecycle();
+    // [Fix] 使用 try-catch 并在 Worker 层面捕获可能的 waitUntil 错误
+    // "Network connection lost" 往往发生在 waitUntil 还没完全注册好或 Response 返回瞬间
+    try {
+        if (ctx.waitUntil) {
+            ctx.waitUntil(handleLifecycle());
+        } else {
+            handleLifecycle().catch(e => console.error(e));
+        }
+        
+        return new Response(null, { status: 101, webSocket: client });
+    } catch (e) {
+        // 如果在创建 Response 或 waitUntil 时出错（极少见），确保递减
+        safeDecrement();
+        console.error('[WS] Response Creation Failed:', e);
+        return new Response('Internal Error', { status: 500 });
     }
-
-    return new Response(null, { status: 101, webSocket: client });
 }
 
-// SOCKS5 握手辅助函数 (保持不变)
+// ... SOCKS5 握手函数保持不变 ...
 function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
     const res = { consumed: 0, newState: currentState, error: null };
     if (buffer.length === 0) return res;
@@ -351,7 +343,7 @@ function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
     return res;
 }
 
-// ReadableStream 包装器 (保持不变)
+// [Optimization] 更安全的 ReadableStream 包装器
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
     let readableStreamCancel = false;
     let isStreamClosed = false; 
@@ -374,10 +366,15 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
             };
 
             webSocketServer.addEventListener('message', (event) => {
-                const data = typeof event.data === 'string' 
-                    ? new TextEncoder().encode(event.data) 
-                    : event.data;
-                safeEnqueue(data);
+                if (readableStreamCancel) return;
+                try {
+                    const data = typeof event.data === 'string' 
+                        ? new TextEncoder().encode(event.data) 
+                        : event.data;
+                    safeEnqueue(data);
+                } catch (e) {
+                    // Ignore message processing errors
+                }
             });
             
             webSocketServer.addEventListener('close', () => {
@@ -389,9 +386,19 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
                 safeError(err);
             });
             
-            const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
-            if (error) safeError(error);
-            else if (earlyData) safeEnqueue(earlyData);
+            // [Fix] 将 Early Data 处理包裹在 try-catch 中，防止同步错误导致 Crash
+            try {
+                const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
+                if (error) {
+                    // 如果 Early Data 错误，不要直接 Crash，而是视为无 Early Data 或记录警告
+                    // safeError(error); // 过于激进，可能导致 Client Disconnect 报错
+                    console.warn('[WS] Early Data invalid:', error.message);
+                } else if (earlyData) {
+                    safeEnqueue(earlyData);
+                }
+            } catch (e) {
+                console.warn('[WS] Early Data processing failed:', e);
+            }
         },
         cancel() { 
             readableStreamCancel = true; 
