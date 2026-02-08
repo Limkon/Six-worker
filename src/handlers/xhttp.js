@@ -1,8 +1,9 @@
 // src/handlers/xhttp.js
 /**
  * 文件名: src/handlers/xhttp.js
- * 最终确认版 (Refactored):
- * 1. [Fix] 修复了 DataView 在缓冲区扩容后指向旧内存导致的 IPv6 解析错误.
+ * 最终确认版 (Robust Refactor):
+ * 1. [Fix] DataView 安全性修复: 移除长生命周期的 view 变量，采用即用即弃策略，
+ * 彻底防止因 buffer 扩容/重分配导致的引用失效问题。
  * 2. [Full] 包含所有原版核心逻辑 (UUID校验, 协议解析, 黑名单, 超时控制).
  * 3. [Elegant] 使用 safe_read/safe_cancel 消除 "Stream was cancelled" 报错.
  * 4. [Robust] 保持 Idle Timeout 的强力清理逻辑.
@@ -134,13 +135,11 @@ async function read_xhttp_header(readable, ctx) {
         if (cache[cmdIndex] !== 1) throw new Error('unsupported command: ' + cache[cmdIndex]);
         
         const portIndex = cmdIndex + 1;
-        // 注意：此处使用临时的 DataView 读取端口，因为后续 read_at_least 可能改变 cache 的引用
-        let port;
-        {
-            const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
-            port = view.getUint16(portIndex, false); 
-        }
-
+        
+        // [Fix] DataView Safety: 
+        // 临时创建 DataView 读取端口，不保存 view 引用，防止后续 read_at_least 更新 cache 导致 view 失效。
+        const port = new DataView(cache.buffer, cache.byteOffset, cache.byteLength).getUint16(portIndex, false);
+        
         const atype = cache[portIndex + 2];
         const addr_body_idx = portIndex + 3; 
 
@@ -179,7 +178,7 @@ async function read_xhttp_header(readable, ctx) {
                 const domain_len = cache[addr_val_idx];
                 hostname = textDecoder.decode(cache.subarray(addr_val_idx + 1, addr_val_idx + 1 + domain_len));
             } else if (atype === CONSTANTS.ADDRESS_TYPE_IPV6) {
-                // Bug Fix: 必须基于当前的 cache 创建新的 DataView，防止指向旧缓冲区
+                // [Fix] 再次创建新的 DataView，确保基于最新的 cache 内存地址
                 const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
                 const ipv6 = [];
                 for (let i = 0; i < 8; i++) ipv6.push(view.getUint16(addr_val_idx + i * 2, false).toString(16));
