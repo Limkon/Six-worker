@@ -1,37 +1,28 @@
 // src/handlers/xhttp.js
 /**
  * 文件名: src/handlers/xhttp.js
- * 优化版:
- * 1. [CPU Guard] 引入最大生命周期控制，在 Cloudflare 强制熔断前主动优雅重置.
- * 2. [Performance] 优化下载流的时间采样频率，大幅降低 CPU 占用.
- * 3. [Logic] 保持原有流处理逻辑，不使用 pipeTo.
+ * 审计修复版:
+ * 1. [Fix] 修复低频小包(SSH)场景下因采样频率过低导致的 Idle Timeout 误判.
+ * 2. [Fix] 修复生命周期结束时，若无上行数据会导致 Reader 阻塞无法退出的死锁问题.
+ * 3. [Robust] 增强资源清理逻辑，确保 Request Body Reader 被显式 Cancel.
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
 import { isHostBanned, stringifyUUID, textDecoder } from '../utils/helpers.js';
 
 // --- 常量定义 ---
-// Cloudflare 标准版 CPU 限制极其严格，建议设置为 5-8 分钟进行轮换
-// 留出 buffer 以免在达到 Wall Time 限制前先撞上 CPU 限制
+// 8分钟轮换，留出 buffer 避免 CPU 熔断
 const SESSION_MAX_LIFE_MS = 8 * 60 * 1000; 
 
 // --- 工具函数区 ---
 
-/**
- * 优雅地取消流，忽略任何因流已关闭导致的错误
- */
 async function safe_cancel(reader, reason) {
     if (!reader) return;
     try {
         await reader.cancel(reason);
-    } catch (_) {
-        // 忽略所有取消时的错误
-    }
+    } catch (_) { }
 }
 
-/**
- * 安全读取函数：封装了超时和异常处理
- */
 async function safe_read(reader, deadline) {
     if (!reader) return { done: true };
 
@@ -40,7 +31,6 @@ async function safe_read(reader, deadline) {
         return { done: true, error: new Error('Read timeout') };
     }
 
-    // 优化：仅在长超时设置 timer，避免频繁创建销毁定时器
     let timeoutId;
     const timeoutPromise = new Promise(resolve => {
         timeoutId = setTimeout(() => resolve({ timeout: true }), remainingTime);
@@ -53,7 +43,6 @@ async function safe_read(reader, deadline) {
             return { done: true, error: new Error('Read timeout') };
         }
         return result; 
-
     } catch (e) {
         const msg = (e.message || '').toLowerCase();
         if (msg.includes('cancelled') || msg.includes('aborted') || msg.includes('closed')) {
@@ -78,10 +67,8 @@ async function read_at_least(reader, minBytes, initialBuffer, deadline) {
 
     while (totalLength < minBytes) {
         const { value, done, error } = await safe_read(reader, deadline);
-        
         if (error) throw error; 
         if (done) break;        
-
         if (value && value.byteLength > 0) {
             chunks.push(value);
             totalLength += value.byteLength;
@@ -97,7 +84,6 @@ async function read_at_least(reader, minBytes, initialBuffer, deadline) {
         resultBuffer.set(chunk, offset);
         offset += chunk.byteLength;
     }
-
     return { value: resultBuffer, done: totalLength < minBytes };
 }
 
@@ -198,7 +184,8 @@ async function upload_to_remote_xhttp(writer, httpx, abortSignal) {
     if (httpx.done) return;
 
     while (true) {
-        // [CPU Check] 检查全局熔断信号
+        // [Fix] 虽然这里有 check，但如果 reader.read 阻塞，break 不会被执行
+        // 因此必须依赖外部调用 httpx.reader.cancel() 来打破阻塞
         if (abortSignal && abortSignal.aborted) break;
 
         try {
@@ -212,12 +199,13 @@ async function upload_to_remote_xhttp(writer, httpx, abortSignal) {
 }
 
 // 创建带空闲超时监控的下载流
-// [Refactor] 优化 CPU 占用，避免每包调用 Date.now()
 function create_xhttp_downloader(resp, remote_readable, initialData, abortController) {
     const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45000;
     let lastActivity = Date.now();
     let idleTimer;
-    let chunkCount = 0; // 用于采样计数
+    let chunkCount = 0; 
+    // [Fix] 增加时间采样锚点，防止低频流量下 lastActivity 长期不更新
+    let lastSampleTime = Date.now(); 
 
     const monitorStream = new TransformStream({
         start(controller) {
@@ -226,29 +214,29 @@ function create_xhttp_downloader(resp, remote_readable, initialData, abortContro
                 controller.enqueue(initialData);
             }
             
-            // 独立的定时器检查空闲，不依赖 transform 里的频繁计算
             idleTimer = setInterval(() => {
-                // 1. 检查空闲超时
-                if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+                const now = Date.now();
+                if (now - lastActivity > IDLE_TIMEOUT_MS) {
                     abortController.abort('idle timeout');
                     return;
                 }
-                // 2. 检查全局生命周期 (由外部 AbortController 触发，此处辅助检查)
                 if (abortController.signal.aborted) {
                     clearInterval(idleTimer);
                 }
             }, 5000); 
         },
         transform(chunk, controller) {
-            // [CPU Optimization] 采样更新：每 50 个包更新一次时间
-            // 在高吞吐量下，减少 98% 的 Date.now() 调用
             chunkCount++;
-            if (chunkCount >= 50) {
-                lastActivity = Date.now();
+            const now = Date.now();
+            
+            // [Fix] 采样逻辑优化：
+            // 1. 累积 50 个包
+            // 2. OR 距离上次采样超过 3 秒 (解决 SSH 低频流量问题)
+            // 3. OR 大包 (>16KB)
+            if (chunkCount >= 50 || (now - lastSampleTime > 3000) || chunk.byteLength > 16384) {
+                lastActivity = now;
+                lastSampleTime = now;
                 chunkCount = 0;
-            } else if (chunk.byteLength > 16384) {
-                 // 大包强制更新
-                 lastActivity = Date.now();
             }
 
             controller.enqueue(chunk);
@@ -294,12 +282,10 @@ export async function handleXhttpClient(request, ctx) {
         return null;
     }
 
-    // --- 生命周期控制器 ---
     const lifeController = new AbortController();
     
-    // 1. 设置最大生命周期定时器 (优雅重置)
+    // 1. 设置最大生命周期定时器
     const sessionTimeout = setTimeout(() => {
-        // 时间到，通知所有循环停止
         lifeController.abort('session_max_life_reached');
     }, SESSION_MAX_LIFE_MS);
 
@@ -308,32 +294,32 @@ export async function handleXhttpClient(request, ctx) {
         let writer = null;
         try {
             writer = remoteSocket.writable.getWriter();
-            // 传入 abortSignal，让上行循环知道何时退出
             await upload_to_remote_xhttp(writer, { data, done, reader }, lifeController.signal);
         } catch (e) {
             // ignore
         } finally {
             if (writer) try { await writer.close(); } catch (_) {}
+            // 这里的 cancel 主要是为了防止 upload_to_remote_xhttp 正常退出后 reader 还没关
+            // 但如果死锁在 read 中，需要依靠下面的 signal listener
             await safe_cancel(reader, 'upload finished'); 
         }
     })();
 
     // 下行处理
-    // 传入 lifeController，让下载流在超时时也能被外部终止
     const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData, lifeController);
 
-    // 绑定生命周期：等待任意一方结束，或者时间到
-    const connectionClosed = Promise.allSettled([downloader.done, uploaderPromise]).then(() => {
-        clearTimeout(sessionTimeout);
-        // 如果是因为时间到而结束，这里做最后的清理
+    // [Fix] 监听 Abort 信号，强制打破所有潜在的阻塞
+    lifeController.signal.addEventListener('abort', () => {
+        // 1. 关闭远程连接 (打破 downloader pipeTo)
         try { remoteSocket.close(); } catch (_) {}
-        // 确保 readable 侧也被关闭
-        try { downloader.readable.cancel(); } catch (_) {}
+        // 2. [Critical] 强制 Cancel 请求 Body Reader (打破 uploader read 阻塞)
+        safe_cancel(reader, 'session aborted');
     });
 
-    // 监听 Abort 信号，强制关闭连接（触发客户端重连）
-    lifeController.signal.addEventListener('abort', () => {
+    const connectionClosed = Promise.allSettled([downloader.done, uploaderPromise]).then(() => {
+        clearTimeout(sessionTimeout);
         try { remoteSocket.close(); } catch (_) {}
+        try { downloader.readable.cancel(); } catch (_) {}
     });
 
     return {
