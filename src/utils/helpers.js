@@ -1,10 +1,10 @@
 // src/utils/helpers.js
 /**
  * 文件名: src/utils/helpers.js
- * 状态: [最终修复版]
+ * 状态: [最终完整修复版]
  * 1. [Fix] isHostBanned: 修复正则转义遗漏，支持 * 通配符，将 ? 视为普通字符转义。
  * 2. [Keep] Cache API TTL 保持 30 天。
- * 3. [Full] 保留所有核心工具函数。
+ * 3. [Full] 保留所有核心工具函数 (SHA224, StreamCipher等)。
  */
 
 // 全局编解码器实例
