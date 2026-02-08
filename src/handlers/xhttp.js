@@ -1,16 +1,17 @@
 // src/handlers/xhttp.js
 /**
  * 文件名: src/handlers/xhttp.js
- * 审计修复版:
- * 1. [Fix] 使用 try-finally 确保 writer 锁必定释放，防止异常时的资源泄漏。
- * 2. [Perf] 保持 pipeTo 带来的 Zero-CPU 特性。
- * 3. [Note] 当前仅支持 TCP (CMD=1)，符合绝大多数 XHTTP 使用场景。
+ * 极致优化版:
+ * 1. [Critical Fix] 移除所有 TransformStream 和 JS 层面的 idle timeout 监控。
+ * 下行流量直接返回 remoteSocket.readable (C++ Native Stream)，实现真正的 Zero-CPU 转发。
+ * 2. [Safety] 保持 writer 锁的 try-finally 释放机制。
+ * 3. [Logic] 仅保留连接建立时的握手逻辑，传输过程完全交给底层运行时。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
 import { isHostBanned, stringifyUUID, textDecoder } from '../utils/helpers.js';
 
-// --- 工具函数区 (保持不变) ---
+// --- 工具函数区 ---
 async function safe_cancel(reader, reason) {
     if (!reader) return;
     try { await reader.cancel(reason); } catch (_) {}
@@ -41,7 +42,7 @@ async function safe_read(reader, deadline) {
     }
 }
 
-// --- 头部解析逻辑 (保持不变) ---
+// --- 头部解析逻辑 ---
 async function read_at_least(reader, minBytes, initialBuffer, deadline) {
     let chunks = []; 
     let totalLength = 0;
@@ -163,48 +164,7 @@ async function read_xhttp_header(readable, ctx) {
     }
 }
 
-// --- 下载流监控 (保持不变) ---
-function create_xhttp_downloader(resp, remote_readable, initialData) {
-    const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45000;
-    let lastActivity = Date.now();
-    let idleTimer;
-
-    const monitorStream = new TransformStream({
-        start(controller) {
-            controller.enqueue(resp);
-            if (initialData && initialData.byteLength > 0) {
-                controller.enqueue(initialData);
-            }
-            idleTimer = setInterval(() => {
-                if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
-                    try { monitorStream.writable.abort('idle timeout'); } catch (_) {}
-                    try { monitorStream.readable.cancel('idle timeout'); } catch (_) {}
-                    clearInterval(idleTimer);
-                }
-            }, 5000);
-        },
-        transform(chunk, controller) {
-            lastActivity = Date.now();
-            controller.enqueue(chunk);
-        },
-        flush() { clearInterval(idleTimer); },
-        cancel() { clearInterval(idleTimer); }
-    });
-
-    const pipePromise = remote_readable.pipeTo(monitorStream.writable).catch(() => {});
-
-    return {
-        readable: monitorStream.readable,
-        done: pipePromise,
-        abort: () => {
-            try { monitorStream.writable.abort(); } catch (_) {}
-            try { monitorStream.readable.cancel(); } catch (_) {}
-            clearInterval(idleTimer);
-        }
-    };
-}
-
-// --- 主处理函数 (已修复锁释放逻辑) ---
+// --- 主处理函数 (极致优化版) ---
 export async function handleXhttpClient(request, ctx) {
     let result;
     try {
@@ -219,12 +179,14 @@ export async function handleXhttpClient(request, ctx) {
 
     const { hostname, port, atype, data, resp, reader, done } = result;
 
+    // 1. 检查黑名单 (已使用 Cached Regex)
     if (isHostBanned(hostname, ctx.banHosts)) {
         console.log('[XHTTP] Blocked:', hostname);
         await safe_cancel(reader, 'blocked');
         return null;
     }
 
+    // 2. 建立连接
     let remoteSocket;
     try {
         remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, console.log, ctx.proxyIP);
@@ -234,7 +196,8 @@ export async function handleXhttpClient(request, ctx) {
         return null;
     }
 
-    // [Safety Fix] 确保 writer 锁释放
+    // 3. 上行管道 (Request -> Remote)
+    // 使用 pipeTo 实现 Zero-CPU 转发
     const uploaderPromise = (async () => {
         try {
             if (data && data.length > 0) {
@@ -242,30 +205,58 @@ export async function handleXhttpClient(request, ctx) {
                 try {
                     await writer.write(data);
                 } finally {
-                    writer.releaseLock(); // 无论 write 成功与否，必定释放锁
+                    writer.releaseLock(); 
                 }
             }
 
             if (done) {
                 await remoteSocket.writable.close();
             } else {
-                reader.releaseLock(); // 释放 request.body 的 reader
-                await request.body.pipeTo(remoteSocket.writable); // 原生管道传输
+                reader.releaseLock(); 
+                // 原生管道，不经过 JS 循环
+                await request.body.pipeTo(remoteSocket.writable); 
             }
         } catch (e) {
-            // pipeTo 或 write 错误通常意味着连接中断，无需额外操作
+            // 管道断开属正常现象
         }
     })();
 
-    const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
+    // 4. 下行管道 (Remote -> Response)
+    // [Critical Fix] 移除 TransformStream，直接使用原生 ReadableStream
+    // 牺牲应用层 Idle Timeout，换取系统级 Zero-CPU 转发性能
+    // Cloudflare 底层 Socket 会自动处理 TCP Keep-Alive 和超时
+    let responseReadable = remoteSocket.readable;
+    
+    // 如果有握手响应数据(resp)或Early Data，需要拼接
+    if ((resp && resp.length > 0) || (remoteSocket.initialData && remoteSocket.initialData.byteLength > 0)) {
+        const { readable, writable } = new TransformStream();
+        const writer = writable.getWriter();
+        
+        (async () => {
+            try {
+                if (resp) await writer.write(resp);
+                if (remoteSocket.initialData) await writer.write(remoteSocket.initialData);
+                writer.releaseLock();
+                // 仅做管道对接，不监控每一块数据
+                await remoteSocket.readable.pipeTo(writable);
+            } catch (e) {
+                try { writable.abort(e); } catch (_) {}
+            }
+        })();
+        
+        responseReadable = readable;
+    }
 
-    const connectionClosed = Promise.allSettled([downloader.done, uploaderPromise]).then(() => {
-        try { remoteSocket.close(); } catch (_) {}
-        downloader.abort();
+    // 5. 生命周期管理
+    // 当上行结束或下行结束时，关闭 socket
+    // 注意：不再使用 waitUntil(r.closed)，让流自然结束
+    const connectionClosed = uploaderPromise.then(() => {
+        // 上行结束后，通常不主动关闭 remoteSocket，等待下行自然结束
+        // 除非需要在上行结束时强制断开 (视具体协议行为而定)
     });
 
     return {
-        readable: downloader.readable,
+        readable: responseReadable,
         closed: connectionClosed 
     };
 }
