@@ -1,9 +1,10 @@
 // src/utils/helpers.js
 /**
  * 文件名: src/utils/helpers.js
- * 状态: [最终修复版]
- * 1. [Critical] 增加 REGEX_CACHE，修复 isHostBanned 的 CPU 性能问题。
- * 2. [Full] 包含所有核心工具函数。
+ * 状态: [Refactored & Optimized]
+ * 1. [Optimization] generateDynamicUUID: 增加内存缓存，避免重复计算 SHA-256。
+ * 2. [Critical] 包含 REGEX_CACHE，确保 isHostBanned 高效运行。
+ * 3. [Full] 包含所有核心工具函数。
  */
 
 // 全局编解码器实例
@@ -24,7 +25,7 @@ export async function sha1(str) {
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// --- SHA224 静态资源 ---
+// --- SHA224 静态资源 (保持原样) ---
 const SHA224_CONSTANTS = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -129,16 +130,27 @@ export function stringifyUUID(arr, offset = 0) {
     return uuid;
 }
 
+// [Optimization] UUID 缓存：避免高频计算
+const DYNAMIC_UUID_CACHE = new Map();
+
 export async function generateDynamicUUID(key, timeDays, updateHour) {
+    // 构建缓存 Key
+    const cacheKey = `${key}-${timeDays}-${updateHour}`;
+    if (DYNAMIC_UUID_CACHE.has(cacheKey)) {
+        return DYNAMIC_UUID_CACHE.get(cacheKey);
+    }
+
     const timezoneOffset = 8;
     const startDate = new Date(2007, 6, 7, updateHour, 0, 0);
     const oneWeekMs = 1000 * 60 * 60 * 24 * timeDays;
+    
     function getCurrentCycle() {
         const now = new Date();
         const adjustedNow = new Date(now.getTime() + timezoneOffset * 60 * 60 * 1000);
         const timeDiff = Number(adjustedNow) - Number(startDate);
         return Math.ceil(timeDiff / oneWeekMs);
     }
+    
     async function generate(baseStr) {
         const hashBuffer = new TextEncoder().encode(baseStr);
         const hash = await crypto.subtle.digest('SHA-256', hashBuffer);
@@ -146,14 +158,21 @@ export async function generateDynamicUUID(key, timeDays, updateHour) {
         const hex = hashArr.map(b => b.toString(16).padStart(2, '0')).join('');
         return `${hex.substr(0, 8)}-${hex.substr(8, 4)}-4${hex.substr(13, 3)}-${(parseInt(hex.substr(16, 2), 16) & 0x3f | 0x80).toString(16)}${hex.substr(18, 2)}-${hex.substr(20, 12)}`;
     }
+    
     const currentCycle = getCurrentCycle();
     const current = await generate(key + currentCycle);
     const prev = await generate(key + (currentCycle - 1));
-    return [current, prev];
+    
+    const result = [current, prev];
+    
+    // 写入缓存 (简单的 LRU 或定时清理机制可以视情况增加，但此处 Key 变化极慢，无需复杂清理)
+    if (DYNAMIC_UUID_CACHE.size > 100) DYNAMIC_UUID_CACHE.clear(); // 简单防护
+    DYNAMIC_UUID_CACHE.set(cacheKey, result);
+    
+    return result;
 }
 
-// [Critical Optimization] 正则缓存 (REGEX_CACHE)
-// 之前版本遗漏了这个缓存，导致 isHostBanned 每次请求都 new RegExp，造成 CPU 飙升
+// [Optimization] Host 正则缓存 (REGEX_CACHE)
 const REGEX_CACHE = new Map();
 
 export function isHostBanned(hostname, banList) {
@@ -176,7 +195,7 @@ export function isHostBanned(hostname, banList) {
     });
 }
 
-// --- KV Cache & StreamCipher ---
+// --- KV Cache & StreamCipher (保持原样) ---
 const GLOBAL_KV_CACHE = new Map();
 const MAX_KV_CACHE_SIZE = 200; 
 const CACHE_API_PREFIX = 'http://kv-cache.local/';
