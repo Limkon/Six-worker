@@ -4,7 +4,8 @@
  * 状态: [最终防御版]
  * 1. [Fix] Network connection lost 防御: 针对 Go-http-client 等扫描器瞬间断连的情况增加容错。
  * 2. [Safety] 计数器泄露保护: 确保在任何异常下 activeConnectionsInInstance 都能正确递减。
- * 3. [Optimization] Early Data: 增加了解析长度限制和 try-catch 隔离。
+ * 3. [Security] 增加 isHostBanned 检查，实现域名/IP黑名单拦截。
+ * 4. [Optimization] Early Data: 增加了解析长度限制和 try-catch 隔离。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -214,6 +215,7 @@ export async function handleWebSocketRequest(request, ctx) {
                 
                 log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote}`);
 
+                // [Security] 域名黑名单检查
                 if (isHostBanned(addressRemote, ctx.banHosts)) {
                     throw new Error(`Blocked: ${addressRemote}`);
                 }
