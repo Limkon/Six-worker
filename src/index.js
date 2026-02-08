@@ -1,10 +1,10 @@
 // src/index.js
 /**
  * 文件名: src/index.js
- * 核心机制增强:
- * 1. [Feature] 引入 "看门狗 (Watchdog)" 机制: 针对 initializeContext 进行超时监控与自动重试。
- * 2. [Stability] 全局请求超时控制: 防止 Worker 永久挂起导致 Error 1101。
- * 3. [Fix] 彻底解决 "Worker code had hung" 问题。
+ * 架构重构:
+ * 1. [Security] 实施 "路由严格分发策略"。
+ * 2. [Fix] 针对 Hash 路由 (GET) 增加空路径拦截，彻底阻断 XHTTP 探测流量进入订阅逻辑。
+ * 3. [Stability] 保持 Watchdog 机制保护全局上下文加载。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -22,14 +22,7 @@ let lastSavedDomain = '';
 let lastPushTime = 0;     
 const PUSH_COOLDOWN = 24 * 60 * 60 * 1000; 
 
-// --- 看门狗工具函数 (Watchdog Utils) ---
-
-/**
- * 带有超时控制的 Promise 包装器
- * @param {Promise} promise - 原始任务
- * @param {number} ms - 超时时间 (毫秒)
- * @param {string} errorMsg - 超时报错信息
- */
+// --- 看门狗工具函数 ---
 function timeout(promise, ms, errorMsg = 'Operation timed out') {
     let timer;
     const timeoutPromise = new Promise((_, reject) => {
@@ -41,22 +34,14 @@ function timeout(promise, ms, errorMsg = 'Operation timed out') {
     ]);
 }
 
-/**
- * 自动重试机制 (Terminate & Restart)
- * @param {Function} taskFn - 要执行的异步函数工厂 () => Promise
- * @param {number} maxRetries - 最大重试次数
- * @param {number} timeoutMs - 单次尝试的超时时间
- */
 async function execWithRetry(taskFn, maxRetries = 3, timeoutMs = 3000) {
     let lastError;
     for (let i = 0; i < maxRetries; i++) {
         try {
-            // 尝试执行任务，并加上超时限制
             return await timeout(taskFn(), timeoutMs, `Attempt ${i + 1} timeout`);
         } catch (e) {
             console.warn(`[Watchdog] Task failed (Attempt ${i + 1}/${maxRetries}):`, e.message);
             lastError = e;
-            // 失败后稍微等待一下再重试 (指数退避可选，这里简单等待 200ms)
             if (i < maxRetries - 1) await new Promise(r => setTimeout(r, 200));
         }
     }
@@ -94,7 +79,6 @@ async function handlePasswordSetup(request, env, ctx) {
         await cleanConfigCache();
 
         try {
-            // 设置初始化也使用重试机制
             const appCtx = await execWithRetry(() => initializeContext(request, env), 2, 5000);
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
@@ -134,29 +118,24 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
 
 export default {
     async fetch(request, env, ctx) {
-        // [Watchdog] 全局软超时控制 (45秒)
-        // Cloudflare 硬限制通常是 30s-50s (取决于套餐)，我们在此之前主动返回错误，避免 "Hang" 报错
+        // [Global Timeout] 45秒硬限制
         return await timeout((async () => {
             try {
-                // [Watchdog] 使用重试机制加载上下文
-                // 如果远程配置卡死，这里会在 3秒后自动重试，最多试 3 次
-                // 这就是您要的 "超时终止并重启" 机制
                 const context = await execWithRetry(() => initializeContext(request, env), 3, 3000);
-                
                 context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
                 const url = new URL(request.url);
                 const path = normalizePath(url); 
                 const hostName = request.headers.get('Host');
 
-                // 1. WebSocket 处理
+                // 1. WebSocket
                 const upgradeHeader = request.headers.get('Upgrade');
                 if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
                     if (!context.userID) return new Response('UUID not set', { status: 401 });
                     return await handleWebSocketRequest(request, context);
                 }
 
-                // 2. 根目录/网页处理
+                // 2. 根目录/网页
                 if (path === '/' || path === '/index.html') {
                     const rawUUID = await getConfig(env, 'UUID');
                     const rawKey = await getConfig(env, 'KEY');
@@ -174,8 +153,7 @@ export default {
                         const resp = await proxyUrl(urlProxy, url, request);
                         if (resp) return resp;
                     }
-
-                    return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
+                    return new Response('<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>Welcome to nginx!</h1></body></html>', { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
                 }
 
                 // 3. 路由特征识别
@@ -202,7 +180,7 @@ export default {
                 const isManagementRoute = isSuperRoute || isFullUserRoute;
                 const isLoginRequest = url.searchParams.get('auth') === 'login';
 
-                // 4. 域名自动发现
+                // 4. 域名自动发现 (仅限管理/订阅路由)
                 if (request.method === 'GET' && (isManagementRoute || isCalculatedHash) && env.KV && hostName && hostName.includes('.')) {
                     if (hostName !== lastSavedDomain) {
                         const now = Date.now();
@@ -253,8 +231,9 @@ export default {
                     return new Response('404 Not Found', { status: 404 });
                 }
 
-                // 6. Hash 路由
+                // 6. Hash 路由 (订阅 & XHTTP)
                 if (isHashRoute) {
+                    // XHTTP 协议入口 (POST)
                     if (request.method === 'POST') {
                         if (context.enableXhttp && !isLoginRequest) {
                             const r = await handleXhttpClient(request, context);
@@ -273,7 +252,16 @@ export default {
                             return new Response('XHTTP Handshake Failed', { status: 400 });
                         }
                     }
+                    
+                    // 订阅入口 (GET) - [Critical Fix] 增加严格校验
                     if (request.method === 'GET' && isCalculatedHash) {
+                        // 1. 如果 subPath 为空 (裸路径)，说明这不是订阅请求，而是 XHTTP 探测
+                        // 2. 如果 subPath 只有 '/'，同样无效
+                        if (!subPath || subPath.trim().length <= 1) {
+                            return new Response('404 Not Found', { status: 404 });
+                        }
+
+                        // 3. 只有带有有效子路径 (如 /8fee08ee/sub) 才交给 handleSubscription
                         const response = await handleSubscription(request, env, context, subPath, hostName);
                         if (response) return response;
                     }
@@ -282,12 +270,11 @@ export default {
                 return new Response('404 Not Found', { status: 404 });
 
             } catch (e) {
-                // 捕获所有业务逻辑错误，防止挂起
                 const errInfo = (e && (e.stack || e.message || e.toString())) || "Unknown Internal Error";
                 console.error('[Global Error]:', errInfo);
-                return new Response('Internal Server Error (Watchdog Catch)', { status: 500 });
+                return new Response('Internal Server Error', { status: 500 });
             }
-        })(), 45000, 'Worker Execution Timeout'); // 全局 45秒 硬超时
+        })(), 45000, 'Worker Execution Timeout');
     },
     
     async scheduled(event, env, ctx) {
