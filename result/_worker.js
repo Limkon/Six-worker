@@ -272,7 +272,7 @@ var MAX_KV_CACHE_SIZE = 200;
 var CACHE_API_PREFIX = "http://kv-cache.local/";
 var CACHE_NULL_SENTINEL = "##NULL##";
 var KNOWN_KV_KEYS = ["UUID", "KEY", "ADMIN_PASS", "SUPER_PASSWORD", "PROXYIP", "SOCKS5", "GO2SOCKS5", "DNS64", "BAN", "DIS", "TIME", "UPTIME", "SUBNAME", "ADD.txt", "ADDAPI", "ADDNOTLS", "ADDNOTLSAPI", "ADDCSV", "CFPORTS", "BESTIP_SOURCES", "REMOTE_CONFIG", "REMOTE_CONFIG_URL", "URL", "URL302", "SAVED_DOMAIN"];
-async function getKV(env, key) {
+async function getKV(env, key, ctx = null) {
   if (!env.KV || !key) return null;
   if (GLOBAL_KV_CACHE.has(key)) return GLOBAL_KV_CACHE.get(key);
   const cache = caches.default;
@@ -302,8 +302,19 @@ async function getKV(env, key) {
   GLOBAL_KV_CACHE.set(key, val);
   const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
   try {
-    cache.put(cacheKeyUrl, new Response(cacheVal, { headers: { "Content-Type": "text/plain", "Cache-Control": "max-age=2592000" } })).catch(() => {
+    const response = new Response(cacheVal, {
+      headers: {
+        "Content-Type": "text/plain",
+        "Cache-Control": "max-age=2592000"
+      }
     });
+    if (ctx && ctx.waitUntil) {
+      ctx.waitUntil(cache.put(cacheKeyUrl, response).catch(() => {
+      }));
+    } else {
+      cache.put(cacheKeyUrl, response).catch(() => {
+      });
+    }
   } catch (e) {
   }
   return val;
@@ -495,13 +506,22 @@ async function loadRemoteConfig(env, forceReload = false) {
   }
   return remoteConfigCache.data;
 }
-async function getConfig(env, key, defaultValue = void 0) {
+async function getConfig(env, key, arg3 = void 0, arg4 = null) {
+  let defaultValue = void 0;
+  let ctx = null;
+  if (arg3 && typeof arg3.waitUntil === "function") {
+    ctx = arg3;
+    defaultValue = void 0;
+  } else {
+    defaultValue = arg3;
+    ctx = arg4;
+  }
   if (configCache[key] !== void 0) {
     return configCache[key];
   }
   const currentGen = configGeneration;
   let val = void 0;
-  if (env.KV) val = await getKV(env, key);
+  if (env.KV) val = await getKV(env, key, ctx);
   if ((val === null || val === void 0) && remoteConfigCache.data && remoteConfigCache.data[key]) val = remoteConfigCache.data[key];
   if ((val === null || val === void 0) && env[key]) val = env[key];
   if (!val && key === "UUID") val = env.UUID || env.uuid || env.PASSWORD || env.pswd || env.SUPER_PASSWORD || CONSTANTS.SUPER_PASSWORD;
@@ -522,14 +542,14 @@ async function getCachedUUID(seed, timeDays, updateHour) {
   uuidCache = { key: cacheKey, data: userIDs, lastUpdate: now };
   return userIDs;
 }
-async function initializeContext(request, env) {
+async function initializeContext(request, env, ctx = null) {
   const url = new URL(request ? request.url : "http://localhost");
   const forceReload = url.searchParams.get("flush") === "1";
   if (forceReload) {
     void(0);
     await cleanConfigCache();
   }
-  const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0");
+  const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0", ctx);
   if (enableRemote === "1") {
     await loadRemoteConfig(env, forceReload);
   } else if (remoteConfigCache.lastFetch > 0) {
@@ -539,21 +559,21 @@ async function initializeContext(request, env) {
     parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
   }
   const [adminPass, rawUUID, rawKey, timeDaysStr, updateHourStr] = await Promise.all([
-    getConfig(env, "ADMIN_PASS"),
-    getConfig(env, "UUID"),
-    getConfig(env, "KEY"),
-    getConfig(env, "TIME"),
-    getConfig(env, "UPTIME")
+    getConfig(env, "ADMIN_PASS", void 0, ctx),
+    getConfig(env, "UUID", void 0, ctx),
+    getConfig(env, "KEY", void 0, ctx),
+    getConfig(env, "TIME", void 0, ctx),
+    getConfig(env, "UPTIME", void 0, ctx)
   ]);
   const [proxyIPStr, dns64, socks5Addr, go2socksStr, banStr] = await Promise.all([
-    getConfig(env, "PROXYIP"),
-    getConfig(env, "DNS64"),
-    getConfig(env, "SOCKS5"),
-    getConfig(env, "GO2SOCKS5"),
-    getConfig(env, "BAN")
+    getConfig(env, "PROXYIP", void 0, ctx),
+    getConfig(env, "DNS64", void 0, ctx),
+    getConfig(env, "SOCKS5", void 0, ctx),
+    getConfig(env, "GO2SOCKS5", void 0, ctx),
+    getConfig(env, "BAN", void 0, ctx)
   ]);
-  const disStrRaw = await getConfig(env, "DIS", "");
-  const ctx = {
+  const disStrRaw = await getConfig(env, "DIS", "", ctx);
+  const context = {
     userID: "",
     dynamicUUID: "",
     userIDLow: "",
@@ -571,8 +591,8 @@ async function initializeContext(request, env) {
     adminPass
   };
   if (rawUUID) {
-    ctx.userID = rawUUID;
-    ctx.dynamicUUID = rawUUID;
+    context.userID = rawUUID;
+    context.dynamicUUID = rawUUID;
   }
   if (rawKey || rawUUID && !isStrictV4UUID(rawUUID)) {
     const seed = rawKey || rawUUID;
@@ -581,30 +601,30 @@ async function initializeContext(request, env) {
       if (timeDays > 36500) timeDays = 36500;
       const updateHour = Number(updateHourStr) || 0;
       const userIDs = await getCachedUUID(seed, timeDays, updateHour);
-      ctx.userID = userIDs[0];
-      ctx.userIDLow = userIDs[1];
-      ctx.dynamicUUID = seed;
+      context.userID = userIDs[0];
+      context.userIDLow = userIDs[1];
+      context.dynamicUUID = seed;
     }
   }
-  if (!ctx.userID) {
-    const superPass = await getConfig(env, "SUPER_PASSWORD") || CONSTANTS.SUPER_PASSWORD;
+  if (!context.userID) {
+    const superPass = await getConfig(env, "SUPER_PASSWORD", void 0, ctx) || CONSTANTS.SUPER_PASSWORD;
     if (superPass) {
       let timeDays = Number(timeDaysStr) || 0;
       if (timeDays > 36500) timeDays = 36500;
       const updateHour = Number(updateHourStr) || 0;
       const userIDs = await getCachedUUID(superPass, timeDays, updateHour);
-      ctx.userID = userIDs[0];
-      ctx.userIDLow = userIDs[1];
-      ctx.dynamicUUID = superPass;
+      context.userID = userIDs[0];
+      context.userIDLow = userIDs[1];
+      context.dynamicUUID = superPass;
       void(0);
     } else {
       void(0);
       const tempUUID = crypto.randomUUID();
-      ctx.userID = tempUUID;
-      ctx.dynamicUUID = tempUUID;
+      context.userID = tempUUID;
+      context.dynamicUUID = tempUUID;
     }
   }
-  ctx.expectedUserIDs = [ctx.userID, ctx.userIDLow].filter(Boolean).map((id) => id.toLowerCase());
+  context.expectedUserIDs = [context.userID, context.userIDLow].filter(Boolean).map((id) => id.toLowerCase());
   const rawProxyIP = proxyIPStr || CONSTANTS.DEFAULT_PROXY_IP;
   let rawList = [];
   if (rawProxyIP) {
@@ -655,47 +675,47 @@ async function initializeContext(request, env) {
   }
   if (rawList && rawList.length > 0) {
     const selectedIP = rawList[Math.floor(Math.random() * rawList.length)];
-    ctx.proxyIP = selectedIP;
-    ctx.proxyIPList = [selectedIP];
+    context.proxyIP = selectedIP;
+    context.proxyIPList = [selectedIP];
   } else {
-    ctx.proxyIP = "";
-    ctx.proxyIPList = [];
+    context.proxyIP = "";
+    context.proxyIPList = [];
   }
   if (parsedListCache.go2socks5) {
-    ctx.go2socks5 = parsedListCache.go2socks5;
+    context.go2socks5 = parsedListCache.go2socks5;
   } else {
     const safeGoStr = go2socksStr && go2socksStr.length > 5e3 ? go2socksStr.substring(0, 5e3) : go2socksStr;
-    ctx.go2socks5 = safeGoStr ? await cleanList(safeGoStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
-    parsedListCache.go2socks5 = ctx.go2socks5;
+    context.go2socks5 = safeGoStr ? await cleanList(safeGoStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
+    parsedListCache.go2socks5 = context.go2socks5;
   }
   if (parsedListCache.banHosts) {
-    ctx.banHosts = parsedListCache.banHosts;
+    context.banHosts = parsedListCache.banHosts;
   } else if (banStr) {
     const safeBanStr = banStr.length > 1e4 ? banStr.substring(0, 1e4) : banStr;
-    ctx.banHosts = await cleanList(safeBanStr);
-    parsedListCache.banHosts = ctx.banHosts;
+    context.banHosts = await cleanList(safeBanStr);
+    parsedListCache.banHosts = context.banHosts;
   }
   if (parsedListCache.disabledProtocols) {
-    ctx.disabledProtocols = parsedListCache.disabledProtocols;
+    context.disabledProtocols = parsedListCache.disabledProtocols;
   } else {
     let disStr = disStrRaw;
     if (disStr) disStr = disStr.replace(/，/g, ",");
     const disList = await cleanList(disStr);
-    ctx.disabledProtocols = disList.map((p) => {
+    context.disabledProtocols = disList.map((p) => {
       const protocol = p.trim().toLowerCase();
       if (protocol === "shadowsocks") return "ss";
       return protocol;
     });
-    parsedListCache.disabledProtocols = ctx.disabledProtocols;
+    parsedListCache.disabledProtocols = context.disabledProtocols;
   }
-  ctx.enableXhttp = !ctx.disabledProtocols.includes("xhttp");
+  context.enableXhttp = !context.disabledProtocols.includes("xhttp");
   if (url.searchParams.has("proxyip")) {
     const manualIP = url.searchParams.get("proxyip");
-    ctx.proxyIP = manualIP;
-    ctx.proxyIPList = [manualIP];
+    context.proxyIP = manualIP;
+    context.proxyIPList = [manualIP];
   }
-  if (url.searchParams.has("socks5")) ctx.socks5 = url.searchParams.get("socks5");
-  return ctx;
+  if (url.searchParams.has("socks5")) context.socks5 = url.searchParams.get("socks5");
+  return context;
 }
 
 var ProtocolManager = class {
@@ -3776,6 +3796,7 @@ function getLoginHtml() {
 }
 
 var lastSavedDomain = "";
+var PUSH_COOLDOWN = 24 * 60 * 60 * 1e3;
 async function hasDomainBeenPushedRecently(hostName) {
   if (!hostName) return false;
   if (hostName === lastSavedDomain) return true;
@@ -3834,7 +3855,7 @@ async function execWithRetry(taskFn, maxRetries = 3, timeoutMs = 3e3) {
     } catch (e) {
       void(0);
       lastError = e;
-      if (i < maxRetries - 1) await new Promise((r) => setTimeout(r, 200));
+      if (i < maxRetries - 1) await new Promise((r) => setTimeout(r, 200 * (i + 1)));
     }
   }
   throw lastError;
@@ -3865,7 +3886,7 @@ async function handlePasswordSetup(request, env, ctx) {
     await markDomainAsPushed("init-setup", ctx);
     await cleanConfigCache();
     try {
-      const appCtx = await execWithRetry((signal) => initializeContext(request, env), 2, 5e3);
+      const appCtx = await execWithRetry((signal) => initializeContext(request, env, ctx), 2, 5e3);
       appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
       safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
     } catch (e) {
@@ -3899,134 +3920,139 @@ async function proxyUrl(urlStr, targetUrlObj, request, signal) {
 }
 var index_default = {
   async fetch(request, env, ctx) {
-    return await timeout(async (signal) => {
-      try {
-        const context = await execWithRetry((s) => initializeContext(request, env), 3, 3e3);
-        context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
-        const url = new URL(request.url);
-        const path = normalizePath(url);
-        const hostName = request.headers.get("Host");
-        const upgradeHeader = request.headers.get("Upgrade");
-        if (upgradeHeader && upgradeHeader.toLowerCase() === "websocket") {
-          if (!context.userID) return new Response("UUID not set", { status: 401 });
-          return await handleWebSocketRequest(request, context);
-        }
-        if (path === "/" || path === "/index.html") {
-          const rawUUID = await getConfig(env, "UUID");
-          const rawKey = await getConfig(env, "KEY");
-          const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
-          if (isUninitialized && env.KV) {
-            return await handlePasswordSetup(request, env, ctx);
+    try {
+      return await timeout(async (signal) => {
+        try {
+          const context = await execWithRetry((s) => initializeContext(request, env, ctx), 3, 6e3);
+          context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
+          const url = new URL(request.url);
+          const path = normalizePath(url);
+          const hostName = request.headers.get("Host");
+          const upgradeHeader = request.headers.get("Upgrade");
+          if (upgradeHeader && upgradeHeader.toLowerCase() === "websocket") {
+            if (!context.userID) return new Response("UUID not set", { status: 401 });
+            return await handleWebSocketRequest(request, context);
           }
-          const url302 = await getConfig(env, "URL302");
-          if (url302) return Response.redirect(url302, 302);
-          const urlProxy = await getConfig(env, "URL");
-          if (urlProxy) {
-            const resp = await proxyUrl(urlProxy, url, request, signal);
-            if (resp) return resp;
+          if (path === "/" || path === "/index.html") {
+            const rawUUID = await getConfig(env, "UUID", void 0, ctx);
+            const rawKey = await getConfig(env, "KEY", void 0, ctx);
+            const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
+            if (isUninitialized && env.KV) {
+              return await handlePasswordSetup(request, env, ctx);
+            }
+            const url302 = await getConfig(env, "URL302", void 0, ctx);
+            if (url302) return Response.redirect(url302, 302);
+            const urlProxy = await getConfig(env, "URL", void 0, ctx);
+            if (urlProxy) {
+              const resp = await proxyUrl(urlProxy, url, request, signal);
+              if (resp) return resp;
+            }
+            return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { "Content-Type": "text/html;charset=utf-8" } });
           }
-          return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { "Content-Type": "text/html;charset=utf-8" } });
-        }
-        const superPassword = CONSTANTS.SUPER_PASSWORD;
-        const dynamicID = context.dynamicUUID.toLowerCase();
-        const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
-        const isSuperRoute = path.startsWith("/" + superPassword);
-        const isFullUserRoute = path.startsWith("/" + dynamicID);
-        const isCalculatedHash = path.startsWith("/" + userHash);
-        const isHexFeature = /^\/[a-f0-9]{6,12}(\/|$)/i.test(path);
-        const isHashRoute = isCalculatedHash || isHexFeature;
-        if (!isSuperRoute && !isFullUserRoute && !isHashRoute) {
-          return new Response("404 Not Found", { status: 404 });
-        }
-        let subPath = "";
-        if (isSuperRoute) subPath = path.substring(("/" + superPassword).length);
-        else if (isFullUserRoute) subPath = path.substring(("/" + dynamicID).length);
-        else if (isCalculatedHash) subPath = path.substring(("/" + userHash).length);
-        const isManagementRoute = isSuperRoute || isFullUserRoute;
-        const isLoginRequest = url.searchParams.get("auth") === "login";
-        if (request.method === "GET" && (isManagementRoute || isCalculatedHash) && env.KV && hostName && hostName.includes(".")) {
-          const isPushedRecently = await hasDomainBeenPushedRecently(hostName);
-          if (!isPushedRecently) {
-            const PUSH_COOLDOWN = 24 * 60 * 60 * 1e3;
-            context.waitUntil((async () => {
-              try {
-                const now = Date.now();
-                let kvPushTime = await env.KV.get("LAST_PUSH_TIME");
-                if (!kvPushTime || now - parseInt(kvPushTime) > PUSH_COOLDOWN) {
-                  await env.KV.put("SAVED_DOMAIN", hostName);
-                  await env.KV.put("LAST_PUSH_TIME", now.toString());
-                  await cleanConfigCache(["SAVED_DOMAIN"]);
-                  await executeWebDavPush(env, context, false);
-                  await markDomainAsPushed(hostName, context);
-                } else {
-                  await markDomainAsPushed(hostName, context);
+          const superPassword = CONSTANTS.SUPER_PASSWORD;
+          const dynamicID = context.dynamicUUID.toLowerCase();
+          const userHash = (await sha1(dynamicID)).toLowerCase().substring(0, CONSTANTS.SUB_HASH_LENGTH);
+          const isSuperRoute = path.startsWith("/" + superPassword);
+          const isFullUserRoute = path.startsWith("/" + dynamicID);
+          const isCalculatedHash = path.startsWith("/" + userHash);
+          const isHexFeature = /^\/[a-f0-9]{6,12}(\/|$)/i.test(path);
+          const isHashRoute = isCalculatedHash || isHexFeature;
+          if (!isSuperRoute && !isFullUserRoute && !isHashRoute) {
+            return new Response("404 Not Found", { status: 404 });
+          }
+          let subPath = "";
+          if (isSuperRoute) subPath = path.substring(("/" + superPassword).length);
+          else if (isFullUserRoute) subPath = path.substring(("/" + dynamicID).length);
+          else if (isCalculatedHash) subPath = path.substring(("/" + userHash).length);
+          const isManagementRoute = isSuperRoute || isFullUserRoute;
+          const isLoginRequest = url.searchParams.get("auth") === "login";
+          if (request.method === "GET" && (isManagementRoute || isCalculatedHash) && env.KV && hostName && hostName.includes(".")) {
+            const isPushedRecently = await hasDomainBeenPushedRecently(hostName);
+            if (!isPushedRecently) {
+              const PUSH_COOLDOWN2 = 24 * 60 * 60 * 1e3;
+              context.waitUntil((async () => {
+                try {
+                  const now = Date.now();
+                  let kvPushTime = await env.KV.get("LAST_PUSH_TIME");
+                  if (!kvPushTime || now - parseInt(kvPushTime) > PUSH_COOLDOWN2) {
+                    await env.KV.put("SAVED_DOMAIN", hostName);
+                    await env.KV.put("LAST_PUSH_TIME", now.toString());
+                    await cleanConfigCache(["SAVED_DOMAIN"]);
+                    await executeWebDavPush(env, context, false);
+                    await markDomainAsPushed(hostName, context);
+                  } else {
+                    await markDomainAsPushed(hostName, context);
+                  }
+                } catch (e) {
+                  void(0);
                 }
-              } catch (e) {
-                void(0);
-              }
-            })());
+              })());
+            }
           }
-        }
-        if (isManagementRoute) {
-          if (!isSuperRoute && context.adminPass) {
-            const cookie = request.headers.get("Cookie") || "";
-            if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
-              if (request.method === "POST" && isLoginRequest) {
-                const formData = await request.formData();
-                if (formData.get("password") === context.adminPass) {
-                  return new Response(null, {
-                    status: 302,
+          if (isManagementRoute) {
+            if (!isSuperRoute && context.adminPass) {
+              const cookie = request.headers.get("Cookie") || "";
+              if (!cookie.includes(`admin_auth=${context.adminPass}`)) {
+                if (request.method === "POST" && isLoginRequest) {
+                  const formData = await request.formData();
+                  if (formData.get("password") === context.adminPass) {
+                    return new Response(null, {
+                      status: 302,
+                      headers: {
+                        "Set-Cookie": `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
+                        "Location": url.pathname + "?login_check=1"
+                      }
+                    });
+                  }
+                }
+                return new Response(getLoginHtml(), { headers: { "Content-Type": "text/html;charset=utf-8" } });
+              }
+            }
+            if (subPath === "/edit") return await handleEditConfig(request, env, ctx);
+            if (subPath === "/bestip") return await handleBestIP(request, env);
+            if (request.method === "GET") {
+              const html = await generateHomePage(env, context, hostName);
+              return new Response(html, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+            }
+            return new Response("404 Not Found", { status: 404 });
+          }
+          if (isHashRoute) {
+            if (request.method === "POST") {
+              if (context.enableXhttp && !isLoginRequest) {
+                const r = await handleXhttpClient(request, context);
+                if (r) {
+                  return new Response(r.readable, {
                     headers: {
-                      "Set-Cookie": `admin_auth=${context.adminPass}; Path=/; HttpOnly; Max-Age=86400; SameSite=Lax`,
-                      "Location": url.pathname + "?login_check=1"
+                      "X-Accel-Buffering": "no",
+                      "Cache-Control": "no-store",
+                      Connection: "keep-alive",
+                      "Content-Type": "application/grpc",
+                      "User-Agent": "Go-http-client/2.0"
                     }
                   });
                 }
+                return new Response("XHTTP Handshake Failed", { status: 400 });
               }
-              return new Response(getLoginHtml(), { headers: { "Content-Type": "text/html;charset=utf-8" } });
             }
-          }
-          if (subPath === "/edit") return await handleEditConfig(request, env, ctx);
-          if (subPath === "/bestip") return await handleBestIP(request, env);
-          if (request.method === "GET") {
-            const html = await generateHomePage(env, context, hostName);
-            return new Response(html, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+            if (request.method === "GET" && isCalculatedHash) {
+              if (!subPath || subPath.trim().length <= 1) {
+                return new Response("404 Not Found", { status: 404 });
+              }
+              const response = await handleSubscription(request, env, context, subPath, hostName);
+              if (response) return response;
+            }
           }
           return new Response("404 Not Found", { status: 404 });
+        } catch (e) {
+          const errInfo = e && (e.stack || e.message || e.toString()) || "Unknown Internal Error";
+          void(0);
+          return new Response("Internal Server Error", { status: 500 });
         }
-        if (isHashRoute) {
-          if (request.method === "POST") {
-            if (context.enableXhttp && !isLoginRequest) {
-              const r = await handleXhttpClient(request, context);
-              if (r) {
-                return new Response(r.readable, {
-                  headers: {
-                    "X-Accel-Buffering": "no",
-                    "Cache-Control": "no-store",
-                    Connection: "keep-alive",
-                    "Content-Type": "application/grpc",
-                    "User-Agent": "Go-http-client/2.0"
-                  }
-                });
-              }
-              return new Response("XHTTP Handshake Failed", { status: 400 });
-            }
-          }
-          if (request.method === "GET" && isCalculatedHash) {
-            if (!subPath || subPath.trim().length <= 1) {
-              return new Response("404 Not Found", { status: 404 });
-            }
-            const response = await handleSubscription(request, env, context, subPath, hostName);
-            if (response) return response;
-          }
-        }
-        return new Response("404 Not Found", { status: 404 });
-      } catch (e) {
-        const errInfo = e && (e.stack || e.message || e.toString()) || "Unknown Internal Error";
-        void(0);
-        return new Response("Internal Server Error", { status: 500 });
-      }
-    }, 45e3, "Worker Execution Timeout");
+      }, 45e3, "Worker Execution Timeout");
+    } catch (fatalError) {
+      void(0);
+      return new Response("Service Unavailable", { status: 503 });
+    }
   },
   async scheduled(event, env, ctx) {
   }
