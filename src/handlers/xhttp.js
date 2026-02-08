@@ -1,12 +1,12 @@
 // src/handlers/xhttp.js
 /**
  * 文件名: src/handlers/xhttp.js
- * 最终确认版 (Robust Refactor):
+ * 状态: [最终完整修复版]
  * 1. [Fix] DataView 安全性修复: 移除长生命周期的 view 变量，采用即用即弃策略，
  * 彻底防止因 buffer 扩容/重分配导致的引用失效问题。
- * 2. [Full] 包含所有原版核心逻辑 (UUID校验, 协议解析, 黑名单, 超时控制).
- * 3. [Elegant] 使用 safe_read/safe_cancel 消除 "Stream was cancelled" 报错.
- * 4. [Robust] 保持 Idle Timeout 的强力清理逻辑.
+ * 2. [Full] 包含所有原版核心逻辑 (UUID校验, 协议解析, 超时控制)。
+ * 3. [Security] 集成 isHostBanned 黑名单拦截。
+ * 4. [Elegant] 使用 safe_read/safe_cancel 消除 "Stream was cancelled" 报错。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -113,7 +113,7 @@ async function read_xhttp_header(readable, ctx) {
         const version = cache[0];
         const uuidStr = stringifyUUID(cache.subarray(1, 17));
         
-        // 校验 UUID
+        // 校验 UUID (支持 userID 和 userIDLow)
         const expectedID = ctx.userID;
         const expectedIDLow = ctx.userIDLow;
         if (uuidStr !== expectedID && (!expectedIDLow || uuidStr !== expectedIDLow)) {
@@ -287,6 +287,7 @@ export async function handleXhttpClient(request, ctx) {
     const { hostname, port, atype, data, resp, reader, done } = result;
 
     // 2. 检查黑名单
+    // [Fix] 增加 isHostBanned 拦截
     if (isHostBanned(hostname, ctx.banHosts)) {
         console.log('[XHTTP] Blocked:', hostname);
         await safe_cancel(reader, 'blocked');
