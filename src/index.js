@@ -1,9 +1,10 @@
 // src/index.js
 /**
  * 文件名: src/index.js
- * 修复说明:
- * 1. [Fix] 将 ctx 传递给 initializeContext，打通 Cache API 的 waitUntil 链路。
- * 2. [Stability] 包含之前的 Watchdog 超时优化和异常捕获逻辑。
+ * 状态: [最终完整修复版]
+ * 1. [Fix] fetch 入口传递 ctx 到 initializeContext，彻底打通缓存非阻塞写入。
+ * 2. [Full] 保留所有路由逻辑 (WS, XHTTP, Subscription, Admin, BestIP)。
+ * 3. [Stability] 包含 Watchdog 和 Global Try-Catch。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -18,6 +19,8 @@ import { getPasswordSetupHtml, getLoginHtml } from './templates/auth.js';
 
 // --- 全局状态 (L1 内存缓存) ---
 let lastSavedDomain = ''; 
+let lastPushTime = 0;     
+const PUSH_COOLDOWN = 24 * 60 * 60 * 1000; 
 
 // --- 缓存工具 (L2 Cache API) ---
 async function hasDomainBeenPushedRecently(hostName) {
@@ -122,7 +125,7 @@ async function handlePasswordSetup(request, env, ctx) {
         await cleanConfigCache();
 
         try {
-            // [Fix] 传递 ctx
+            // [Fix] 传递 ctx 到 initializeContext
             const appCtx = await execWithRetry((signal) => initializeContext(request, env, ctx), 2, 5000);
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
@@ -166,7 +169,7 @@ export default {
         try {
             return await timeout(async (signal) => {
                 try {
-                    // [Fix] 传递 ctx 到 initializeContext
+                    // [Critical Fix] 传递 ctx 到 initializeContext，启用非阻塞缓存写入
                     const context = await execWithRetry((s) => initializeContext(request, env, ctx), 3, 6000);
                     context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
@@ -184,18 +187,18 @@ export default {
                     // 2. 根目录/网页
                     if (path === '/' || path === '/index.html') {
                         // [Fix] 传递 ctx 到 getConfig
-                        const rawUUID = await getConfig(env, 'UUID', ctx);
-                        const rawKey = await getConfig(env, 'KEY', ctx);
+                        const rawUUID = await getConfig(env, 'UUID', undefined, ctx);
+                        const rawKey = await getConfig(env, 'KEY', undefined, ctx);
                         const isUninitialized = rawUUID === CONSTANTS.SUPER_PASSWORD && !rawKey;
 
                         if (isUninitialized && env.KV) {
                             return await handlePasswordSetup(request, env, ctx);
                         }
 
-                        const url302 = await getConfig(env, 'URL302', ctx);
+                        const url302 = await getConfig(env, 'URL302', undefined, ctx);
                         if (url302) return Response.redirect(url302, 302);
                         
-                        const urlProxy = await getConfig(env, 'URL', ctx);
+                        const urlProxy = await getConfig(env, 'URL', undefined, ctx);
                         if (urlProxy) {
                             const resp = await proxyUrl(urlProxy, url, request, signal);
                             if (resp) return resp;
