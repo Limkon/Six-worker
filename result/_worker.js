@@ -253,9 +253,7 @@ function isHostBanned(hostname, banList) {
       } catch (e) {
         regex = /^$/;
       }
-      if (REGEX_CACHE.size > 500) {
-        REGEX_CACHE.delete(REGEX_CACHE.keys().next().value);
-      }
+      if (REGEX_CACHE.size > 500) REGEX_CACHE.delete(REGEX_CACHE.keys().next().value);
       REGEX_CACHE.set(pattern, regex);
     }
     return regex.test(hostname);
@@ -265,33 +263,7 @@ var GLOBAL_KV_CACHE =   new Map();
 var MAX_KV_CACHE_SIZE = 200;
 var CACHE_API_PREFIX = "http://kv-cache.local/";
 var CACHE_NULL_SENTINEL = "##NULL##";
-var KNOWN_KV_KEYS = [
-  "UUID",
-  "KEY",
-  "ADMIN_PASS",
-  "SUPER_PASSWORD",
-  "PROXYIP",
-  "SOCKS5",
-  "GO2SOCKS5",
-  "DNS64",
-  "BAN",
-  "DIS",
-  "TIME",
-  "UPTIME",
-  "SUBNAME",
-  "ADD.txt",
-  "ADDAPI",
-  "ADDNOTLS",
-  "ADDNOTLSAPI",
-  "ADDCSV",
-  "CFPORTS",
-  "BESTIP_SOURCES",
-  "REMOTE_CONFIG",
-  "REMOTE_CONFIG_URL",
-  "URL",
-  "URL302",
-  "SAVED_DOMAIN"
-];
+var KNOWN_KV_KEYS = ["UUID", "KEY", "ADMIN_PASS", "SUPER_PASSWORD", "PROXYIP", "SOCKS5", "GO2SOCKS5", "DNS64", "BAN", "DIS", "TIME", "UPTIME", "SUBNAME", "ADD.txt", "ADDAPI", "ADDNOTLS", "ADDNOTLSAPI", "ADDCSV", "CFPORTS", "BESTIP_SOURCES", "REMOTE_CONFIG", "REMOTE_CONFIG_URL", "URL", "URL302", "SAVED_DOMAIN"];
 async function getKV(env, key) {
   if (!env.KV || !key) return null;
   if (GLOBAL_KV_CACHE.has(key)) return GLOBAL_KV_CACHE.get(key);
