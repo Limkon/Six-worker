@@ -1,11 +1,12 @@
 // src/config.js
 /**
  * 文件名: src/config.js
- * 修复版:
- * 1. [Fix] 修复 "Worker code hung" 错误: 
- * - 限制远程配置/ProxyIP 的读取大小 (Max 100KB)，防止解析巨型响应导致 CPU 挂起。
- * - 限制 timeDays 最大值，防止 UUID 生成死循环。
- * 2. [Robust] 增强 ProxyIP 获取的超时控制和错误处理。
+ * 状态: [最终完整修复版]
+ * 1. [Fix] 解决 Worker Code Hung 问题:
+ * - 限制远程配置读取大小 (Max 50KB)。
+ * - 增加 ProxyIP Fetch 的 AbortController 超时控制。
+ * 2. [Full] 保留远程配置、ProxyIP 智能抓取、UUID 死循环防护等所有逻辑。
+ * 3. [Ctx] initializeContext 和 getConfig 增加 ctx 参数，打通 getKV 的 waitUntil 链路。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID, getKV, clearKVCache } from './utils/helpers.js';
@@ -125,23 +126,18 @@ export async function loadRemoteConfig(env, forceReload = false) {
             }).finally(() => clearTimeout(timeoutId));
 
             if (response.ok) {
-                // [Fix] 限制配置大小为 50KB，防止解析超大文件导致 Hang
                 const text = await safeReadText(response, 50 * 1024);
                 const updateTime = Date.now();
                 
                 const parseConfig = (txt) => {
-                    // 尝试 JSON
                     try {
                         const json = JSON.parse(txt);
                         if (json && typeof json === 'object') return json;
                     } catch (e) {}
 
-                    // 回退到行解析 (防御性编程)
-                    // 使用正则匹配每一行，避免 split 大字符串
                     const newData = {};
                     const regex = /^\s*([^#=\s]+)\s*=\s*(.+?)\s*$/gm;
                     let match;
-                    // 设置一个最大迭代次数防止 ReDoS
                     let loopCount = 0;
                     while ((match = regex.exec(txt)) !== null && loopCount++ < 1000) {
                         newData[match[1]] = match[2];
@@ -164,14 +160,31 @@ export async function loadRemoteConfig(env, forceReload = false) {
     return remoteConfigCache.data;
 }
 
-export async function getConfig(env, key, defaultValue = undefined) {
+// [Critical Fix] 支持传递 ctx，并智能处理参数
+export async function getConfig(env, key, arg3 = undefined, arg4 = null) {
+    // 参数归一化: getConfig(env, key, defaultValue, ctx) 或 getConfig(env, key, ctx)
+    let defaultValue = undefined;
+    let ctx = null;
+
+    if (arg3 && typeof arg3.waitUntil === 'function') {
+        // 第三个参数是 ctx
+        ctx = arg3;
+        defaultValue = undefined;
+    } else {
+        // 常规调用
+        defaultValue = arg3;
+        ctx = arg4;
+    }
+
     if (configCache[key] !== undefined) {
         return configCache[key];
     }
     const currentGen = configGeneration;
     let val = undefined;
     
-    if (env.KV) val = await getKV(env, key);
+    // [Fix] 传递 ctx 给 getKV
+    if (env.KV) val = await getKV(env, key, ctx);
+
     if ((val === null || val === undefined) && remoteConfigCache.data && remoteConfigCache.data[key]) val = remoteConfigCache.data[key];
     if ((val === null || val === undefined) && env[key]) val = env[key];
     
@@ -197,46 +210,48 @@ async function getCachedUUID(seed, timeDays, updateHour) {
     return userIDs;
 }
 
-export async function initializeContext(request, env) {
+// [Critical Fix] initializeContext 接收 ctx
+export async function initializeContext(request, env, ctx = null) {
     const url = new URL(request ? request.url : 'http://localhost');
     const forceReload = url.searchParams.get('flush') === '1'; 
 
     if (forceReload) {
         console.log('[Config] Flush requested via URL parameter. Purging caches...');
-        await cleanConfigCache(); // 使用无参调用清理所有
+        await cleanConfigCache(); 
     }
 
     // 处理远程配置
-    const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0');
+    // [Fix] 传递 ctx
+    const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0', ctx);
     if (enableRemote === '1') {
         await loadRemoteConfig(env, forceReload);
     } else if (remoteConfigCache.lastFetch > 0) {
-        // 如果远程配置被禁用但缓存还在，清理它
         remoteConfigCache = { data: {}, lastFetch: 0 };
         configCache = {}; 
         configGeneration++; 
         parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
     }
 
+    // [Fix] 传递 ctx 到 getConfig
     const [adminPass, rawUUID, rawKey, timeDaysStr, updateHourStr] = await Promise.all([
-        getConfig(env, 'ADMIN_PASS'),
-        getConfig(env, 'UUID'),
-        getConfig(env, 'KEY'),
-        getConfig(env, 'TIME'),
-        getConfig(env, 'UPTIME')
+        getConfig(env, 'ADMIN_PASS', undefined, ctx),
+        getConfig(env, 'UUID', undefined, ctx),
+        getConfig(env, 'KEY', undefined, ctx),
+        getConfig(env, 'TIME', undefined, ctx),
+        getConfig(env, 'UPTIME', undefined, ctx)
     ]);
 
     const [proxyIPStr, dns64, socks5Addr, go2socksStr, banStr] = await Promise.all([
-        getConfig(env, 'PROXYIP'),
-        getConfig(env, 'DNS64'),
-        getConfig(env, 'SOCKS5'),
-        getConfig(env, 'GO2SOCKS5'),
-        getConfig(env, 'BAN')
+        getConfig(env, 'PROXYIP', undefined, ctx),
+        getConfig(env, 'DNS64', undefined, ctx),
+        getConfig(env, 'SOCKS5', undefined, ctx),
+        getConfig(env, 'GO2SOCKS5', undefined, ctx),
+        getConfig(env, 'BAN', undefined, ctx)
     ]);
 
-    const disStrRaw = await getConfig(env, 'DIS', '');
+    const disStrRaw = await getConfig(env, 'DIS', '', ctx);
 
-    const ctx = {
+    const context = {
         userID: '', 
         dynamicUUID: '', 
         userIDLow: '', 
@@ -255,47 +270,46 @@ export async function initializeContext(request, env) {
     };
 
     if (rawUUID) {
-        ctx.userID = rawUUID;
-        ctx.dynamicUUID = rawUUID;
+        context.userID = rawUUID;
+        context.dynamicUUID = rawUUID;
     }
 
     if (rawKey || (rawUUID && !isStrictV4UUID(rawUUID))) {
         const seed = rawKey || rawUUID;
         if (seed) {
-            // [Fix] 限制 timeDays 防止死循环
             let timeDays = Number(timeDaysStr) || 0;
-            if (timeDays > 36500) timeDays = 36500; // 最大 100 年
+            if (timeDays > 36500) timeDays = 36500; 
             
             const updateHour = Number(updateHourStr) || 0;
             
             const userIDs = await getCachedUUID(seed, timeDays, updateHour);
-            ctx.userID = userIDs[0]; 
-            ctx.userIDLow = userIDs[1]; 
-            ctx.dynamicUUID = seed;
+            context.userID = userIDs[0]; 
+            context.userIDLow = userIDs[1]; 
+            context.dynamicUUID = seed;
         }
     }
 
-    if (!ctx.userID) {
-        const superPass = await getConfig(env, 'SUPER_PASSWORD') || CONSTANTS.SUPER_PASSWORD;
+    if (!context.userID) {
+        const superPass = await getConfig(env, 'SUPER_PASSWORD', undefined, ctx) || CONSTANTS.SUPER_PASSWORD;
         if (superPass) {
              let timeDays = Number(timeDaysStr) || 0;
              if (timeDays > 36500) timeDays = 36500;
 
              const updateHour = Number(updateHourStr) || 0;
              const userIDs = await getCachedUUID(superPass, timeDays, updateHour);
-             ctx.userID = userIDs[0]; 
-             ctx.userIDLow = userIDs[1]; 
-             ctx.dynamicUUID = superPass;
+             context.userID = userIDs[0]; 
+             context.userIDLow = userIDs[1]; 
+             context.dynamicUUID = superPass;
              console.log('[CONFIG] Missing UUID/KEY, generated UUID using SUPER_PASSWORD.');
         } else {
             console.warn('[CONFIG] CRITICAL: No UUID/KEY/SUPER_PASSWORD configured!');
             const tempUUID = crypto.randomUUID();
-            ctx.userID = tempUUID;
-            ctx.dynamicUUID = tempUUID;
+            context.userID = tempUUID;
+            context.dynamicUUID = tempUUID;
         }
     }
 
-    ctx.expectedUserIDs = [ctx.userID, ctx.userIDLow].filter(Boolean).map(id => id.toLowerCase());
+    context.expectedUserIDs = [context.userID, context.userIDLow].filter(Boolean).map(id => id.toLowerCase());
 
     // -------------------------------------------------------------------------
     // ProxyIP Fetch Logic (Optimized & Safer)
@@ -308,13 +322,11 @@ export async function initializeContext(request, env) {
              if (Date.now() < proxyIPRemoteCache.expires && proxyIPRemoteCache.data.length > 0) {
                  rawList = proxyIPRemoteCache.data;
              } else {
-                 // 使用 Promise 处理并发，防止重复请求
                  if (!proxyIPRemoteCache.fetchingPromise) {
                      proxyIPRemoteCache.fetchingPromise = (async () => {
                          try {
                              const controller = new AbortController();
-                             // [Fix] 缩短超时到 3s，防止阻塞过久
-                             const timeoutId = setTimeout(() => controller.abort(), 3000);
+                             const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s Timeout
                              
                              const response = await fetch(rawProxyIP, { 
                                  signal: controller.signal,
@@ -322,7 +334,6 @@ export async function initializeContext(request, env) {
                              }).finally(() => clearTimeout(timeoutId));
                              
                              if (response.ok) {
-                                 // [Fix] 限制文本大小，防止处理过大数据挂起
                                  const text = await safeReadText(response, 50 * 1024);
                                  const list = await cleanList(text);
                                  proxyIPRemoteCache.data = list;
@@ -335,22 +346,22 @@ export async function initializeContext(request, env) {
                              console.error('Failed to fetch remote ProxyIP:', e.message);
                              const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
                              proxyIPRemoteCache.data = defParams;
-                             proxyIPRemoteCache.expires = Date.now() + 60000; // 失败后 1 分钟再试
+                             proxyIPRemoteCache.expires = Date.now() + 60000; 
                              return defParams;
                          } finally {
                              proxyIPRemoteCache.fetchingPromise = null;
                          }
                      })();
                  }
-                 // [Fix] 这里的 await 是安全的，即使 Promise 已经 settle
+                 // 安全等待结果
+                 // [Fix] 使用 waitUntil 防止 fetch 被中断 (但 fetch 本身需要 await)
+                 // 注意：这里我们 await 了 promise，会阻塞 request，符合预期(需要 ProxyIP 才能联网)
                  rawList = await proxyIPRemoteCache.fetchingPromise;
              }
         } else {
-            // 静态列表解析
             if (parsedListCache.proxyIP) {
                 rawList = parsedListCache.proxyIP;
             } else {
-                // [Fix] 限制长度防止恶意输入导致的 split 性能问题
                 const safeStr = rawProxyIP.length > 10000 ? rawProxyIP.substring(0, 10000) : rawProxyIP;
                 rawList = safeStr.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
                 parsedListCache.proxyIP = rawList;
@@ -360,54 +371,53 @@ export async function initializeContext(request, env) {
 
     if (rawList && rawList.length > 0) {
         const selectedIP = rawList[Math.floor(Math.random() * rawList.length)];
-        ctx.proxyIP = selectedIP;
-        ctx.proxyIPList = [selectedIP]; 
+        context.proxyIP = selectedIP;
+        context.proxyIPList = [selectedIP]; 
     } else {
-        ctx.proxyIP = '';
-        ctx.proxyIPList = [];
+        context.proxyIP = '';
+        context.proxyIPList = [];
     }
 
     // -------------------------------------------------------------------------
 
     if (parsedListCache.go2socks5) {
-        ctx.go2socks5 = parsedListCache.go2socks5;
+        context.go2socks5 = parsedListCache.go2socks5;
     } else {
-        // [Fix] 同样限制 go2socks 输入长度
         const safeGoStr = go2socksStr && go2socksStr.length > 5000 ? go2socksStr.substring(0, 5000) : go2socksStr;
-        ctx.go2socks5 = safeGoStr ? await cleanList(safeGoStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
-        parsedListCache.go2socks5 = ctx.go2socks5;
+        context.go2socks5 = safeGoStr ? await cleanList(safeGoStr) : CONSTANTS.DEFAULT_GO2SOCKS5;
+        parsedListCache.go2socks5 = context.go2socks5;
     }
 
     if (parsedListCache.banHosts) {
-        ctx.banHosts = parsedListCache.banHosts;
+        context.banHosts = parsedListCache.banHosts;
     } else if (banStr) {
         const safeBanStr = banStr.length > 10000 ? banStr.substring(0, 10000) : banStr;
-        ctx.banHosts = await cleanList(safeBanStr);
-        parsedListCache.banHosts = ctx.banHosts;
+        context.banHosts = await cleanList(safeBanStr);
+        parsedListCache.banHosts = context.banHosts;
     }
     
     if (parsedListCache.disabledProtocols) {
-        ctx.disabledProtocols = parsedListCache.disabledProtocols;
+        context.disabledProtocols = parsedListCache.disabledProtocols;
     } else {
         let disStr = disStrRaw;
         if (disStr) disStr = disStr.replace(/，/g, ',');
         const disList = await cleanList(disStr);
-        ctx.disabledProtocols = disList.map(p => {
+        context.disabledProtocols = disList.map(p => {
             const protocol = p.trim().toLowerCase();
             if (protocol === 'shadowsocks') return 'ss';
             return protocol;
         });
-        parsedListCache.disabledProtocols = ctx.disabledProtocols;
+        parsedListCache.disabledProtocols = context.disabledProtocols;
     }
 
-    ctx.enableXhttp = !ctx.disabledProtocols.includes('xhttp');
+    context.enableXhttp = !context.disabledProtocols.includes('xhttp');
 
     if (url.searchParams.has('proxyip')) {
         const manualIP = url.searchParams.get('proxyip');
-        ctx.proxyIP = manualIP;
-        ctx.proxyIPList = [manualIP];
+        context.proxyIP = manualIP;
+        context.proxyIPList = [manualIP];
     }
-    if (url.searchParams.has('socks5')) ctx.socks5 = url.searchParams.get('socks5');
+    if (url.searchParams.has('socks5')) context.socks5 = url.searchParams.get('socks5');
     
-    return ctx;
+    return context;
 }
