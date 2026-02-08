@@ -3293,8 +3293,78 @@ async function executeWebDavPush(env, ctx, force = false) {
   }
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 5e3) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  const config = { ...options, signal: controller.signal };
+  try {
+    const response = await fetch(url, config);
+    clearTimeout(id);
+    return response;
+  } catch (error) {
+    clearTimeout(id);
+    throw error;
+  }
+}
+async function resolveIPSource(sourceName, allIpSources) {
+  try {
+    let response;
+    const source = allIpSources.find((s) => s.name === sourceName);
+    if (sourceName === "\u53CD\u4EE3IP\u5217\u8868") {
+      response = await fetchWithTimeout("https://raw.githubusercontent.com/cmliu/ACL4SSR/main/baipiao.txt");
+      const text2 = response.ok ? await response.text() : "";
+      return text2.split("\n").map((l) => l.trim()).filter(Boolean);
+    } else if (source) {
+      response = await fetchWithTimeout(source.url);
+    } else {
+      response = await fetchWithTimeout(allIpSources[0].url);
+    }
+    const text = response.ok ? await response.text() : "";
+    const cidrs = text.split("\n").filter((line) => line.trim() && !line.startsWith("#"));
+    const ips =   new Set();
+    while (ips.size < 512 && cidrs.length > 0) {
+      const startSize = ips.size;
+      for (const cidr of cidrs) {
+        if (ips.size >= 512) break;
+        try {
+          if (!cidr.includes("/")) {
+            ips.add(cidr);
+            continue;
+          }
+          const [network, prefixStr] = cidr.split("/");
+          if (network.includes(":")) {
+            if (network.endsWith("::")) {
+              const rand = Math.floor(Math.random() * 65535).toString(16);
+              ips.add(network + rand);
+            } else {
+              ips.add(network);
+            }
+            continue;
+          }
+          const prefix = parseInt(prefixStr);
+          if (prefix < 12 || prefix > 31) continue;
+          const ipToInt = (ip) => ip.split(".").reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
+          const intToIp = (int) => [int >>> 24 & 255, int >>> 16 & 255, int >>> 8 & 255, int & 255].join(".");
+          const networkInt = ipToInt(network);
+          const hostBits = 32 - prefix;
+          const numHosts = 1 << hostBits;
+          if (numHosts > 2) {
+            const randomOffset = Math.floor(Math.random() * (numHosts - 2)) + 1;
+            ips.add(intToIp(networkInt + randomOffset));
+          }
+        } catch (e) {
+        }
+      }
+      if (ips.size === startSize) break;
+    }
+    return Array.from(ips);
+  } catch (error) {
+    void(0);
+    return [];
+  }
+}
 async function handleEditConfig(request, env, ctx) {
-  const FileName = await getConfig(env, "SUBNAME", "sub");
+  let FileName = await getConfig(env, "SUBNAME", "sub", ctx);
   if (!env.KV) {
     return new Response("<p>\u9519\u8BEF\uFF1A\u672A\u7ED1\u5B9AKV\u7A7A\u95F4\uFF0C\u65E0\u6CD5\u4F7F\u7528\u5728\u7EBF\u914D\u7F6E\u529F\u80FD\u3002</p>", { status: 404, headers: { "Content-Type": "text/html;charset=utf-8" } });
   }
@@ -3329,9 +3399,18 @@ async function handleEditConfig(request, env, ctx) {
   ];
   if (request.method === "POST") {
     try {
-      const formData = await request.formData();
+      let formData;
+      try {
+        formData = await request.formData();
+      } catch (err) {
+        return new Response("\u4FDD\u5B58\u5931\u8D25: \u65E0\u6CD5\u89E3\u6790\u8868\u5355\u6570\u636E (\u53EF\u80FD\u662F\u5185\u5BB9\u8FC7\u5927)", { status: 400 });
+      }
       const savePromises = [];
       const keysToClear = [];
+      const newSubName = formData.get("SUBNAME");
+      if (newSubName && newSubName !== FileName) {
+        FileName = newSubName;
+      }
       for (const [key] of configItems) {
         keysToClear.push(key);
         const value = formData.get(key);
@@ -3355,20 +3434,21 @@ async function handleEditConfig(request, env, ctx) {
         }
       }
       await Promise.all(savePromises);
-      await cleanConfigCache();
-      if (typeof clearKVCache === "function") {
-        await clearKVCache(keysToClear);
-      }
+      await cleanConfigCache(keysToClear);
       try {
-        const appCtx = await initializeContext(request, env);
-        appCtx.waitUntil = ctx.waitUntil.bind(ctx);
-        ctx.waitUntil(executeWebDavPush(env, appCtx, true));
+        const appCtx = await initializeContext(request, env, ctx);
+        if (ctx && ctx.waitUntil) {
+          appCtx.waitUntil = ctx.waitUntil.bind(ctx);
+        }
+        if (ctx && typeof ctx.waitUntil === "function") {
+          ctx.waitUntil(executeWebDavPush(env, appCtx, true));
+        }
       } catch (err) {
         void(0);
       }
       return new Response("\u4FDD\u5B58\u6210\u529F", { status: 200 });
     } catch (e) {
-      return new Response("\u4FDD\u5B58\u5931\u8D25: " + e.message, { status: 500 });
+      return new Response("\u4FDD\u5B58\u5931\u8D25: " + (e.message || e.toString()), { status: 500 });
     }
   }
   const kvPromises = configItems.map((item) => getKV(env, item[0]));
@@ -3410,15 +3490,11 @@ async function handleBestIP(request, env) {
     const testUrl = "https://cloudflare.com/cdn-cgi/trace";
     const startTime = Date.now();
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2e3);
-      const response = await fetch(testUrl, {
+      const response = await fetchWithTimeout(testUrl, {
         method: "GET",
         headers: { "Accept": "text/plain" },
-        signal: controller.signal,
         resolveOverride: ip
-      });
-      clearTimeout(timeoutId);
+      }, 2e3);
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
       const traceText = await response.text();
       const latency = Date.now() - startTime;
@@ -3457,7 +3533,6 @@ async function handleBestIP(request, env) {
         await env.KV.put(txt, inputIps.join("\n"));
       }
       await cleanConfigCache([txt]);
-      if (typeof clearKVCache === "function") await clearKVCache([txt]);
       return new Response(JSON.stringify({ success: true, message: action === "append" ? "\u8FFD\u52A0\u6210\u529F" : "\u4FDD\u5B58\u6210\u529F" }), { headers: { "Content-Type": "application/json" } });
     } catch (e) {
       return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { "Content-Type": "application/json" } });
@@ -3500,63 +3575,7 @@ async function handleBestIP(request, env) {
   const allIpSources = [...ipSources, { "name": "\u53CD\u4EE3IP\u5217\u8868", "url": "proxyip" }];
   if (url.searchParams.has("loadIPs")) {
     const ipSourceName = url.searchParams.get("loadIPs");
-    async function GetCFIPs(sourceName) {
-      try {
-        let response;
-        const source = allIpSources.find((s) => s.name === sourceName);
-        if (sourceName === "\u53CD\u4EE3IP\u5217\u8868") {
-          response = await fetch("https://raw.githubusercontent.com/cmliu/ACL4SSR/main/baipiao.txt");
-          const text2 = response.ok ? await response.text() : "";
-          return text2.split("\n").map((l) => l.trim()).filter(Boolean);
-        } else if (source) {
-          response = await fetch(source.url);
-        } else {
-          response = await fetch(allIpSources[0].url);
-        }
-        const text = response.ok ? await response.text() : "";
-        const cidrs = text.split("\n").filter((line) => line.trim() && !line.startsWith("#"));
-        const ips2 =   new Set();
-        while (ips2.size < 512 && cidrs.length > 0) {
-          const startSize = ips2.size;
-          for (const cidr of cidrs) {
-            if (ips2.size >= 512) break;
-            try {
-              if (!cidr.includes("/")) {
-                ips2.add(cidr);
-                continue;
-              }
-              const [network, prefixStr] = cidr.split("/");
-              if (network.includes(":")) {
-                if (network.endsWith("::")) {
-                  const rand = Math.floor(Math.random() * 65535).toString(16);
-                  ips2.add(network + rand);
-                } else {
-                  ips2.add(network);
-                }
-                continue;
-              }
-              const prefix = parseInt(prefixStr);
-              if (prefix < 12 || prefix > 31) continue;
-              const ipToInt = (ip) => ip.split(".").reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
-              const intToIp = (int) => [int >>> 24 & 255, int >>> 16 & 255, int >>> 8 & 255, int & 255].join(".");
-              const networkInt = ipToInt(network);
-              const hostBits = 32 - prefix;
-              const numHosts = 1 << hostBits;
-              if (numHosts > 2) {
-                const randomOffset = Math.floor(Math.random() * (numHosts - 2)) + 1;
-                ips2.add(intToIp(networkInt + randomOffset));
-              }
-            } catch (e) {
-            }
-          }
-          if (ips2.size === startSize) break;
-        }
-        return Array.from(ips2);
-      } catch (error) {
-        return [];
-      }
-    }
-    const ips = await GetCFIPs(ipSourceName);
+    const ips = await resolveIPSource(ipSourceName, allIpSources);
     return new Response(JSON.stringify({ ips }), { headers: { "Content-Type": "application/json" } });
   }
   const ipSourceOptions = allIpSources.map((s) => `<option value="${s.name}">${s.name}</option>`).join("\n");
