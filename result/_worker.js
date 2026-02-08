@@ -107,12 +107,8 @@ var SHA224_CONSTANTS = [
   3204031479,
   3329325298
 ];
-var sha224RotateRight = (value, shift) => {
-  return (value >>> shift | value << 32 - shift) >>> 0;
-};
-var sha224ToUtf8 = (str) => {
-  return unescape(encodeURIComponent(str));
-};
+var sha224RotateRight = (value, shift) => (value >>> shift | value << 32 - shift) >>> 0;
+var sha224ToUtf8 = (str) => unescape(encodeURIComponent(str));
 var sha224BytesToHex = (byteArray) => {
   let hexString = "";
   for (let i = 0; i < byteArray.length; i++) {
@@ -127,9 +123,7 @@ var computeSha224Core = (inputStr) => {
   inputStr += String.fromCharCode(128);
   const currentLen = inputStr.length;
   const padLen = (56 - currentLen % 64 + 64) % 64;
-  if (padLen > 0) {
-    inputStr += String.fromCharCode(0).repeat(padLen);
-  }
+  if (padLen > 0) inputStr += String.fromCharCode(0).repeat(padLen);
   const highBits = Math.floor(messageBitLength / 4294967296);
   const lowBits = messageBitLength & 4294967295;
   inputStr += String.fromCharCode(
@@ -148,9 +142,7 @@ var computeSha224Core = (inputStr) => {
   }
   const w = new Array(64);
   for (let i = 0; i < words.length; i += 16) {
-    for (let j = 0; j < 16; j++) {
-      w[j] = words[i + j];
-    }
+    for (let j = 0; j < 16; j++) w[j] = words[i + j];
     for (let j = 16; j < 64; j++) {
       const s0 = sha224RotateRight(w[j - 15], 7) ^ sha224RotateRight(w[j - 15], 18) ^ w[j - 15] >>> 3;
       const s1 = sha224RotateRight(w[j - 2], 17) ^ sha224RotateRight(w[j - 2], 19) ^ w[j - 2] >>> 10;
@@ -187,23 +179,16 @@ var computeSha224Core = (inputStr) => {
 var globalSha224Cache =   new Map();
 var MAX_SHA224_CACHE_SIZE = 50;
 function sha224Hash(message) {
-  if (globalSha224Cache.has(message)) {
-    return globalSha224Cache.get(message);
-  }
+  if (globalSha224Cache.has(message)) return globalSha224Cache.get(message);
   const utf8Message = sha224ToUtf8(message);
   const hashWords = computeSha224Core(utf8Message);
   const resultHex = sha224BytesToHex(hashWords.flatMap((h) => [h >>> 24 & 255, h >>> 16 & 255, h >>> 8 & 255, h & 255]));
-  if (globalSha224Cache.size >= MAX_SHA224_CACHE_SIZE) {
-    const oldestKey = globalSha224Cache.keys().next().value;
-    globalSha224Cache.delete(oldestKey);
-  }
+  if (globalSha224Cache.size >= MAX_SHA224_CACHE_SIZE) globalSha224Cache.delete(globalSha224Cache.keys().next().value);
   globalSha224Cache.set(message, resultHex);
   return resultHex;
 }
 function base64ToArrayBuffer(base64Str) {
-  if (!base64Str) {
-    return { earlyData: void 0, error: null };
-  }
+  if (!base64Str) return { earlyData: void 0, error: null };
   try {
     base64Str = base64Str.replace(/-/g, "+").replace(/_/g, "/");
     const padLen = (4 - base64Str.length % 4) % 4;
@@ -221,9 +206,7 @@ async function cleanList(content) {
 }
 function safeCloseWebSocket(socket) {
   try {
-    if (socket.readyState === 1 || socket.readyState === 2) {
-      socket.close();
-    }
+    if (socket.readyState === 1 || socket.readyState === 2) socket.close();
   } catch (error) {
     void(0);
   }
@@ -231,9 +214,7 @@ function safeCloseWebSocket(socket) {
 var byteToHex = Array.from({ length: 256 }, (v, i) => (i + 256).toString(16).slice(1));
 function stringifyUUID(arr, offset = 0) {
   const uuid = (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
-  if (!isValidUUID(uuid)) {
-    throw TypeError("Invalid stringified UUID");
-  }
+  if (!isValidUUID(uuid)) throw TypeError("Invalid stringified UUID");
   return uuid;
 }
 async function generateDynamicUUID(key, timeDays, updateHour) {
@@ -258,11 +239,25 @@ async function generateDynamicUUID(key, timeDays, updateHour) {
   const prev = await generate(key + (currentCycle - 1));
   return [current, prev];
 }
+var REGEX_CACHE =   new Map();
 function isHostBanned(hostname, banList) {
   if (!banList || banList.length === 0) return false;
   return banList.some((pattern) => {
-    let regexPattern = pattern.replace(/\*/g, ".*");
-    let regex = new RegExp(`^${regexPattern}$`, "i");
+    let regex;
+    if (REGEX_CACHE.has(pattern)) {
+      regex = REGEX_CACHE.get(pattern);
+    } else {
+      try {
+        let regexPattern = pattern.replace(/\*/g, ".*");
+        regex = new RegExp(`^${regexPattern}$`, "i");
+      } catch (e) {
+        regex = /^$/;
+      }
+      if (REGEX_CACHE.size > 500) {
+        REGEX_CACHE.delete(REGEX_CACHE.keys().next().value);
+      }
+      REGEX_CACHE.set(pattern, regex);
+    }
     return regex.test(hostname);
   });
 }
@@ -299,9 +294,7 @@ var KNOWN_KV_KEYS = [
 ];
 async function getKV(env, key) {
   if (!env.KV || !key) return null;
-  if (GLOBAL_KV_CACHE.has(key)) {
-    return GLOBAL_KV_CACHE.get(key);
-  }
+  if (GLOBAL_KV_CACHE.has(key)) return GLOBAL_KV_CACHE.get(key);
   const cache = caches.default;
   const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
   try {
@@ -328,32 +321,20 @@ async function getKV(env, key) {
   if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
   GLOBAL_KV_CACHE.set(key, val);
   const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
-  const response = new Response(cacheVal, {
-    headers: {
-      "Content-Type": "text/plain",
-      "Cache-Control": "max-age=2592000"
-    }
-  });
   try {
-    cache.put(cacheKeyUrl, response).catch((e) => void(0));
+    cache.put(cacheKeyUrl, new Response(cacheVal, { headers: { "Content-Type": "text/plain", "Cache-Control": "max-age=2592000" } })).catch(() => {
+    });
   } catch (e) {
-    void(0);
   }
   return val;
 }
 async function clearKVCache(keys) {
   const cache = caches.default;
   const targetKeys = keys && Array.isArray(keys) ? keys : KNOWN_KV_KEYS;
-  if (keys) {
-    keys.forEach((k) => GLOBAL_KV_CACHE.delete(k));
-  } else {
-    GLOBAL_KV_CACHE.clear();
-  }
-  const deletePromises = targetKeys.map((key) => {
-    const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
-    return cache.delete(cacheKeyUrl).catch((e) => void(0));
-  });
-  await Promise.all(deletePromises);
+  if (keys) keys.forEach((k) => GLOBAL_KV_CACHE.delete(k));
+  else GLOBAL_KV_CACHE.clear();
+  await Promise.all(targetKeys.map((key) => cache.delete(CACHE_API_PREFIX + encodeURIComponent(key)).catch(() => {
+  })));
   void(0);
 }
 function fmix32(h) {
@@ -367,12 +348,8 @@ function fmix32(h) {
 var StreamCipher = class {
   constructor(keyBytes, saltBytes) {
     let s1 = 0, s2 = 0, s3 = 0, s4 = 0;
-    for (let i = 0; i < keyBytes.length; i++) {
-      s1 = Math.imul(s1, 31) + keyBytes[i] | 0;
-    }
-    for (let i = 0; i < saltBytes.length; i++) {
-      s2 = Math.imul(s2, 31) + saltBytes[i] | 0;
-    }
+    for (let i = 0; i < keyBytes.length; i++) s1 = Math.imul(s1, 31) + keyBytes[i] | 0;
+    for (let i = 0; i < saltBytes.length; i++) s2 = Math.imul(s2, 31) + saltBytes[i] | 0;
     s3 = fmix32(s1 ^ 305419896);
     s4 = fmix32(s2 ^ 2271560481);
     s1 = fmix32(s1);
@@ -396,9 +373,7 @@ var StreamCipher = class {
     if (buffer.byteOffset % 4 === 0 && len >= 4) {
       const len32 = Math.floor(len / 4);
       const view32 = new Uint32Array(buffer.buffer, buffer.byteOffset, len32);
-      for (let j = 0; j < len32; j++) {
-        view32[j] ^= this.next();
-      }
+      for (let j = 0; j < len32; j++) view32[j] ^= this.next();
       i = len32 * 4;
     }
     let randomCache = 0;
@@ -2231,18 +2206,14 @@ async function safe_cancel(reader, reason) {
 async function safe_read(reader, deadline) {
   if (!reader) return { done: true };
   const remainingTime = deadline - Date.now();
-  if (remainingTime <= 0) {
-    return { done: true, error: new Error("Read timeout") };
-  }
+  if (remainingTime <= 0) return { done: true, error: new Error("Read timeout") };
   let timeoutId;
   const timeoutPromise = new Promise((resolve) => {
     timeoutId = setTimeout(() => resolve({ timeout: true }), remainingTime);
   });
   try {
     const result = await Promise.race([reader.read(), timeoutPromise]);
-    if (result.timeout) {
-      return { done: true, error: new Error("Read timeout") };
-    }
+    if (result.timeout) return { done: true, error: new Error("Read timeout") };
     return result;
   } catch (e) {
     const msg = (e.message || "").toLowerCase();
@@ -2358,21 +2329,6 @@ async function read_xhttp_header(readable, ctx) {
     throw error;
   }
 }
-async function upload_to_remote_xhttp(writer, httpx) {
-  if (httpx.data && httpx.data.length > 0) {
-    await writer.write(httpx.data);
-  }
-  if (httpx.done) return;
-  while (true) {
-    try {
-      const { value, done } = await httpx.reader.read();
-      if (done) break;
-      if (value) await writer.write(value);
-    } catch (e) {
-      break;
-    }
-  }
-}
 function create_xhttp_downloader(resp, remote_readable, initialData) {
   const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45e3;
   let lastActivity = Date.now();
@@ -2452,17 +2408,22 @@ async function handleXhttpClient(request, ctx) {
     return null;
   }
   const uploaderPromise = (async () => {
-    let writer = null;
     try {
-      writer = remoteSocket.writable.getWriter();
-      await upload_to_remote_xhttp(writer, { data, done, reader });
-    } catch (e) {
-    } finally {
-      if (writer) try {
-        await writer.close();
-      } catch (_) {
+      if (data && data.length > 0) {
+        const writer = remoteSocket.writable.getWriter();
+        try {
+          await writer.write(data);
+        } finally {
+          writer.releaseLock();
+        }
       }
-      await safe_cancel(reader, "upload finished");
+      if (done) {
+        await remoteSocket.writable.close();
+      } else {
+        reader.releaseLock();
+        await request.body.pipeTo(remoteSocket.writable);
+      }
+    } catch (e) {
     }
   })();
   const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
