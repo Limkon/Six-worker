@@ -460,7 +460,7 @@ async function cleanConfigCache(updatedKeys) {
     uuidCache = { key: null, data: null, lastUpdate: 0 };
   }
 }
-async function loadRemoteConfig(env, forceReload = false) {
+async function loadRemoteConfig(env, forceReload = false, signal = null) {
   const remoteConfigUrl = await getKV(env, "REMOTE_CONFIG_URL");
   const now = Date.now();
   const isExpired = now - remoteConfigCache.lastFetch > REMOTE_CONFIG_TTL;
@@ -470,6 +470,10 @@ async function loadRemoteConfig(env, forceReload = false) {
   if (remoteConfigUrl) {
     try {
       const controller = new AbortController();
+      if (signal) {
+        signal.addEventListener("abort", () => controller.abort());
+        if (signal.aborted) controller.abort();
+      }
       const timeoutId = setTimeout(() => controller.abort(), 5e3);
       const response = await fetch(remoteConfigUrl, {
         signal: controller.signal,
@@ -501,7 +505,9 @@ async function loadRemoteConfig(env, forceReload = false) {
         parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
       }
     } catch (e) {
-      void(0);
+      if (e.name !== "AbortError") {
+        void(0);
+      }
     }
   }
   return remoteConfigCache.data;
@@ -542,22 +548,24 @@ async function getCachedUUID(seed, timeDays, updateHour) {
   uuidCache = { key: cacheKey, data: userIDs, lastUpdate: now };
   return userIDs;
 }
-async function initializeContext(request, env, ctx = null) {
+async function initializeContext(request, env, ctx = null, signal = null) {
   const url = new URL(request ? request.url : "http://localhost");
   const forceReload = url.searchParams.get("flush") === "1";
+  if (signal && signal.aborted) throw new Error("Init Aborted");
   if (forceReload) {
     void(0);
     await cleanConfigCache();
   }
   const enableRemote = await getConfig(env, "REMOTE_CONFIG", "0", ctx);
   if (enableRemote === "1") {
-    await loadRemoteConfig(env, forceReload);
+    await loadRemoteConfig(env, forceReload, signal);
   } else if (remoteConfigCache.lastFetch > 0) {
     remoteConfigCache = { data: {}, lastFetch: 0 };
     configCache = {};
     configGeneration++;
     parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
   }
+  if (signal && signal.aborted) throw new Error("Init Aborted");
   const [adminPass, rawUUID, rawKey, timeDaysStr, updateHourStr] = await Promise.all([
     getConfig(env, "ADMIN_PASS", void 0, ctx),
     getConfig(env, "UUID", void 0, ctx),
@@ -660,6 +668,9 @@ async function initializeContext(request, env, ctx = null) {
               proxyIPRemoteCache.fetchingPromise = null;
             }
           })();
+        }
+        if (signal) {
+          if (signal.aborted) throw new Error("Init Aborted (ProxyIP)");
         }
         rawList = await proxyIPRemoteCache.fetchingPromise;
       }
@@ -3886,7 +3897,7 @@ async function handlePasswordSetup(request, env, ctx) {
     await markDomainAsPushed("init-setup", ctx);
     await cleanConfigCache();
     try {
-      const appCtx = await execWithRetry((signal) => initializeContext(request, env, ctx), 2, 5e3);
+      const appCtx = await execWithRetry((s) => initializeContext(request, env, ctx, s), 2, 5e3);
       appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
       safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
     } catch (e) {
@@ -3923,7 +3934,7 @@ var index_default = {
     try {
       return await timeout(async (signal) => {
         try {
-          const context = await execWithRetry((s) => initializeContext(request, env, ctx), 3, 6e3);
+          const context = await execWithRetry((s) => initializeContext(request, env, ctx, s), 3, 6e3);
           context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
           const url = new URL(request.url);
           const path = normalizePath(url);
