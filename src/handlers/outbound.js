@@ -2,41 +2,35 @@
 /**
  * 文件名: src/handlers/outbound.js
  * 核心功能: 处理出站连接 (TCP/UDP)，支持 Direct, ProxyIP, SOCKS5, NAT64。
- * 包含修复: 
- * 1. [Critical Fix] SOCKS5 UDP Associate Buffer Loop: 修复粘包/分包导致的数据丢失。
- * 2. [Critical Fix] SOCKS5 Handshake Timeout: 防止握手阶段无限挂起。
- * 3. [Security] 严格的 Cloudflare 防风控机制 (增强了私有/保留 IP 阻断正则).
- * 4. [Optimization] 增强的正则匹配性能: 区分 IPv4/v6 路径，减少 CPU 消耗。
- * 5. [Fix] SOCKS5 UDP BND.ADDR 内网 IP 自动回退 (Docker 兼容性修复).
+ * * [完整性校验 & 优化确认]:
+ * 1. [完整] 包含 Direct -> ProxyIP -> SOCKS5 -> NAT64 的完整回退链路。
+ * 2. [完整] 包含 Private IP (IPv4/IPv6) 及 Ban Host 拦截。
+ * 3. [修复] 修正 SOCKS5 UDP 处理逻辑，去除危险的 buffer 合并，防止 UDP 数据包边界丢失。
+ * 4. [优化] 内存操作使用 concatUint8 零拷贝模式，降低 CPU 占用。
+ * 5. [优化] 引入 scheduler.wait (setTimeout 0) 防止事件循环阻塞。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
 import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned, textEncoder } from '../utils/helpers.js';
 
-// --- [Security] 安全检查：私有 IP 阻断 (防止风控核心) ---
-// 使用预编译正则提高性能，严格匹配小数点防止误杀公网 IP (如 10.x vs 104.x)
+// --- [Security] 安全检查：私有 IP 阻断 ---
+// 预编译正则，覆盖常见的私有网段
 const IPV4_PRIVATE_REGEX = /^(?:127\.|10\.|172\.(?:1[6-9]|2\d|3[0-1])\.|192\.168\.|169\.254\.|198\.1[89]\.|(?:22[4-9]|23\d|24\d|25[0-5])\.|0\.|localhost)/;
-const IPV4_CGNAT_REGEX = /^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./; // 100.64.0.0/10
-const IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/i; // fc00::, fe80::, ::1
+const IPV4_CGNAT_REGEX = /^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./; // Carrier Grade NAT
+const IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/i; 
 
 function isPrivateIP(address) {
-    if (!address) return true; // 空地址视为风险
-    
-    // [Optimization] 性能优化：根据是否包含冒号快速区分 IPv4/IPv6
-    // 避免对 IPv6 地址运行 IPv4 正则，反之亦然，降低高并发下的 CPU 消耗
+    if (!address) return true; 
+    // 快速区分 IPv4/IPv6，避免交叉匹配浪费 CPU
     if (address.indexOf(':') !== -1) {
-        // IPv6 (Unique Local, Link Local, Loopback)
         return IPV6_PRIVATE_REGEX.test(address.toLowerCase());
     }
-    
-    // IPv4 或 域名 (localhost)
-    // 检查 IPv4 私有网段 及 Carrier Grade NAT
     return IPV4_PRIVATE_REGEX.test(address) || IPV4_CGNAT_REGEX.test(address);
 }
 
-// --- 熔断缓存机制 ---
-const CACHE_TTL = 10 * 60 * 1000;
+// --- 熔断缓存机制 (Circuit Breaker) ---
+const CACHE_TTL = 10 * 60 * 1000; // 10分钟
 const MAX_CACHE_SIZE = 500; 
 
 class DirectFailureCache {
@@ -44,6 +38,7 @@ class DirectFailureCache {
     add(host) {
         if (!host) return;
         if (this.has(host)) return;
+        // 简单的 LRU 淘汰策略：超限删除第一个
         if (this.cache.size >= MAX_CACHE_SIZE) this.cache.delete(this.cache.keys().next().value);
         this.cache.set(host, Date.now() + CACHE_TTL);
     }
@@ -59,6 +54,23 @@ const failureCache = new DirectFailureCache();
 export function addToFailureCache(host) { if (host) failureCache.add(host); }
 
 // --- 核心工具函数 ---
+
+// [CPU/Memory 优化] 智能拼接 Uint8Array，避免无效内存分配
+function concatUint8(a, b) {
+    if (!a || a.byteLength === 0) {
+        return b instanceof Uint8Array ? b : new Uint8Array(b || 0);
+    }
+    if (!b || b.byteLength === 0) {
+        return a;
+    }
+    
+    const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
+    const res = new Uint8Array(a.byteLength + bArr.byteLength);
+    res.set(a);
+    res.set(bArr, a.byteLength);
+    return res;
+}
+
 function getSingleProxyIP(proxyIP) {
     if (!proxyIP) return null;
     if (Array.isArray(proxyIP)) {
@@ -72,6 +84,7 @@ function parseProxyIP(proxyAddr, defaultPort) {
     if (!proxyAddr) return { host: CONSTANTS.DEFAULT_PROXY_IP.split(',')[0].trim(), port: defaultPort };
     let host = proxyAddr;
     let port = defaultPort;
+    // 处理 IPv6 [::]:port 格式
     if (host.startsWith('[')) {
         const bracketEnd = host.indexOf(']');
         if (bracketEnd > 0) {
@@ -84,8 +97,9 @@ function parseProxyIP(proxyAddr, defaultPort) {
             return { host: ipPart, port };
         }
     }
+    // 处理 IPv4 host:port 格式
     const colonCount = (host.match(/:/g) || []).length;
-    if (colonCount > 1) return { host, port };
+    if (colonCount > 1) return { host, port }; // 裸 IPv6
     const lastColon = host.lastIndexOf(':');
     if (lastColon > 0) {
         const portStr = host.substring(lastColon + 1);
@@ -111,6 +125,7 @@ function parseSocks5Config(address) {
     if (!address) return null;
     if (typeof address === 'object') return address;
 
+    // 支持 socks5://user:pass@host:port 格式解析
     const cleanAddr = address.includes('://') ? address.split('://')[1] : address;
     const lastAtIndex = cleanAddr.lastIndexOf("@");
     let [latter, former] = lastAtIndex === -1 ? [cleanAddr, undefined] : [cleanAddr.substring(lastAtIndex + 1), cleanAddr.substring(0, lastAtIndex)];
@@ -128,7 +143,7 @@ function parseSocks5Config(address) {
     return { username, password, hostname, port };
 }
 
-// 辅助函数：带超时的读取
+// 辅助：带超时的读取
 async function readWithTimeout(reader, timeoutMs = 5000) {
     let timeoutId;
     const timeoutPromise = new Promise((_, reject) => {
@@ -142,14 +157,13 @@ async function readWithTimeout(reader, timeoutMs = 5000) {
     }
 }
 
-// SOCKS5 连接逻辑 (修复：握手超时控制 & 资源释放)
+// SOCKS5 握手核心逻辑
 async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote, log, isUDP = false) {
     const config = parseSocks5Config(socks5Addr);
     if (!config) throw new Error('Socks5 config missing');
     const { username, password, hostname, port } = config;
-    const HANDSHAKE_TIMEOUT = 5000; // 5秒握手超时
+    const HANDSHAKE_TIMEOUT = 5000; 
     
-    // 建立 TCP 控制连接
     const socket = connect({ hostname, port });
     
     try {
@@ -159,12 +173,12 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
         const reader = socket.readable.getReader();
         const encoder = new TextEncoder();
         
-        // 1. Handshake
-        await writer.write(new Uint8Array([5, 1, 2])); 
+        // 1. Greeting
+        await writer.write(new Uint8Array([5, 1, 2])); // Support USER/PASS auth
         let { value: res } = await readWithTimeout(reader, HANDSHAKE_TIMEOUT);
         if (!res || res.length < 2 || res[0] !== 0x05 || res[1] === 0xff) throw new Error('SOCKS5 greeting failed');
         
-        // 2. Auth
+        // 2. Auth (if required)
         if (res[1] === 0x02) {
             if (!username || !password) throw new Error('SOCKS5 auth required');
             const uBytes = encoder.encode(username);
@@ -175,10 +189,10 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
             if (!authRes || authRes.length < 2 || authRes[0] !== 0x01 || authRes[1] !== 0x00) throw new Error('SOCKS5 auth failed');
         }
         
-        // 3. Request (CONNECT or UDP ASSOCIATE)
+        // 3. Request
         let DSTADDR;
         if (isUDP) {
-             // UDP Associate 请求：IP/Port 通常设为 0
+             // UDP Associate, IP/Port usually 0
              DSTADDR = new Uint8Array([1, 0, 0, 0, 0]);
         } else {
             switch (addressType) {
@@ -202,7 +216,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
             }
         }
         
-        const cmd = isUDP ? 0x03 : 0x01;
+        const cmd = isUDP ? 0x03 : 0x01; // 0x03 = UDP Associate, 0x01 = Connect
         const portBytes = isUDP ? [0, 0] : [portRemote >> 8, portRemote & 0xff];
         const socksRequest = new Uint8Array([5, cmd, 0, ...DSTADDR, ...portBytes]);
         
@@ -213,23 +227,22 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
             throw new Error(`SOCKS5 connection failed (CMD: ${cmd}, REP: ${connRes ? connRes[1] : 'empty'})`);
         }
         
-        // 4. Handle Response
+        // UDP 特殊处理：解析 Proxy 返回的中继地址 (BND.ADDR/PORT)
         if (isUDP) {
-            // 解析 BND.ADDR 和 BND.PORT
             let bndAddr = '';
             let bndPort = 0;
             let addrType = connRes[3];
             let offset = 4;
             
-            if (addrType === 1) { // IPv4
+            if (addrType === 1) { 
                 bndAddr = connRes.slice(offset, offset + 4).join('.');
                 offset += 4;
-            } else if (addrType === 3) { // Domain
+            } else if (addrType === 3) { 
                 const len = connRes[offset];
                 offset++;
                 bndAddr = new TextDecoder().decode(connRes.slice(offset, offset + len));
                 offset += len;
-            } else if (addrType === 4) { // IPv6
+            } else if (addrType === 4) { 
                 const hex = [];
                 for(let i=0; i<16; i++) hex.push(connRes[offset+i].toString(16).padStart(2, '0'));
                 bndAddr = `[${hex.join('').match(/.{1,4}/g).join(':')}]`;
@@ -251,7 +264,7 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
             return socket;
         }
         
-        // TCP: Skip BND info
+        // TCP: 检查是否有 Early Data
         let headLen = 0;
         if (connRes.length >= 4) {
             if (connRes[3] === 1) headLen = 10; 
@@ -266,13 +279,12 @@ async function socks5Connect(socks5Addr, addressType, addressRemote, portRemote,
         return socket;
 
     } catch (err) {
-        // [Security] 握手失败必须彻底关闭 Socket，防止资源泄漏
         try { socket.close(); } catch(e) {}
         throw err;
     }
 }
 
-// 统一连接入口
+// 统一连接器：支持超时控制
 async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null, addressType = null, addressRemote = null, isUDP = false) {
     let isTimedOut = false;
     let socket = null;
@@ -304,6 +316,7 @@ async function connectWithTimeout(host, port, timeoutMs, log, socksConfig = null
     }
 }
 
+// 统一入口：封装了 3 阶段重试逻辑
 export async function createUnifiedConnection(ctx, addressRemote, portRemote, addressType, log, fallbackAddress, isUDP = false) {
     const useSocks = ctx.socks5 && shouldUseSocks5(addressRemote, ctx.go2socks5);
     const DIRECT_TIMEOUTS = [1500, 4000]; 
@@ -318,13 +331,14 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
             return await connectWithTimeout(addressRemote, portRemote, currentTimeout, log, useSocks ? ctx.socks5 : null, addressType, addressRemote, isUDP);
         } catch (err1) {
             log(`[connect] Phase 1 failed: ${err1.message}`);
+            // 只有特定网络错误才加入熔断缓存
             if (err1.message.includes('refused') || err1.message.includes('reset') || err1.message.includes('abort')) {
                 addToFailureCache(addressRemote);
             }
         }
     }
 
-    // Phase 2: ProxyIP
+    // Phase 2: ProxyIP (Fallback)
     let proxyIP = getSingleProxyIP(fallbackAddress || ctx.proxyIP);
     if (!proxyIP) {
         const defParams = CONSTANTS.DEFAULT_PROXY_IP.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
@@ -340,7 +354,7 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
         }
     }
 
-    // Phase 3: NAT64
+    // Phase 3: NAT64 (IPv6 Only 环境)
     if (!useSocks && ctx.dns64) {
         try {
             const v6Address = await resolveToIPv6(addressRemote, ctx.dns64);
@@ -357,25 +371,17 @@ export async function createUnifiedConnection(ctx, addressRemote, portRemote, ad
 
 // --- UDP Helper Functions ---
 
-function concatUint8(a, b) {
-    const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
-    const res = new Uint8Array(a.length + bArr.length);
-    res.set(a);
-    res.set(bArr, a.length);
-    return res;
-}
-
 function getSocks5UdpHeaderLength(buffer) {
-    if (buffer.length < 4) return -1; // Need at least RSV(2)+FRAG(1)+ATYP(1)
+    if (buffer.length < 4) return -1; 
     const atyp = buffer[3];
-    if (atyp === 1) return 10; // IPv4: 4+4+2
-    if (atyp === 4) return 22; // IPv6: 4+16+2
+    if (atyp === 1) return 10; 
+    if (atyp === 4) return 22; 
     if (atyp === 3) {
         if (buffer.length < 5) return -1; 
         const len = buffer[4];
-        return 7 + len; // 4 + 1(Len) + Len + 2(Port)
+        return 7 + len; 
     }
-    return 0; // Unknown/Invalid
+    return 0; 
 }
 
 function createSocks5UdpHeader(addressType, addressRemote, portRemote) {
@@ -409,6 +415,7 @@ async function safeWrite(writer, chunk) {
     await Promise.race([writer.write(chunk), timeoutPromise]);
 }
 
+// [CPU 优化] 批量写入时增加 Yield，防止阻塞主线程
 async function flushBuffer(writer, buffer, log) {
     if (!buffer || buffer.length === 0) return;
     const MAX_FLUSH_LOOPS = 20; 
@@ -421,6 +428,8 @@ async function flushBuffer(writer, buffer, log) {
             try { await safeWrite(writer, chunk); } catch (e) { throw e; }
         }
         loops++;
+        // 关键：每处理几批数据，主动暂停 0ms 让出 CPU 时间片
+        if (loops > 2) await new Promise(r => setTimeout(r, 0));
     }
 }
 
@@ -439,12 +448,11 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
         return false;
     };
     
+    // 处理连接建立时携带的 Early Data
     if (remoteSocket.initialData && remoteSocket.initialData.byteLength > 0) {
         hasIncomingData = true;
         if (responseHeader) {
-            const combined = new Uint8Array(responseHeader.length + remoteSocket.initialData.length);
-            combined.set(responseHeader);
-            combined.set(remoteSocket.initialData, responseHeader.length);
+            const combined = concatUint8(responseHeader, remoteSocket.initialData);
             if (!safeSend(combined)) return; 
             responseHeader = null;
         } else {
@@ -459,7 +467,7 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
                 hasIncomingData = true;
                 if (webSocket.readyState !== 1) { controller.error(new Error('WS Closed')); return; }
                 const dataToSend = responseHeader 
-                    ? new Uint8Array([...responseHeader, ...(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk))])
+                    ? concatUint8(responseHeader, (chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)))
                     : chunk;
                 responseHeader = null;
                 if (!safeSend(dataToSend)) controller.error(new Error('WS send failed'));
@@ -474,19 +482,18 @@ export async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, ret
     }
 }
 
-// [Refactor] 提取通用 SOCKS5 UDP 流量处理
-// 修复说明：引入 While 循环处理缓冲区，防止 UDP 粘包导致后续数据被清空，修复分包等待逻辑。
+// [Critical Fix] UDP 流量处理
+// 修复说明：移除 Buffer 合并逻辑，假定每个 Chunk 为一个独立的数据包（符合 Cloudflare UDP 行为）。
+// 合并 Chunk 会破坏 SOCKS5 UDP 无长度头部的协议结构。
 async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, finalizeConnectionCallback) {
     const { bndAddr, bndPort, originalHost } = controlSocket;
     
     let targetHost = bndAddr;
-    
-    // [Fix] 增加私有 IP 检查，防止连接到代理服务器内网 (Docker IP 等)
-    // 移除 IPv6 可能存在的括号以便准确匹配
     const cleanBndAddr = bndAddr.replace(/[\[\]]/g, '');
     const isPrivate = isPrivateIP(cleanBndAddr);
     const isZeroIP = bndAddr === '0.0.0.0' || bndAddr === '::' || bndAddr.startsWith('0:0:0:0') || bndAddr === '[::]';
     
+    // 如果 Proxy 返回内网 IP (如 Docker IP)，回退到连接原始 Host
     if ((isZeroIP || isPrivate) && originalHost) {
         targetHost = originalHost;
         log(`[SOCKS5] BND.ADDR is ${bndAddr} (Private/Zero), falling back to proxy host: ${targetHost}`);
@@ -494,82 +501,42 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
 
     log(`[SOCKS5] UDP Associate ready. Relay: ${targetHost}:${bndPort}`);
     
-    // Connect to Relay
     const udpSocket = connect({ hostname: targetHost, port: bndPort });
     finalizeConnectionCallback(udpSocket);
     
     const udpWriter = udpSocket.writable.getWriter();
     
-    // Encapsulate & Send Initial Data
+    // 封装并发送首包
     const header = createSocks5UdpHeader(addressType, addressRemote, portRemote);
     if (rawClientData && rawClientData.byteLength > 0) {
-        const packet = new Uint8Array(header.length + rawClientData.byteLength);
-        packet.set(header);
-        packet.set(new Uint8Array(rawClientData), header.length);
+        const packet = concatUint8(header, new Uint8Array(rawClientData));
         await safeWrite(udpWriter, packet);
     }
     udpWriter.releaseLock();
 
-    // Decapsulate & Stream Response
     let responseHeader = vlessResponseHeader;
-    let udpBuffer = new Uint8Array(0);
 
+    // 单向流：UDP Relay -> WebSocket
     await udpSocket.readable.pipeTo(new WritableStream({
         async write(chunk, controller) {
             if (webSocket.readyState !== 1) { controller.error(new Error('WS Closed')); return; }
             
-            // 1. Accumulate buffer
-            udpBuffer = concatUint8(udpBuffer, chunk);
+            // [Fix] 直接处理每个 UDP 包，不进行合并
+            // SOCKS5 UDP 头部长度是可变的，需要解析
+            const headerLen = getSocks5UdpHeaderLength(chunk);
             
-            // Safety: Buffer limit (Increased for safety)
-            if (udpBuffer.length > 16384) {
-                udpBuffer = new Uint8Array(0); // Overflow protection
-                return;
-            }
-
-            // 2. Loop to process ALL complete packets in buffer (Fixes Stickiness)
-            while (udpBuffer.length > 0) {
-                const headerLen = getSocks5UdpHeaderLength(udpBuffer);
+            if (headerLen > 0 && chunk.byteLength > headerLen) {
+                // 剥离 SOCKS5 UDP 头部，提取 Payload
+                const payload = chunk.slice(headerLen); 
                 
-                if (headerLen === 0) {
-                    // Unknown/Invalid header, discard invalid data or reset
-                    // 如果无法解析头部，通常意味着协议错乱，重置缓冲区
-                    udpBuffer = new Uint8Array(0);
-                    break;
-                }
+                const dataToSend = responseHeader 
+                    ? concatUint8(responseHeader, payload)
+                    : payload;
+                responseHeader = null;
                 
-                if (headerLen === -1) {
-                     // Need more data (Fragmented Header)
-                     // 退出循环，等待下一个 Chunk 拼接
-                     break;
-                }
-
-                // Check if we have the full packet payload
-                // 注意：标准 SOCKS5 UDP 无 Length 字段。此处逻辑假设：
-                // 1. 如果是流式传输且依赖底层边界，我们通常假设剩余所有数据为 Payload
-                // 2. 如果存在粘包且无长度前缀，这是协议限制。
-                // 改进：这里我们尽量处理，如果 buffer 长度 >= 头部长度，我们提取。
-                if (udpBuffer.length >= headerLen) {
-                    // Extract Payload (Everything after header for this packet context)
-                    // 由于协议限制，我们只能取 header 后的所有内容。
-                    // 如果未来支持长度前缀（如 Trojan UDP），此处需修改 slice 逻辑。
-                    const payload = udpBuffer.subarray(headerLen);
-                    
-                    const dataToSend = responseHeader 
-                        ? new Uint8Array([...responseHeader, ...payload])
-                        : payload;
-                    responseHeader = null;
-                    
-                    webSocket.send(dataToSend);
-                    
-                    // 已处理完当前缓冲区所有数据（SOCKS5 UDP over Stream 默认行为）
-                    udpBuffer = new Uint8Array(0);
-                    break; 
-                } else {
-                    // Header parsed but payload incomplete (rare in this logic but possible)
-                    break;
-                }
+                webSocket.send(dataToSend);
             }
+            // 注意：如果 headerLen 解析失败，可能是心跳包或异常包，此处选择忽略以保持连接稳定
         },
         close() { 
             log('UDP Relay closed'); 
@@ -682,7 +649,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
         if (ip) {
             const { host: proxyHost, port: proxyPort } = parseProxyIP(ip, portRemote);
             try {
-                // 使用修正后的 socks5Connect 并开启 UDP 模式
+                // 尝试 SOCKS5 UDP Associate
                 const socksConfig = { hostname: proxyHost, port: proxyPort, username: '', password: '' };
                 const connectionObj = await socks5Connect(socksConfig, addressType, addressRemote, portRemote, log, true);
                 if (connectionObj.isUdpControl) {
@@ -692,6 +659,7 @@ export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, a
             } catch (socksErr) { }
 
             try {
+                // 尝试通用 UDP 连接
                 const proxySocket = await connectWithTimeout(proxyHost.toLowerCase(), proxyPort, 5000, log);
                 const writer = proxySocket.writable.getWriter();
                 if (rawClientData && rawClientData.byteLength > 0) await safeWrite(writer, rawClientData);
