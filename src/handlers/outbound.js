@@ -7,13 +7,14 @@
  * 2. [修复] 修正 SOCKS5 UDP 处理逻辑，防止 UDP 数据包边界丢失。
  * 3. [优化] 内存操作使用 concatUint8 零拷贝模式 (仅合并头部)，flushBuffer 采用迭代写入。
  * 4. [Optimization] shouldUseSocks5 增加正则缓存，大幅降低 CPU 占用。
+ * 5. [Change] 移除出站私有 IP 强制阻断 (保留 isPrivateIP 函数供 SOCKS5 逻辑使用)。
  */
 import { connect } from 'cloudflare:sockets';
 import { CONSTANTS } from '../constants.js';
 import { resolveToIPv6, parseIPv6 } from '../utils/dns.js';
 import { safeCloseWebSocket, isHostBanned, textEncoder } from '../utils/helpers.js';
 
-// --- [Security] 安全检查：私有 IP 阻断 ---
+// --- [Security] 工具定义：私有 IP 检测 (仅保留定义供内部逻辑判断，不再强制阻断) ---
 const IPV4_PRIVATE_REGEX = /^(?:127\.|10\.|172\.(?:1[6-9]|2\d|3[0-1])\.|192\.168\.|169\.254\.|198\.1[89]\.|(?:22[4-9]|23\d|24\d|25[0-5])\.|0\.|localhost)/;
 const IPV4_CGNAT_REGEX = /^100\.(?:6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./; // Carrier Grade NAT
 const IPV6_PRIVATE_REGEX = /^(:?(:|f[cd][0-9a-f]{2}|fe[89ab][0-9a-f])):|^(::1)$/i; 
@@ -540,8 +541,9 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
 }
 
 export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-    if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) { 
-        log(`[Block] TCP request blocked: ${addressRemote} is private or banned.`);
+    // [Modified] 移除了 isPrivateIP 检查
+    if (isHostBanned(addressRemote, ctx.banHosts)) { 
+        log(`[Block] TCP request blocked: ${addressRemote} is banned.`);
         safeCloseWebSocket(webSocket); 
         return; 
     }
@@ -606,8 +608,9 @@ export async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, a
 }
 
 export async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-    if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) { 
-        log(`[Block] UDP request blocked: ${addressRemote} is private or banned.`);
+    // [Modified] 移除了 isPrivateIP 检查
+    if (isHostBanned(addressRemote, ctx.banHosts)) { 
+        log(`[Block] UDP request blocked: ${addressRemote} is banned.`);
         safeCloseWebSocket(webSocket); 
         return; 
     }
