@@ -1983,18 +1983,38 @@ async function handleWebSocketRequest(request, ctx) {
   const updateActivity = () => {
     lastActivityTime = Date.now();
   };
+  function cleanup() {
+    clearTimeout(protocolDetectTimer);
+    clearInterval(idleTimer);
+    if (activeWriter) {
+      try {
+        activeWriter.releaseLock();
+      } catch (e) {
+      }
+      activeWriter = null;
+    }
+    if (remoteSocketWrapper.value) {
+      try {
+        remoteSocketWrapper.value.close();
+      } catch (e) {
+      }
+      remoteSocketWrapper.value = null;
+    }
+  }
   idleTimer = setInterval(() => {
     if (Date.now() - lastActivityTime > IDLE_TIMEOUT) {
-      void(0);
       cleanup();
       safeCloseWebSocket(webSocket);
+      safeDecrement();
     }
   }, 1e4);
-  const log = (info, event) => void(0);
+  const log = (info, event) => {
+    if (info.includes("Detection failed")) return;
+    void(0);
+  };
   const DETECT_TIMEOUT_MS = 1e4;
   const protocolDetectTimer = setTimeout(() => {
     if (!isConnected) {
-      log("Timeout: Protocol detection took too long");
       safeCloseWebSocket(webSocket);
     }
   }, DETECT_TIMEOUT_MS);
@@ -2003,6 +2023,7 @@ async function handleWebSocketRequest(request, ctx) {
   const streamPromise = readableWebSocketStream.pipeTo(new WritableStream({
     async write(chunk, controller) {
       updateActivity();
+      if (hasDecremented) return;
       const chunkArr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
       if (isConnected) {
         if (activeSocket !== remoteSocketWrapper.value) {
@@ -2114,35 +2135,23 @@ async function handleWebSocketRequest(request, ctx) {
     cleanup();
     safeCloseWebSocket(webSocket);
   });
-  function cleanup() {
-    clearTimeout(protocolDetectTimer);
-    clearInterval(idleTimer);
-    if (activeWriter) {
-      try {
-        activeWriter.releaseLock();
-      } catch (e) {
-      }
-      activeWriter = null;
-    }
-    if (remoteSocketWrapper.value) {
-      try {
-        remoteSocketWrapper.value.close();
-      } catch (e) {
-      }
-      remoteSocketWrapper.value = null;
-    }
-  }
   const handleLifecycle = () => {
     return streamPromise.finally(() => {
       safeDecrement();
     });
   };
-  if (ctx.waitUntil) {
-    ctx.waitUntil(handleLifecycle());
-  } else {
-    handleLifecycle();
+  try {
+    if (ctx.waitUntil) {
+      ctx.waitUntil(handleLifecycle());
+    } else {
+      handleLifecycle().catch((e) => void(0));
+    }
+    return new Response(null, { status: 101, webSocket: client });
+  } catch (e) {
+    safeDecrement();
+    void(0);
+    return new Response("Internal Error", { status: 500 });
   }
-  return new Response(null, { status: 101, webSocket: client });
 }
 function tryHandleSocks5Handshake(buffer, currentState, webSocket, ctx, log) {
   const res = { consumed: 0, newState: currentState, error: null };
@@ -2225,8 +2234,12 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
         }
       };
       webSocketServer.addEventListener("message", (event) => {
-        const data = typeof event.data === "string" ? new TextEncoder().encode(event.data) : event.data;
-        safeEnqueue(data);
+        if (readableStreamCancel) return;
+        try {
+          const data = typeof event.data === "string" ? new TextEncoder().encode(event.data) : event.data;
+          safeEnqueue(data);
+        } catch (e) {
+        }
       });
       webSocketServer.addEventListener("close", () => {
         safeCloseWebSocket(webSocketServer);
@@ -2235,9 +2248,16 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
       webSocketServer.addEventListener("error", (err) => {
         safeError(err);
       });
-      const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
-      if (error) safeError(error);
-      else if (earlyData) safeEnqueue(earlyData);
+      try {
+        const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
+        if (error) {
+          void(0);
+        } else if (earlyData) {
+          safeEnqueue(earlyData);
+        }
+      } catch (e) {
+        void(0);
+      }
     },
     cancel() {
       readableStreamCancel = true;
