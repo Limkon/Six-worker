@@ -1,11 +1,10 @@
 // src/handlers/xhttp.js
 /**
  * 文件名: src/handlers/xhttp.js
- * 极致优化版:
- * 1. [Critical Fix] 移除所有 TransformStream 和 JS 层面的 idle timeout 监控。
- * 下行流量直接返回 remoteSocket.readable (C++ Native Stream)，实现真正的 Zero-CPU 转发。
- * 2. [Safety] 保持 writer 锁的 try-finally 释放机制。
- * 3. [Logic] 仅保留连接建立时的握手逻辑，传输过程完全交给底层运行时。
+ * 极致优化版 (最终修复):
+ * 1. [Critical] 必须使用 pipeTo 替代 JS while 循环，否则必爆 CPU。
+ * 2. [Critical] 移除 TransformStream 监控，依赖底层 Socket 自身的超时机制。
+ * 3. [Safety] 仅保留握手逻辑的 JS 处理，数据传输全权交给 C++ Runtime。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -164,7 +163,7 @@ async function read_xhttp_header(readable, ctx) {
     }
 }
 
-// --- 主处理函数 (极致优化版) ---
+// --- 主处理函数 (PipeTo 模式) ---
 export async function handleXhttpClient(request, ctx) {
     let result;
     try {
@@ -179,14 +178,12 @@ export async function handleXhttpClient(request, ctx) {
 
     const { hostname, port, atype, data, resp, reader, done } = result;
 
-    // 1. 检查黑名单 (已使用 Cached Regex)
     if (isHostBanned(hostname, ctx.banHosts)) {
         console.log('[XHTTP] Blocked:', hostname);
         await safe_cancel(reader, 'blocked');
         return null;
     }
 
-    // 2. 建立连接
     let remoteSocket;
     try {
         remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, console.log, ctx.proxyIP);
@@ -196,8 +193,7 @@ export async function handleXhttpClient(request, ctx) {
         return null;
     }
 
-    // 3. 上行管道 (Request -> Remote)
-    // 使用 pipeTo 实现 Zero-CPU 转发
+    // [Critical] 上行管道 (Zero-CPU)
     const uploaderPromise = (async () => {
         try {
             if (data && data.length > 0) {
@@ -213,7 +209,7 @@ export async function handleXhttpClient(request, ctx) {
                 await remoteSocket.writable.close();
             } else {
                 reader.releaseLock(); 
-                // 原生管道，不经过 JS 循环
+                // [Key Fix] 原生管道，彻底消除 while 循环的 CPU 消耗
                 await request.body.pipeTo(remoteSocket.writable); 
             }
         } catch (e) {
@@ -221,10 +217,8 @@ export async function handleXhttpClient(request, ctx) {
         }
     })();
 
-    // 4. 下行管道 (Remote -> Response)
-    // [Critical Fix] 移除 TransformStream，直接使用原生 ReadableStream
-    // 牺牲应用层 Idle Timeout，换取系统级 Zero-CPU 转发性能
-    // Cloudflare 底层 Socket 会自动处理 TCP Keep-Alive 和超时
+    // [Critical] 下行管道 (Zero-CPU)
+    // 移除 TransformStream，直接使用 remoteSocket.readable
     let responseReadable = remoteSocket.readable;
     
     // 如果有握手响应数据(resp)或Early Data，需要拼接
@@ -237,7 +231,7 @@ export async function handleXhttpClient(request, ctx) {
                 if (resp) await writer.write(resp);
                 if (remoteSocket.initialData) await writer.write(remoteSocket.initialData);
                 writer.releaseLock();
-                // 仅做管道对接，不监控每一块数据
+                // 仅做管道对接，不执行 JS 监控逻辑
                 await remoteSocket.readable.pipeTo(writable);
             } catch (e) {
                 try { writable.abort(e); } catch (_) {}
@@ -247,12 +241,9 @@ export async function handleXhttpClient(request, ctx) {
         responseReadable = readable;
     }
 
-    // 5. 生命周期管理
-    // 当上行结束或下行结束时，关闭 socket
-    // 注意：不再使用 waitUntil(r.closed)，让流自然结束
+    // 生命周期管理
     const connectionClosed = uploaderPromise.then(() => {
-        // 上行结束后，通常不主动关闭 remoteSocket，等待下行自然结束
-        // 除非需要在上行结束时强制断开 (视具体协议行为而定)
+        // 上行结束不主动关闭 socket，等待下行结束
     });
 
     return {
