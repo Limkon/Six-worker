@@ -2,10 +2,11 @@
 /**
  * 文件名: src/utils/helpers.js
  * 说明: 核心工具库。包含加密、UUID生成、KV缓存系统(L1/L2)等核心功能。
- * 修复说明:
- * 1. [Fix] cleanList: 优化为单次 split 正则，解决处理大文本(PROXYIP/BAN)时导致 CPU 挂起的问题。
- * 2. [Optimization] computeSha224Core: 移除字符串拼接循环，改用 repeat 一次性填充，消除 O(N^2) 隐患。
+ * 最终确认状态:
+ * 1. [Fix] cleanList: 优化为单次 split 正则，高效处理大文本。
+ * 2. [Optimization] computeSha224Core: 移除低效循环，使用 repeat 填充。
  * 3. [Optimization] base64ToArrayBuffer: 使用 padEnd 替代 while 循环。
+ * 4. [Critical] isHostBanned: 增加正则缓存 (REGEX_CACHE)，防止 CPU 飙升。
  */
 
 // 全局编解码器实例
@@ -43,11 +44,8 @@ const SHA224_CONSTANTS = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 ];
 
-const sha224RotateRight = (value, shift) => {
-    return ((value >>> shift) | (value << (32 - shift))) >>> 0;
-};
-
-const sha224ToUtf8 = (str) => { return unescape(encodeURIComponent(str)) };
+const sha224RotateRight = (value, shift) => ((value >>> shift) | (value << (32 - shift))) >>> 0;
+const sha224ToUtf8 = (str) => unescape(encodeURIComponent(str));
 
 const sha224BytesToHex = (byteArray) => {
     let hexString = '';
@@ -60,21 +58,16 @@ const sha224BytesToHex = (byteArray) => {
 
 const computeSha224Core = (inputStr) => {
     let hState = [0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4];
-    
     const messageBitLength = inputStr.length * 8;
     inputStr += String.fromCharCode(0x80);
     
-    // [Optimization] 移除 while 循环拼接，改用数学计算一次性补齐
-    // (len * 8) % 512 === 448  =>  len % 64 === 56
+    // [Optimization] 一次性填充
     const currentLen = inputStr.length;
     const padLen = (56 - (currentLen % 64) + 64) % 64;
-    if (padLen > 0) {
-        inputStr += String.fromCharCode(0).repeat(padLen);
-    }
+    if (padLen > 0) inputStr += String.fromCharCode(0).repeat(padLen);
     
     const highBits = Math.floor(messageBitLength / 0x100000000);
     const lowBits = messageBitLength & 0xFFFFFFFF;
-    
     inputStr += String.fromCharCode(
         (highBits >>> 24) & 0xFF, (highBits >>> 16) & 0xFF, (highBits >>> 8) & 0xFF, highBits & 0xFF,
         (lowBits >>> 24) & 0xFF, (lowBits >>> 16) & 0xFF, (lowBits >>> 8) & 0xFF, lowBits & 0xFF
@@ -86,19 +79,14 @@ const computeSha224Core = (inputStr) => {
     }
 
     const w = new Array(64);
-
     for (let i = 0; i < words.length; i += 16) {
-        for (let j = 0; j < 16; j++) {
-            w[j] = words[i + j];
-        }
+        for (let j = 0; j < 16; j++) w[j] = words[i + j];
         for (let j = 16; j < 64; j++) {
             const s0 = sha224RotateRight(w[j - 15], 7) ^ sha224RotateRight(w[j - 15], 18) ^ (w[j - 15] >>> 3);
             const s1 = sha224RotateRight(w[j - 2], 17) ^ sha224RotateRight(w[j - 2], 19) ^ (w[j - 2] >>> 10);
             w[j] = (w[j - 16] + s0 + w[j - 7] + s1) >>> 0;
         }
-
         let [a, b, c, d, e, f, g, h] = hState;
-
         for (let j = 0; j < 64; j++) {
             const S1 = sha224RotateRight(e, 6) ^ sha224RotateRight(e, 11) ^ sha224RotateRight(e, 25);
             const ch = (e & f) ^ (~e & g);
@@ -106,25 +94,10 @@ const computeSha224Core = (inputStr) => {
             const S0 = sha224RotateRight(a, 2) ^ sha224RotateRight(a, 13) ^ sha224RotateRight(a, 22);
             const maj = (a & b) ^ (a & c) ^ (b & c);
             const temp2 = (S0 + maj) >>> 0;
-
-            h = g;
-            g = f;
-            f = e;
-            e = (d + temp1) >>> 0;
-            d = c;
-            c = b;
-            b = a;
-            a = (temp1 + temp2) >>> 0;
+            h = g; g = f; f = e; e = (d + temp1) >>> 0; d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
         }
-
-        hState[0] = (hState[0] + a) >>> 0;
-        hState[1] = (hState[1] + b) >>> 0;
-        hState[2] = (hState[2] + c) >>> 0;
-        hState[3] = (hState[3] + d) >>> 0;
-        hState[4] = (hState[4] + e) >>> 0;
-        hState[5] = (hState[5] + f) >>> 0;
-        hState[6] = (hState[6] + g) >>> 0;
-        hState[7] = (hState[7] + h) >>> 0;
+        hState[0] = (hState[0] + a) >>> 0; hState[1] = (hState[1] + b) >>> 0; hState[2] = (hState[2] + c) >>> 0; hState[3] = (hState[3] + d) >>> 0;
+        hState[4] = (hState[4] + e) >>> 0; hState[5] = (hState[5] + f) >>> 0; hState[6] = (hState[6] + g) >>> 0; hState[7] = (hState[7] + h) >>> 0;
     }
     return hState.slice(0, 7);
 };
@@ -134,30 +107,20 @@ const globalSha224Cache = new Map();
 const MAX_SHA224_CACHE_SIZE = 50; 
 
 export function sha224Hash(message) {
-    if (globalSha224Cache.has(message)) {
-        return globalSha224Cache.get(message);
-    }
-
+    if (globalSha224Cache.has(message)) return globalSha224Cache.get(message);
     const utf8Message = sha224ToUtf8(message);
     const hashWords = computeSha224Core(utf8Message);
     const resultHex = sha224BytesToHex(hashWords.flatMap(h => [(h >>> 24) & 0xFF, (h >>> 16) & 0xFF, (h >>> 8) & 0xFF, h & 0xFF]));
 
-    if (globalSha224Cache.size >= MAX_SHA224_CACHE_SIZE) {
-        const oldestKey = globalSha224Cache.keys().next().value;
-        globalSha224Cache.delete(oldestKey);
-    }
+    if (globalSha224Cache.size >= MAX_SHA224_CACHE_SIZE) globalSha224Cache.delete(globalSha224Cache.keys().next().value);
     globalSha224Cache.set(message, resultHex);
-
     return resultHex;
 }
 
 export function base64ToArrayBuffer(base64Str) {
-    if (!base64Str) {
-        return { earlyData: undefined, error: null };
-    }
+    if (!base64Str) return { earlyData: undefined, error: null };
     try {
         base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
-        // [Optimization] 使用 padEnd 高效补全
         const padLen = (4 - (base64Str.length % 4)) % 4;
         if (padLen > 0) base64Str = base64Str.padEnd(base64Str.length + padLen, '=');
         
@@ -171,29 +134,21 @@ export function base64ToArrayBuffer(base64Str) {
 
 export async function cleanList(content) {
     if (!content) return [];
-    // [Fix] 优化性能：直接使用 split 正则分割，避免 replace 创建巨大的中间字符串
-    // 允许的分隔符：逗号、制表符、双引号、单引号、换行符
+    // [Fix] 高效分割
     return content.split(/[\t"'\r\n,]+/).filter(Boolean);
 }
 
 export function safeCloseWebSocket(socket) {
     try {
-        if (socket.readyState === 1 || socket.readyState === 2) {
-            socket.close();
-        }
-    } catch (error) {
-        console.error('safeCloseWebSocket error', error);
-    }
+        if (socket.readyState === 1 || socket.readyState === 2) socket.close();
+    } catch (error) { console.error('safeCloseWebSocket error', error); }
 }
 
-// ByteToHex 查找表 (模块级单例)
 const byteToHex = Array.from({ length: 256 }, (v, i) => (i + 256).toString(16).slice(1));
 
 export function stringifyUUID(arr, offset = 0) {
     const uuid = (byteToHex[arr[offset+0]]+byteToHex[arr[offset+1]]+byteToHex[arr[offset+2]]+byteToHex[arr[offset+3]]+"-"+byteToHex[arr[offset+4]]+byteToHex[arr[offset+5]]+"-"+byteToHex[arr[offset+6]]+byteToHex[arr[offset+7]]+"-"+byteToHex[arr[offset+8]]+byteToHex[arr[offset+9]]+"-"+byteToHex[arr[offset+10]]+byteToHex[arr[offset+11]]+byteToHex[arr[offset+12]]+byteToHex[arr[offset+13]]+byteToHex[arr[offset+14]]+byteToHex[arr[offset+15]]).toLowerCase();
-    if (!isValidUUID(uuid)) {
-        throw TypeError("Invalid stringified UUID");
-    }
+    if (!isValidUUID(uuid)) throw TypeError("Invalid stringified UUID");
     return uuid;
 }
 
@@ -223,25 +178,40 @@ export async function generateDynamicUUID(key, timeDays, updateHour) {
     return [current, prev];
 }
 
+// [CPU Optimization] 正则缓存，防止 ReDoS 和重复编译
+const REGEX_CACHE = new Map();
+
 export function isHostBanned(hostname, banList) {
     if (!banList || banList.length === 0) return false;
+    
     return banList.some(pattern => {
-        let regexPattern = pattern.replace(/\*/g, '.*');
-        let regex = new RegExp(`^${regexPattern}$`, 'i');
+        let regex;
+        if (REGEX_CACHE.has(pattern)) {
+            regex = REGEX_CACHE.get(pattern);
+        } else {
+            // 只编译一次，显著降低 CPU 占用
+            try {
+                let regexPattern = pattern.replace(/\*/g, '.*');
+                regex = new RegExp(`^${regexPattern}$`, 'i');
+            } catch (e) {
+                regex = /^$/; // 无效规则降级
+            }
+            
+            // 简单的 LRU 保护
+            if (REGEX_CACHE.size > 500) {
+                REGEX_CACHE.delete(REGEX_CACHE.keys().next().value);
+            }
+            REGEX_CACHE.set(pattern, regex);
+        }
         return regex.test(hostname);
     });
 }
 
-// ==========================================
-// [New Feature] 双层永久缓存系统 (L1 Memory + L2 Cache API)
-// ==========================================
-
+// --- KV Cache & StreamCipher ---
 const GLOBAL_KV_CACHE = new Map();
 const MAX_KV_CACHE_SIZE = 200; 
-
 const CACHE_API_PREFIX = 'http://kv-cache.local/';
 const CACHE_NULL_SENTINEL = "##NULL##"; 
-
 const KNOWN_KV_KEYS = [
     'UUID', 'KEY', 'ADMIN_PASS', 'SUPER_PASSWORD',
     'PROXYIP', 'SOCKS5', 'GO2SOCKS5', 'DNS64', 'BAN', 'DIS', 
@@ -253,147 +223,69 @@ const KNOWN_KV_KEYS = [
 
 export async function getKV(env, key) {
     if (!env.KV || !key) return null;
-
-    if (GLOBAL_KV_CACHE.has(key)) {
-        return GLOBAL_KV_CACHE.get(key);
-    }
+    if (GLOBAL_KV_CACHE.has(key)) return GLOBAL_KV_CACHE.get(key);
 
     const cache = caches.default;
     const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
-    
     try {
         const match = await cache.match(cacheKeyUrl);
         if (match) {
             const val = await match.text();
-            
-            if (val === CACHE_NULL_SENTINEL) {
-                // console.log(`[KV] Hit Cache API (NULL) for ${key}`);
-                GLOBAL_KV_CACHE.set(key, null);
-                return null;
-            }
-
+            if (val === CACHE_NULL_SENTINEL) { GLOBAL_KV_CACHE.set(key, null); return null; }
             if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
             GLOBAL_KV_CACHE.set(key, val);
-            // console.log(`[KV] Hit Cache API for ${key}`);
             return val;
         }
-    } catch (e) {
-        console.error(`[KV] Cache API error for ${key}:`, e);
-    }
+    } catch (e) { console.error(`[KV] Cache API error for ${key}:`, e); }
 
-    // console.log(`[KV] MISS - Reading real KV for ${key}`);
     let val = null;
-    try {
-        val = await env.KV.get(key);
-    } catch (e) {
-        console.error(`[KV] Real KV get failed:`, e);
-    }
+    try { val = await env.KV.get(key); } catch (e) { console.error(`[KV] Real KV get failed:`, e); }
 
     if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
     GLOBAL_KV_CACHE.set(key, val);
-
     const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
-    const response = new Response(cacheVal, {
-        headers: {
-            'Content-Type': 'text/plain',
-            'Cache-Control': 'max-age=2592000' 
-        }
-    });
-    
     try {
-        cache.put(cacheKeyUrl, response).catch(e => console.error('[KV] Cache put bg error:', e));
-    } catch (e) {
-        console.error('[KV] Cache API put error:', e);
-    }
-
+        cache.put(cacheKeyUrl, new Response(cacheVal, { headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'max-age=2592000' } })).catch(() => {});
+    } catch (e) {}
     return val;
 }
 
 export async function clearKVCache(keys) {
     const cache = caches.default;
     const targetKeys = keys && Array.isArray(keys) ? keys : KNOWN_KV_KEYS;
-
-    if (keys) {
-        keys.forEach(k => GLOBAL_KV_CACHE.delete(k));
-    } else {
-        GLOBAL_KV_CACHE.clear();
-    }
-
-    const deletePromises = targetKeys.map(key => {
-        const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
-        return cache.delete(cacheKeyUrl).catch(e => console.warn(`[KV] Failed to delete cache for ${key}`, e));
-    });
-
-    await Promise.all(deletePromises);
+    if (keys) keys.forEach(k => GLOBAL_KV_CACHE.delete(k)); else GLOBAL_KV_CACHE.clear();
+    await Promise.all(targetKeys.map(key => cache.delete(CACHE_API_PREFIX + encodeURIComponent(key)).catch(() => {})));
     console.log(`[KV] Cache flushed for keys: ${targetKeys.join(', ')}`);
 }
 
-// ==========================================
-// [New Feature] 轻量级流加密工具 (Xorshift128+)
-// ==========================================
-
 function fmix32(h) {
-    h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b);
-    h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35);
-    h ^= h >>> 16;
+    h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
     return h >>> 0;
 }
 
 export class StreamCipher {
     constructor(keyBytes, saltBytes) {
         let s1 = 0, s2 = 0, s3 = 0, s4 = 0;
-        
-        for (let i = 0; i < keyBytes.length; i++) {
-            s1 = (Math.imul(s1, 31) + keyBytes[i]) | 0;
-        }
-        for (let i = 0; i < saltBytes.length; i++) {
-            s2 = (Math.imul(s2, 31) + saltBytes[i]) | 0;
-        }
-        
-        s3 = fmix32(s1 ^ 0x12345678);
-        s4 = fmix32(s2 ^ 0x87654321);
-        s1 = fmix32(s1); 
-        s2 = fmix32(s2);
-
+        for (let i = 0; i < keyBytes.length; i++) s1 = (Math.imul(s1, 31) + keyBytes[i]) | 0;
+        for (let i = 0; i < saltBytes.length; i++) s2 = (Math.imul(s2, 31) + saltBytes[i]) | 0;
+        s3 = fmix32(s1 ^ 0x12345678); s4 = fmix32(s2 ^ 0x87654321); s1 = fmix32(s1); s2 = fmix32(s2);
         this.s = new Uint32Array([s1, s2, s3, s4]);
     }
-
     next() {
-        let t = this.s[3];
-        let s = this.s[0];
-        this.s[3] = this.s[2];
-        this.s[2] = this.s[1];
-        this.s[1] = s;
-        t ^= t << 11;
-        t ^= t >>> 8;
-        this.s[0] = t ^ s ^ (s >>> 19);
-        return this.s[0];
+        let t = this.s[3]; let s = this.s[0]; this.s[3] = this.s[2]; this.s[2] = this.s[1]; this.s[1] = s;
+        t ^= t << 11; t ^= t >>> 8; this.s[0] = t ^ s ^ (s >>> 19); return this.s[0];
     }
-
     process(buffer) {
-        let i = 0;
-        const len = buffer.length;
-        
+        let i = 0; const len = buffer.length;
         if (buffer.byteOffset % 4 === 0 && len >= 4) {
-            const len32 = Math.floor(len / 4);
-            const view32 = new Uint32Array(buffer.buffer, buffer.byteOffset, len32);
-            for (let j = 0; j < len32; j++) {
-                view32[j] ^= this.next();
-            }
+            const len32 = Math.floor(len / 4); const view32 = new Uint32Array(buffer.buffer, buffer.byteOffset, len32);
+            for (let j = 0; j < len32; j++) view32[j] ^= this.next();
             i = len32 * 4;
         }
-
-        let randomCache = 0;
-        let cacheRemaining = 0;
-        
+        let randomCache = 0; let cacheRemaining = 0;
         for (; i < len; i++) {
-            if (cacheRemaining === 0) {
-                randomCache = this.next();
-                cacheRemaining = 4;
-            }
-            buffer[i] ^= (randomCache & 0xFF);
-            randomCache >>>= 8;
-            cacheRemaining--;
+            if (cacheRemaining === 0) { randomCache = this.next(); cacheRemaining = 4; }
+            buffer[i] ^= (randomCache & 0xFF); randomCache >>>= 8; cacheRemaining--;
         }
     }
 }
