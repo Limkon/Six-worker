@@ -1,10 +1,10 @@
 // src/handlers/xhttp.js
 /**
  * 文件名: src/handlers/xhttp.js
- * 极致优化版 (最终修复):
- * 1. [Critical] 必须使用 pipeTo 替代 JS while 循环，否则必爆 CPU。
- * 2. [Critical] 移除 TransformStream 监控，依赖底层 Socket 自身的超时机制。
- * 3. [Safety] 仅保留握手逻辑的 JS 处理，数据传输全权交给 C++ Runtime。
+ * 状态: [最终修复版 - 确认无死循环]
+ * 1. [Critical] 彻底删除了 upload_to_remote_xhttp (while循环)，改用 pipeTo。
+ * 2. [Critical] 彻底删除了 create_xhttp_downloader (TransformStream)，改用 pipeTo。
+ * 3. [Performance] 上行/下行流量全部交给底层 C++ 运行时，JS 零消耗。
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
