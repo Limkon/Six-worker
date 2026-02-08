@@ -1,11 +1,11 @@
 // src/handlers/xhttp.js
 /**
  * 文件名: src/handlers/xhttp.js
- * 最终确认版:
- * 1. [Full] 包含所有原版核心逻辑 (UUID校验, 协议解析, 黑名单, 超时控制).
- * 2. [Elegant] 使用 safe_read/safe_cancel 消除 "Stream was cancelled" 报错.
- * 3. [Robust] 恢复了 Idle Timeout 的强力清理逻辑 (abort writable).
- * 4. [Log] 恢复了关键握手错误的日志记录.
+ * 最终确认版 (Refactored):
+ * 1. [Fix] 修复了 DataView 在缓冲区扩容后指向旧内存导致的 IPv6 解析错误.
+ * 2. [Full] 包含所有原版核心逻辑 (UUID校验, 协议解析, 黑名单, 超时控制).
+ * 3. [Elegant] 使用 safe_read/safe_cancel 消除 "Stream was cancelled" 报错.
+ * 4. [Robust] 保持 Idle Timeout 的强力清理逻辑.
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
@@ -134,8 +134,13 @@ async function read_xhttp_header(readable, ctx) {
         if (cache[cmdIndex] !== 1) throw new Error('unsupported command: ' + cache[cmdIndex]);
         
         const portIndex = cmdIndex + 1;
-        const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
-        const port = view.getUint16(portIndex, false); 
+        // 注意：此处使用临时的 DataView 读取端口，因为后续 read_at_least 可能改变 cache 的引用
+        let port;
+        {
+            const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
+            port = view.getUint16(portIndex, false); 
+        }
+
         const atype = cache[portIndex + 2];
         const addr_body_idx = portIndex + 3; 
 
@@ -174,6 +179,8 @@ async function read_xhttp_header(readable, ctx) {
                 const domain_len = cache[addr_val_idx];
                 hostname = textDecoder.decode(cache.subarray(addr_val_idx + 1, addr_val_idx + 1 + domain_len));
             } else if (atype === CONSTANTS.ADDRESS_TYPE_IPV6) {
+                // Bug Fix: 必须基于当前的 cache 创建新的 DataView，防止指向旧缓冲区
+                const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
                 const ipv6 = [];
                 for (let i = 0; i < 8; i++) ipv6.push(view.getUint16(addr_val_idx + i * 2, false).toString(16));
                 hostname = ipv6.join(':');
@@ -199,19 +206,19 @@ async function read_xhttp_header(readable, ctx) {
     }
 }
 
-async function upload_to_remote_xhttp(writer, httpx) {
+async function upload_to_remote_xhttp(writer, { data, done, reader }) {
     // 写入头部携带的剩余数据
-    if (httpx.data && httpx.data.length > 0) {
-        await writer.write(httpx.data);
+    if (data && data.length > 0) {
+        await writer.write(data);
     }
-    if (httpx.done) return;
+    if (done) return;
 
     // 循环写入 Body
     while (true) {
         try {
             // reader 已在 read_xhttp_header 中被获取，这里继续使用
-            const { value, done } = await httpx.reader.read();
-            if (done) break;
+            const { value, done: readDone } = await reader.read();
+            if (readDone) break;
             if (value) await writer.write(value);
         } catch (e) {
             // 读取流出错（如下游断开），停止写入，跳出循环
