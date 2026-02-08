@@ -2,22 +2,19 @@
 /**
  * 文件名: src/pages/admin.js
  * 修改说明:
- * 1. [Fix] 修复 KV 缓存一致性问题：
- * - 读取时：继续使用 getKV (L1/L2 缓存) 以节省额度。
- * - 保存时：调用 clearKVCache 强制清除缓存，确保下次读取为最新值。
- * 2. [Optimization] 动态收集需要清理的 Cache Key，避免维护静态列表。
- * 3. [Security] handleBestIP: 增加输入验证，限制 IP 列表最大 50 行，单行最大 100 字符。
+ * 1. [Fix] 修复缓存清理逻辑冗余导致的保存失败问题。统一使用 cleanConfigCache(keys) 进行原子化清理。
+ * 2. [Fix] 在 initializeContext 中传递 ctx，防止 WebDAV 推送等后台任务因上下文丢失而被中断。
+ * 3. [Robustness] 增加表单解析的错误捕获，防止因内容过大导致的静默失败。
  */
 import { getConfig, cleanConfigCache, initializeContext } from '../config.js'; 
 import { CONSTANTS } from '../constants.js';
-// [新增] 引入 clearKVCache 用于精准清理缓存
 import { cleanList, getKV, clearKVCache } from '../utils/helpers.js';
 import { getAdminConfigHtml, getBestIPHtml } from '../templates/admin.js';
 import { executeWebDavPush } from '../handlers/webdav.js';
 
 // 处理 /edit 页面 (配置编辑器)
 export async function handleEditConfig(request, env, ctx) {
-    const FileName = await getConfig(env, 'SUBNAME', 'sub');
+    const FileName = await getConfig(env, 'SUBNAME', 'sub', ctx);
     
     if (!env.KV) {
         return new Response('<p>错误：未绑定KV空间，无法使用在线配置功能。</p>', { status: 404, headers: { "Content-Type": "text/html;charset=utf-8" } });
@@ -52,13 +49,19 @@ export async function handleEditConfig(request, env, ctx) {
     // 处理 POST 保存请求
     if (request.method === 'POST') {
         try {
-            const formData = await request.formData();
+            let formData;
+            try {
+                formData = await request.formData();
+            } catch (err) {
+                return new Response('保存失败: 无法解析表单数据 (可能是内容过大)', { status: 400 });
+            }
+
             const savePromises = [];
             // [优化] 动态收集本次提交涉及的所有 Key，用于缓存清理
             const keysToClear = []; 
 
             for (const [key] of configItems) {
-                // 只要是 configItems 里有的 key，都加入清理列表，防止遗漏
+                // 只要是 configItems 里有的 key，都加入清理列表
                 keysToClear.push(key); 
                 
                 const value = formData.get(key);
@@ -84,31 +87,34 @@ export async function handleEditConfig(request, env, ctx) {
             }
             await Promise.all(savePromises);
             
-            // 1. 清理 config.js 层的缓存 (Env/KV/Default 回退逻辑)
-            await cleanConfigCache();
-            
-            // 2. [关键修复] 清理 helpers.js 层的缓存 (L1/L2)
-            // 传入 keysToClear 列表，确保所有涉及的配置项缓存都被清除
-            if (typeof clearKVCache === 'function') {
-                await clearKVCache(keysToClear); 
-            }
+            // 1. [Fix] 统一清理缓存 (内存 L1 + Cache API L2)
+            // 直接传递 keysToClear 给 cleanConfigCache，它内部会正确处理内存清除和 clearKVCache 调用
+            // 移除了之前版本中 cleanConfigCache() 和 clearKVCache(keys) 的重复调用，消除冗余和竞争风险
+            await cleanConfigCache(keysToClear);
 
             // 3. 触发 WebDAV 推送
             try {
-                const appCtx = await initializeContext(request, env);
-                appCtx.waitUntil = ctx.waitUntil.bind(ctx);
-                ctx.waitUntil(executeWebDavPush(env, appCtx, true));
+                // [Fix] 传递 ctx，确保 initializeContext 内部能正确处理非阻塞任务
+                const appCtx = await initializeContext(request, env, ctx);
+                // 确保 waitUntil 绑定正确
+                if (ctx && ctx.waitUntil) {
+                    appCtx.waitUntil = ctx.waitUntil.bind(ctx);
+                }
+                if (ctx && typeof ctx.waitUntil === 'function') {
+                    ctx.waitUntil(executeWebDavPush(env, appCtx, true));
+                }
             } catch (err) {
                 console.error('[Admin] Failed to trigger WebDAV push:', err);
             }
 
             return new Response('保存成功', { status: 200 });
         } catch (e) {
-            return new Response('保存失败: ' + e.message, { status: 500 });
+            return new Response('保存失败: ' + (e.message || e.toString()), { status: 500 });
         }
     }
     
-    // 处理 GET 渲染页面 (保持使用 getKV，利用缓存)
+    // 处理 GET 渲染页面
+    // [Fix] 这里的 getKV 不需要强制 ctx，因为读取操作不需要 waitUntil
     const kvPromises = configItems.map(item => getKV(env, item[0]));
     const kvValues = await Promise.all(kvPromises);
     let formHtml = '';
@@ -191,7 +197,6 @@ export async function handleBestIP(request, env) {
             const action = url.searchParams.get('action') || 'save';
             
             // [Security Fix] 限制最大行数为 50，并进行基本格式清洗
-            // 防止恶意提交过大导致 OOM 或 KV 写入失败
             let inputIps = [];
             if (data.ips && Array.isArray(data.ips)) {
                 inputIps = data.ips
@@ -211,10 +216,8 @@ export async function handleBestIP(request, env) {
                 await env.KV.put(txt, inputIps.join('\n'));
             }
             
-            // 清理缓存
+            // [Fix] 清理缓存: 使用 cleanConfigCache 统一处理，移除 redundant 的 clearKVCache 调用
             await cleanConfigCache([txt]);
-            // [新增] 精准清理 ADD.txt 的缓存
-            if (typeof clearKVCache === 'function') await clearKVCache([txt]); 
 
             return new Response(JSON.stringify({ success: true, message: action === 'append' ? '追加成功' : '保存成功' }), { headers: { 'Content-Type': 'application/json' } });
         } catch (e) {
@@ -229,6 +232,7 @@ export async function handleBestIP(request, env) {
     let ipSources = defaultIpSources;
     if (env.KV) {
         const kvData = await getKV(env, 'BESTIP_SOURCES');
+        // [Fix] 传递 ctx (此处为 null, 读操作可接受)
         const remoteData = await getConfig(env, 'BESTIP_SOURCES'); 
         const sourceData = kvData || remoteData;
 
@@ -260,7 +264,7 @@ export async function handleBestIP(request, env) {
     if (url.searchParams.has('loadIPs')) {
         const ipSourceName = url.searchParams.get('loadIPs');
         
-        // [完整恢复] 之前省略的复杂 IP 解析逻辑，现在全部补回
+        // [完整恢复] 之前省略的复杂 IP 解析逻辑
         async function GetCFIPs(sourceName) {
              try {
                 let response;
@@ -278,7 +282,7 @@ export async function handleBestIP(request, env) {
                 const cidrs = text.split('\n').filter(line => line.trim() && !line.startsWith('#'));
                 const ips = new Set();
                 
-                // 防止无限循环：如果一轮循环后IP数量没有增加，强制退出
+                // 防止无限循环
                 while (ips.size < 512 && cidrs.length > 0) {
                     const startSize = ips.size; 
                     
