@@ -1335,6 +1335,19 @@ var failureCache = new DirectFailureCache();
 function addToFailureCache(host) {
   if (host) failureCache.add(host);
 }
+function concatUint8(a, b) {
+  if (!a || a.byteLength === 0) {
+    return b instanceof Uint8Array ? b : new Uint8Array(b || 0);
+  }
+  if (!b || b.byteLength === 0) {
+    return a;
+  }
+  const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
+  const res = new Uint8Array(a.byteLength + bArr.byteLength);
+  res.set(a);
+  res.set(bArr, a.byteLength);
+  return res;
+}
 function getSingleProxyIP(proxyIP) {
   if (!proxyIP) return null;
   if (Array.isArray(proxyIP)) {
@@ -1596,13 +1609,6 @@ async function createUnifiedConnection(ctx, addressRemote, portRemote, addressTy
   }
   throw new Error(`All connection attempts failed.`);
 }
-function concatUint8(a, b) {
-  const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
-  const res = new Uint8Array(a.length + bArr.length);
-  res.set(a);
-  res.set(bArr, a.length);
-  return res;
-}
 function getSocks5UdpHeaderLength(buffer) {
   if (buffer.length < 4) return -1;
   const atyp = buffer[3];
@@ -1659,6 +1665,7 @@ async function flushBuffer(writer, buffer, log) {
       }
     }
     loops++;
+    if (loops > 2) await new Promise((r) => setTimeout(r, 0));
   }
 }
 async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallback, log) {
@@ -1677,9 +1684,7 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallb
   if (remoteSocket.initialData && remoteSocket.initialData.byteLength > 0) {
     hasIncomingData = true;
     if (responseHeader) {
-      const combined = new Uint8Array(responseHeader.length + remoteSocket.initialData.length);
-      combined.set(responseHeader);
-      combined.set(remoteSocket.initialData, responseHeader.length);
+      const combined = concatUint8(responseHeader, remoteSocket.initialData);
       if (!safeSend(combined)) return;
       responseHeader = null;
     } else {
@@ -1695,7 +1700,7 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessHeader, retryCallb
           controller.error(new Error("WS Closed"));
           return;
         }
-        const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)]) : chunk;
+        const dataToSend = responseHeader ? concatUint8(responseHeader, chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)) : chunk;
         responseHeader = null;
         if (!safeSend(dataToSend)) controller.error(new Error("WS send failed"));
       },
@@ -1733,44 +1738,23 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
   const udpWriter = udpSocket.writable.getWriter();
   const header = createSocks5UdpHeader(addressType, addressRemote, portRemote);
   if (rawClientData && rawClientData.byteLength > 0) {
-    const packet = new Uint8Array(header.length + rawClientData.byteLength);
-    packet.set(header);
-    packet.set(new Uint8Array(rawClientData), header.length);
+    const packet = concatUint8(header, new Uint8Array(rawClientData));
     await safeWrite(udpWriter, packet);
   }
   udpWriter.releaseLock();
   let responseHeader = vlessResponseHeader;
-  let udpBuffer = new Uint8Array(0);
   await udpSocket.readable.pipeTo(new WritableStream({
     async write(chunk, controller) {
       if (webSocket.readyState !== 1) {
         controller.error(new Error("WS Closed"));
         return;
       }
-      udpBuffer = concatUint8(udpBuffer, chunk);
-      if (udpBuffer.length > 16384) {
-        udpBuffer = new Uint8Array(0);
-        return;
-      }
-      while (udpBuffer.length > 0) {
-        const headerLen = getSocks5UdpHeaderLength(udpBuffer);
-        if (headerLen === 0) {
-          udpBuffer = new Uint8Array(0);
-          break;
-        }
-        if (headerLen === -1) {
-          break;
-        }
-        if (udpBuffer.length >= headerLen) {
-          const payload = udpBuffer.subarray(headerLen);
-          const dataToSend = responseHeader ? new Uint8Array([...responseHeader, ...payload]) : payload;
-          responseHeader = null;
-          webSocket.send(dataToSend);
-          udpBuffer = new Uint8Array(0);
-          break;
-        } else {
-          break;
-        }
+      const headerLen = getSocks5UdpHeaderLength(chunk);
+      if (headerLen > 0 && chunk.byteLength > headerLen) {
+        const payload = chunk.slice(headerLen);
+        const dataToSend = responseHeader ? concatUint8(responseHeader, payload) : payload;
+        responseHeader = null;
+        webSocket.send(dataToSend);
       }
     },
     close() {
