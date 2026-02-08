@@ -3922,7 +3922,6 @@ var index_default = {
             if (context.enableXhttp && !isLoginRequest) {
               const r = await handleXhttpClient(request, context);
               if (r) {
-                context.waitUntil(r.closed);
                 return new Response(r.readable, {
                   headers: {
                     "X-Accel-Buffering": "no",
