@@ -5,6 +5,7 @@
  * 1. [Fix] fetch 入口传递 ctx 到 initializeContext，彻底打通缓存非阻塞写入。
  * 2. [Full] 保留所有路由逻辑 (WS, XHTTP, Subscription, Admin, BestIP)。
  * 3. [Stability] 包含 Watchdog 和 Global Try-Catch。
+ * 4. [Hang Fix] 修复 initializeContext 缺乏 AbortSignal 导致的僵尸任务挂起问题。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -84,6 +85,7 @@ async function execWithRetry(taskFn, maxRetries = 3, timeoutMs = 3000) {
     let lastError;
     for (let i = 0; i < maxRetries; i++) {
         try {
+            // taskFn 接收 signal 参数，确保超时后能通知任务取消
             return await timeout((signal) => taskFn(signal), timeoutMs, `Attempt ${i + 1} timeout`);
         } catch (e) {
             console.warn(`[Watchdog] Task failed (Attempt ${i + 1}/${maxRetries}):`, e.message || e);
@@ -126,7 +128,8 @@ async function handlePasswordSetup(request, env, ctx) {
 
         try {
             // [Fix] 传递 ctx 到 initializeContext
-            const appCtx = await execWithRetry((signal) => initializeContext(request, env, ctx), 2, 5000);
+            // [Fix] 传递 signal (s) 到底层，防止后台僵尸任务挂起
+            const appCtx = await execWithRetry((s) => initializeContext(request, env, ctx, s), 2, 5000);
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
         } catch (e) {
@@ -170,7 +173,8 @@ export default {
             return await timeout(async (signal) => {
                 try {
                     // [Critical Fix] 传递 ctx 到 initializeContext，启用非阻塞缓存写入
-                    const context = await execWithRetry((s) => initializeContext(request, env, ctx), 3, 6000);
+                    // [Hang Fix] 传递 signal (s) 到 initializeContext，确保重试时取消旧任务
+                    const context = await execWithRetry((s) => initializeContext(request, env, ctx, s), 3, 6000);
                     context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
                     const url = new URL(request.url);
