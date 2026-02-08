@@ -2329,59 +2329,6 @@ async function read_xhttp_header(readable, ctx) {
     throw error;
   }
 }
-function create_xhttp_downloader(resp, remote_readable, initialData) {
-  const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45e3;
-  let lastActivity = Date.now();
-  let idleTimer;
-  const monitorStream = new TransformStream({
-    start(controller) {
-      controller.enqueue(resp);
-      if (initialData && initialData.byteLength > 0) {
-        controller.enqueue(initialData);
-      }
-      idleTimer = setInterval(() => {
-        if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
-          try {
-            monitorStream.writable.abort("idle timeout");
-          } catch (_) {
-          }
-          try {
-            monitorStream.readable.cancel("idle timeout");
-          } catch (_) {
-          }
-          clearInterval(idleTimer);
-        }
-      }, 5e3);
-    },
-    transform(chunk, controller) {
-      lastActivity = Date.now();
-      controller.enqueue(chunk);
-    },
-    flush() {
-      clearInterval(idleTimer);
-    },
-    cancel() {
-      clearInterval(idleTimer);
-    }
-  });
-  const pipePromise = remote_readable.pipeTo(monitorStream.writable).catch(() => {
-  });
-  return {
-    readable: monitorStream.readable,
-    done: pipePromise,
-    abort: () => {
-      try {
-        monitorStream.writable.abort();
-      } catch (_) {
-      }
-      try {
-        monitorStream.readable.cancel();
-      } catch (_) {
-      }
-      clearInterval(idleTimer);
-    }
-  };
-}
 async function handleXhttpClient(request, ctx) {
   let result;
   try {
@@ -2426,16 +2373,29 @@ async function handleXhttpClient(request, ctx) {
     } catch (e) {
     }
   })();
-  const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
-  const connectionClosed = Promise.allSettled([downloader.done, uploaderPromise]).then(() => {
-    try {
-      remoteSocket.close();
-    } catch (_) {
-    }
-    downloader.abort();
+  let responseReadable = remoteSocket.readable;
+  if (resp && resp.length > 0 || remoteSocket.initialData && remoteSocket.initialData.byteLength > 0) {
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+    (async () => {
+      try {
+        if (resp) await writer.write(resp);
+        if (remoteSocket.initialData) await writer.write(remoteSocket.initialData);
+        writer.releaseLock();
+        await remoteSocket.readable.pipeTo(writable);
+      } catch (e) {
+        try {
+          writable.abort(e);
+        } catch (_) {
+        }
+      }
+    })();
+    responseReadable = readable;
+  }
+  const connectionClosed = uploaderPromise.then(() => {
   });
   return {
-    readable: downloader.readable,
+    readable: responseReadable,
     closed: connectionClosed
   };
 }
