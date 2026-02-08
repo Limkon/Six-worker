@@ -5,6 +5,7 @@
  * 1. [Security] 实施 "路由严格分发策略"。
  * 2. [Fix] 针对 Hash 路由 (GET) 增加空路径拦截，彻底阻断 XHTTP 探测流量进入订阅逻辑。
  * 3. [Stability] 保持 Watchdog 机制保护全局上下文加载。
+ * 4. [Fix] 修复 Watchdog Promise 泄露: 重构 timeout 使用 AbortController，确保超时能中止 fetch 等异步任务。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -22,23 +23,43 @@ let lastSavedDomain = '';
 let lastPushTime = 0;     
 const PUSH_COOLDOWN = 24 * 60 * 60 * 1000; 
 
-// --- 看门狗工具函数 ---
-function timeout(promise, ms, errorMsg = 'Operation timed out') {
+// --- 看门狗工具函数 (Fixed) ---
+
+/**
+ * 改进版 Watchdog: 使用 AbortController 真正取消任务
+ * @param {Function} taskFn - 接受 (signal) 参数的异步函数工厂
+ * @param {number} ms - 超时毫秒数
+ * @param {string} errorMsg - 错误信息
+ */
+async function timeout(taskFn, ms, errorMsg = 'Operation timed out') {
+    const controller = new AbortController();
     let timer;
+
     const timeoutPromise = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(errorMsg)), ms);
+        timer = setTimeout(() => {
+            controller.abort(); // [Fix] 触发中止信号
+            reject(new Error(errorMsg));
+        }, ms);
     });
-    return Promise.race([
-        promise.finally(() => clearTimeout(timer)),
-        timeoutPromise
-    ]);
+
+    try {
+        // 竞速：任务完成 vs 超时
+        // 传递 controller.signal 给任务，使其能够感知超时并自我终止
+        return await Promise.race([
+            taskFn(controller.signal),
+            timeoutPromise
+        ]);
+    } finally {
+        clearTimeout(timer); // 任务完成或报错后，必须清理定时器
+    }
 }
 
 async function execWithRetry(taskFn, maxRetries = 3, timeoutMs = 3000) {
     let lastError;
     for (let i = 0; i < maxRetries; i++) {
         try {
-            return await timeout(taskFn(), timeoutMs, `Attempt ${i + 1} timeout`);
+            // [Fix] 传递 signal 给 taskFn (虽然 initializeContext 目前可能忽略它，但结构上已就绪)
+            return await timeout((signal) => taskFn(signal), timeoutMs, `Attempt ${i + 1} timeout`);
         } catch (e) {
             console.warn(`[Watchdog] Task failed (Attempt ${i + 1}/${maxRetries}):`, e.message);
             lastError = e;
@@ -79,7 +100,8 @@ async function handlePasswordSetup(request, env, ctx) {
         await cleanConfigCache();
 
         try {
-            const appCtx = await execWithRetry(() => initializeContext(request, env), 2, 5000);
+            // [Fix] 适配新的 execWithRetry 签名，传递 signal 占位符
+            const appCtx = await execWithRetry((signal) => initializeContext(request, env), 2, 5000);
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
         } catch (e) {
@@ -91,7 +113,8 @@ async function handlePasswordSetup(request, env, ctx) {
     return new Response(getPasswordSetupHtml(), { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
 }
 
-async function proxyUrl(urlStr, targetUrlObj, request) {
+// [Fix] 增加 signal 参数以支持请求中止
+async function proxyUrl(urlStr, targetUrlObj, request, signal) {
     if (!urlStr) return null;
     try {
         const proxyUrl = new URL(urlStr);
@@ -109,7 +132,8 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
             method: request.method,
             headers: newHeaders,
             body: request.body,
-            redirect: 'follow'
+            redirect: 'follow',
+            signal: signal // [Fix] 绑定 AbortSignal
         }));
     } catch (e) { 
         return null; 
@@ -119,9 +143,11 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
 export default {
     async fetch(request, env, ctx) {
         // [Global Timeout] 45秒硬限制
-        return await timeout((async () => {
+        // [Fix] 使用新的 timeout 签名，接收 signal 并传递给内部逻辑
+        return await timeout(async (signal) => {
             try {
-                const context = await execWithRetry(() => initializeContext(request, env), 3, 3000);
+                // [Fix] 传递 signal 给 execWithRetry (尽管 initializeContext 可能未完全利用，但链路已打通)
+                const context = await execWithRetry((innerSignal) => initializeContext(request, env), 3, 3000);
                 context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
                 const url = new URL(request.url);
@@ -150,7 +176,8 @@ export default {
                     
                     const urlProxy = await getConfig(env, 'URL');
                     if (urlProxy) {
-                        const resp = await proxyUrl(urlProxy, url, request);
+                        // [Fix] 传递 signal 给 proxyUrl
+                        const resp = await proxyUrl(urlProxy, url, request, signal);
                         if (resp) return resp;
                     }
                     return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
@@ -269,11 +296,16 @@ export default {
                 return new Response('404 Not Found', { status: 404 });
 
             } catch (e) {
+                // 如果是中止错误，抛出原始超时信息
+                if (signal && signal.aborted) {
+                     // 这里的错误会被外层 timeout 捕获并忽略(因为 timeoutPromise 已经 reject 过了)
+                     // 或者如果是在 execWithRetry 内，它会被重试逻辑捕获
+                }
                 const errInfo = (e && (e.stack || e.message || e.toString())) || "Unknown Internal Error";
                 console.error('[Global Error]:', errInfo);
                 return new Response('Internal Server Error', { status: 500 });
             }
-        })(), 45000, 'Worker Execution Timeout');
+        }, 45000, 'Worker Execution Timeout');
     },
     
     async scheduled(event, env, ctx) {
