@@ -1,9 +1,10 @@
 // src/utils/helpers.js
 /**
  * 文件名: src/utils/helpers.js
- * 状态: [最终完整修复版]
- * 1. [Critical] getKV: 增加 ctx 参数，使用 ctx.waitUntil 确保 Cache API 写入成功，解决 Worker Hung 问题。
- * 2. [Full] 保留 StreamCipher, REGEX_CACHE, SHA224, UUID 等所有核心工具。
+ * 状态: [最终修复版]
+ * 1. [Fix] isHostBanned: 修复正则转义遗漏，支持 * 通配符，将 ? 视为普通字符转义。
+ * 2. [Keep] Cache API TTL 保持 30 天。
+ * 3. [Full] 保留所有核心工具函数。
  */
 
 // 全局编解码器实例
@@ -133,7 +134,6 @@ export function stringifyUUID(arr, offset = 0) {
 const DYNAMIC_UUID_CACHE = new Map();
 
 export async function generateDynamicUUID(key, timeDays, updateHour) {
-    // 构建缓存 Key
     const cacheKey = `${key}-${timeDays}-${updateHour}`;
     if (DYNAMIC_UUID_CACHE.has(cacheKey)) {
         return DYNAMIC_UUID_CACHE.get(cacheKey);
@@ -160,7 +160,6 @@ export async function generateDynamicUUID(key, timeDays, updateHour) {
     const prev = await generate(key + (currentCycle - 1));
     const result = [current, prev];
     
-    // 写入缓存
     if (DYNAMIC_UUID_CACHE.size > 100) DYNAMIC_UUID_CACHE.clear();
     DYNAMIC_UUID_CACHE.set(cacheKey, result);
     return result;
@@ -169,21 +168,35 @@ export async function generateDynamicUUID(key, timeDays, updateHour) {
 // [Optimization] 正则缓存 (REGEX_CACHE)
 const REGEX_CACHE = new Map();
 
+// [Fix] 修复域名匹配逻辑：支持 * 通配符，修复正则转义问题（包括 ?）
 export function isHostBanned(hostname, banList) {
     if (!banList || banList.length === 0) return false;
+    
     return banList.some(pattern => {
+        const cleanPattern = pattern.trim();
+        if (!cleanPattern) return false;
+
         let regex;
-        if (REGEX_CACHE.has(pattern)) {
-            regex = REGEX_CACHE.get(pattern);
+        if (REGEX_CACHE.has(cleanPattern)) {
+            regex = REGEX_CACHE.get(cleanPattern);
         } else {
             try {
-                let regexPattern = pattern.replace(/\*/g, '.*');
-                regex = new RegExp(`^${regexPattern}$`, 'i');
+                if (cleanPattern.includes('*')) {
+                    // 1. 转义除 * 以外的所有正则特殊字符 (包括 ?)
+                    const escaped = cleanPattern.replace(/[.+^${}()|[\]\\?]/g, '\\$&');
+                    // 2. 将 * 替换为 .*
+                    const regexStr = '^' + escaped.replace(/\*/g, '.*') + '$';
+                    regex = new RegExp(regexStr, 'i');
+                } else {
+                    // 无通配符，匹配域名及其子域名
+                    const escaped = cleanPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    regex = new RegExp(`(^|\\.)${escaped}$`, 'i');
+                }
             } catch (e) {
-                regex = /^$/;
+                regex = /(?:)/; // 匹配失败的空正则
             }
             if (REGEX_CACHE.size > 500) REGEX_CACHE.delete(REGEX_CACHE.keys().next().value);
-            REGEX_CACHE.set(pattern, regex);
+            REGEX_CACHE.set(cleanPattern, regex);
         }
         return regex.test(hostname);
     });
@@ -196,7 +209,6 @@ const CACHE_API_PREFIX = 'http://kv-cache.local/';
 const CACHE_NULL_SENTINEL = "##NULL##"; 
 const KNOWN_KV_KEYS = ['UUID', 'KEY', 'ADMIN_PASS', 'SUPER_PASSWORD', 'PROXYIP', 'SOCKS5', 'GO2SOCKS5', 'DNS64', 'BAN', 'DIS', 'TIME', 'UPTIME', 'SUBNAME', 'ADD.txt', 'ADDAPI', 'ADDNOTLS', 'ADDNOTLSAPI', 'ADDCSV', 'CFPORTS', 'BESTIP_SOURCES', 'REMOTE_CONFIG', 'REMOTE_CONFIG_URL', 'URL', 'URL302', 'SAVED_DOMAIN'];
 
-// [Critical Fix] 增加 ctx 参数
 export async function getKV(env, key, ctx = null) {
     if (!env.KV || !key) return null;
     
@@ -227,7 +239,7 @@ export async function getKV(env, key, ctx = null) {
     
     const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
     
-    // [Critical Fix] L2 Cache API (Write) - 使用 ctx.waitUntil 确保写入成功
+    // L2 Cache API (Write) - 保持 30 天 TTL
     try { 
         const response = new Response(cacheVal, { 
             headers: { 
@@ -236,10 +248,9 @@ export async function getKV(env, key, ctx = null) {
             } 
         });
         
-        if (ctx && ctx.waitUntil) {
+        if (ctx && typeof ctx.waitUntil === 'function') {
             ctx.waitUntil(cache.put(cacheKeyUrl, response).catch(() => {}));
         } else {
-            // 如果没有 ctx，只能尽力而为（可能会失败）
             cache.put(cacheKeyUrl, response).catch(() => {});
         }
     } catch (e) {}
@@ -251,6 +262,10 @@ export async function clearKVCache(keys) {
     const cache = caches.default;
     const targetKeys = keys && Array.isArray(keys) ? keys : KNOWN_KV_KEYS;
     if (keys) keys.forEach(k => GLOBAL_KV_CACHE.delete(k)); else GLOBAL_KV_CACHE.clear();
+    
+    // [Fix] 清除正则缓存，防止旧规则残留
+    if (!keys || keys.includes('BAN')) REGEX_CACHE.clear();
+
     await Promise.all(targetKeys.map(key => cache.delete(CACHE_API_PREFIX + encodeURIComponent(key)).catch(() => {})));
     console.log(`[KV] Cache flushed for keys: ${targetKeys.join(', ')}`);
 }
