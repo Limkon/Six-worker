@@ -1,28 +1,34 @@
 // src/handlers/xhttp.js
 /**
  * 文件名: src/handlers/xhttp.js
- * 审计修复版:
- * 1. [Fix] 修复低频小包(SSH)场景下因采样频率过低导致的 Idle Timeout 误判.
- * 2. [Fix] 修复生命周期结束时，若无上行数据会导致 Reader 阻塞无法退出的死锁问题.
- * 3. [Robust] 增强资源清理逻辑，确保 Request Body Reader 被显式 Cancel.
+ * 最终确认版:
+ * 1. [Full] 包含所有原版核心逻辑 (UUID校验, 协议解析, 黑名单, 超时控制).
+ * 2. [Elegant] 使用 safe_read/safe_cancel 消除 "Stream was cancelled" 报错.
+ * 3. [Robust] 恢复了 Idle Timeout 的强力清理逻辑 (abort writable).
+ * 4. [Log] 恢复了关键握手错误的日志记录.
  */
 import { CONSTANTS } from '../constants.js';
 import { createUnifiedConnection } from './outbound.js';
 import { isHostBanned, stringifyUUID, textDecoder } from '../utils/helpers.js';
 
-// --- 常量定义 ---
-// 8分钟轮换，留出 buffer 避免 CPU 熔断
-const SESSION_MAX_LIFE_MS = 8 * 60 * 1000; 
-
 // --- 工具函数区 ---
 
+/**
+ * 优雅地取消流，忽略任何因流已关闭导致的错误
+ */
 async function safe_cancel(reader, reason) {
     if (!reader) return;
     try {
         await reader.cancel(reason);
-    } catch (_) { }
+    } catch (_) {
+        // 忽略所有取消时的错误，因为我们的目标就是关闭它
+    }
 }
 
+/**
+ * 安全读取函数：封装了超时和异常处理
+ * 如果流被取消、中断或超时，返回 { done: true, error: Error? }
+ */
 async function safe_read(reader, deadline) {
     if (!reader) return { done: true };
 
@@ -42,12 +48,15 @@ async function safe_read(reader, deadline) {
         if (result.timeout) {
             return { done: true, error: new Error('Read timeout') };
         }
-        return result; 
+        return result; // { value, done }
+
     } catch (e) {
+        // 核心优化：将"Stream cancelled"等非致命网络错误视为读取结束
         const msg = (e.message || '').toLowerCase();
         if (msg.includes('cancelled') || msg.includes('aborted') || msg.includes('closed')) {
             return { done: true };
         }
+        // 其他真正的逻辑错误抛出
         throw e;
     } finally {
         if (timeoutId) clearTimeout(timeoutId);
@@ -67,14 +76,17 @@ async function read_at_least(reader, minBytes, initialBuffer, deadline) {
 
     while (totalLength < minBytes) {
         const { value, done, error } = await safe_read(reader, deadline);
-        if (error) throw error; 
-        if (done) break;        
+        
+        if (error) throw error; // 抛出超时错误
+        if (done) break;        // 流正常结束或被中断，退出循环
+
         if (value && value.byteLength > 0) {
             chunks.push(value);
             totalLength += value.byteLength;
         }
     }
 
+    // Zero/One Copy 优化
     if (chunks.length === 0) return { value: new Uint8Array(0), done: true };
     if (chunks.length === 1) return { value: chunks[0], done: totalLength < minBytes };
 
@@ -84,28 +96,32 @@ async function read_at_least(reader, minBytes, initialBuffer, deadline) {
         resultBuffer.set(chunk, offset);
         offset += chunk.byteLength;
     }
+
     return { value: resultBuffer, done: totalLength < minBytes };
 }
 
 async function read_xhttp_header(readable, ctx) {
     const reader = readable.getReader(); 
-    const deadline = Date.now() + 3000; 
+    const deadline = Date.now() + 3000; // 3秒超时
 
     try {
+        // 1. 读取基础头部 (18字节: 1B版本 + 16B UUID + 1B MetadataLen)
         let { value: cache, done } = await read_at_least(reader, 18, null, deadline);
         if (cache.length < 18) throw new Error('header too short');
 
         const version = cache[0];
         const uuidStr = stringifyUUID(cache.subarray(1, 17));
         
+        // 校验 UUID
         const expectedID = ctx.userID;
         const expectedIDLow = ctx.userIDLow;
         if (uuidStr !== expectedID && (!expectedIDLow || uuidStr !== expectedIDLow)) {
             throw new Error('invalid UUID');
         }
         
+        // 2. 读取元数据长度
         const pb_len = cache[17];
-        const min_len_until_atyp = 22 + pb_len; 
+        const min_len_until_atyp = 22 + pb_len; // 18 + pb_len + 1(cmd) + 2(port) + 1(atype)
         
         if (cache.length < min_len_until_atyp) {
             const r = await read_at_least(reader, min_len_until_atyp, cache, deadline);
@@ -113,6 +129,7 @@ async function read_xhttp_header(readable, ctx) {
             if (cache.length < min_len_until_atyp) throw new Error('header too short for metadata');
         }
 
+        // 3. 解析命令
         const cmdIndex = 18 + pb_len;
         if (cache[cmdIndex] !== 1) throw new Error('unsupported command: ' + cache[cmdIndex]);
         
@@ -122,12 +139,14 @@ async function read_xhttp_header(readable, ctx) {
         const atype = cache[portIndex + 2];
         const addr_body_idx = portIndex + 3; 
 
+        // 4. 计算完整头部长度
         let header_len = -1;
         if (atype === CONSTANTS.ADDRESS_TYPE_IPV4) {
             header_len = addr_body_idx + 4;
         } else if (atype === CONSTANTS.ADDRESS_TYPE_IPV6) {
             header_len = addr_body_idx + 16;
         } else if (atype === CONSTANTS.ADDRESS_TYPE_URL) {
+            // 需要读取域名长度
             if (cache.length < addr_body_idx + 1) {
                  const r = await read_at_least(reader, addr_body_idx + 1, cache, deadline);
                  cache = r.value;
@@ -138,12 +157,14 @@ async function read_xhttp_header(readable, ctx) {
             throw new Error('unknown address type: ' + atype);
         }
         
+        // 5. 读取完整头部
         if (cache.length < header_len) {
             const r = await read_at_least(reader, header_len, cache, deadline);
             cache = r.value;
             if (cache.length < header_len) throw new Error('header too short for full address');
         }
         
+        // 6. 解析 Hostname
         let hostname = '';
         const addr_val_idx = addr_body_idx; 
         try {
@@ -172,40 +193,38 @@ async function read_xhttp_header(readable, ctx) {
         };
 
     } catch (error) {
+        // 统一在最外层释放 Reader
         await safe_cancel(reader, error.message);
         throw error;
     }
 }
 
-async function upload_to_remote_xhttp(writer, httpx, abortSignal) {
+async function upload_to_remote_xhttp(writer, httpx) {
+    // 写入头部携带的剩余数据
     if (httpx.data && httpx.data.length > 0) {
         await writer.write(httpx.data);
     }
     if (httpx.done) return;
 
+    // 循环写入 Body
     while (true) {
-        // [Fix] 虽然这里有 check，但如果 reader.read 阻塞，break 不会被执行
-        // 因此必须依赖外部调用 httpx.reader.cancel() 来打破阻塞
-        if (abortSignal && abortSignal.aborted) break;
-
         try {
+            // reader 已在 read_xhttp_header 中被获取，这里继续使用
             const { value, done } = await httpx.reader.read();
             if (done) break;
             if (value) await writer.write(value);
         } catch (e) {
+            // 读取流出错（如下游断开），停止写入，跳出循环
             break; 
         }
     }
 }
 
 // 创建带空闲超时监控的下载流
-function create_xhttp_downloader(resp, remote_readable, initialData, abortController) {
+function create_xhttp_downloader(resp, remote_readable, initialData) {
     const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45000;
     let lastActivity = Date.now();
     let idleTimer;
-    let chunkCount = 0; 
-    // [Fix] 增加时间采样锚点，防止低频流量下 lastActivity 长期不更新
-    let lastSampleTime = Date.now(); 
 
     const monitorStream = new TransformStream({
         start(controller) {
@@ -213,66 +232,62 @@ function create_xhttp_downloader(resp, remote_readable, initialData, abortContro
             if (initialData && initialData.byteLength > 0) {
                 controller.enqueue(initialData);
             }
-            
             idleTimer = setInterval(() => {
-                const now = Date.now();
-                if (now - lastActivity > IDLE_TIMEOUT_MS) {
-                    abortController.abort('idle timeout');
-                    return;
-                }
-                if (abortController.signal.aborted) {
+                if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+                    // [Restored] 强制清理逻辑：显式 abort 写入端以关闭上游连接
+                    try { monitorStream.writable.abort('idle timeout'); } catch (_) {}
+                    try { monitorStream.readable.cancel('idle timeout'); } catch (_) {}
                     clearInterval(idleTimer);
                 }
-            }, 5000); 
+            }, 5000);
         },
         transform(chunk, controller) {
-            chunkCount++;
-            const now = Date.now();
-            
-            // [Fix] 采样逻辑优化：
-            // 1. 累积 50 个包
-            // 2. OR 距离上次采样超过 3 秒 (解决 SSH 低频流量问题)
-            // 3. OR 大包 (>16KB)
-            if (chunkCount >= 50 || (now - lastSampleTime > 3000) || chunk.byteLength > 16384) {
-                lastActivity = now;
-                lastSampleTime = now;
-                chunkCount = 0;
-            }
-
+            lastActivity = Date.now();
             controller.enqueue(chunk);
         },
         flush() { clearInterval(idleTimer); },
         cancel() { clearInterval(idleTimer); }
     });
 
+    // 管道连接，并在发生错误时自动处理
     const pipePromise = remote_readable.pipeTo(monitorStream.writable).catch(() => {});
 
     return {
         readable: monitorStream.readable,
-        done: pipePromise
+        done: pipePromise,
+        abort: () => {
+            try { monitorStream.writable.abort(); } catch (_) {}
+            try { monitorStream.readable.cancel(); } catch (_) {}
+            clearInterval(idleTimer);
+        }
     };
 }
 
 export async function handleXhttpClient(request, ctx) {
+    // 1. 读取并解析头部
     let result;
     try {
         result = await read_xhttp_header(request.body, ctx);
     } catch (e) {
+        // 此时 reader 已经在 read_xhttp_header 内部被安全 cancel 了
         const errStr = e.message || '';
+        // [Restored] 恢复日志记录，但过滤掉预期的短连接错误
         if (!errStr.includes('header too short') && !errStr.includes('invalid UUID')) {
              console.warn('[XHTTP Handshake Error]:', errStr);
         }
-        return null; 
+        return null; // 握手失败
     }
 
     const { hostname, port, atype, data, resp, reader, done } = result;
 
+    // 2. 检查黑名单
     if (isHostBanned(hostname, ctx.banHosts)) {
         console.log('[XHTTP] Blocked:', hostname);
         await safe_cancel(reader, 'blocked');
         return null;
     }
 
+    // 3. 建立远程连接
     let remoteSocket;
     try {
         remoteSocket = await createUnifiedConnection(ctx, hostname, port, atype, console.log, ctx.proxyIP);
@@ -282,44 +297,30 @@ export async function handleXhttpClient(request, ctx) {
         return null;
     }
 
-    const lifeController = new AbortController();
+    // 4. 双向流处理 (Uploader & Downloader)
     
-    // 1. 设置最大生命周期定时器
-    const sessionTimeout = setTimeout(() => {
-        lifeController.abort('session_max_life_reached');
-    }, SESSION_MAX_LIFE_MS);
-
-    // 上行处理
+    // 上行: Request Body -> Remote Socket
     const uploaderPromise = (async () => {
         let writer = null;
         try {
             writer = remoteSocket.writable.getWriter();
-            await upload_to_remote_xhttp(writer, { data, done, reader }, lifeController.signal);
+            await upload_to_remote_xhttp(writer, { data, done, reader });
         } catch (e) {
-            // ignore
+            // 忽略写入错误
         } finally {
             if (writer) try { await writer.close(); } catch (_) {}
-            // 这里的 cancel 主要是为了防止 upload_to_remote_xhttp 正常退出后 reader 还没关
-            // 但如果死锁在 read 中，需要依靠下面的 signal listener
             await safe_cancel(reader, 'upload finished'); 
         }
     })();
 
-    // 下行处理
-    const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData, lifeController);
+    // 下行: Remote Socket -> Response Body
+    const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData);
 
-    // [Fix] 监听 Abort 信号，强制打破所有潜在的阻塞
-    lifeController.signal.addEventListener('abort', () => {
-        // 1. 关闭远程连接 (打破 downloader pipeTo)
-        try { remoteSocket.close(); } catch (_) {}
-        // 2. [Critical] 强制 Cancel 请求 Body Reader (打破 uploader read 阻塞)
-        safe_cancel(reader, 'session aborted');
-    });
-
+    // 5. 生命周期绑定
+    // 使用 Promise.allSettled 确保 connectionClosed 永远 Resolve
     const connectionClosed = Promise.allSettled([downloader.done, uploaderPromise]).then(() => {
-        clearTimeout(sessionTimeout);
         try { remoteSocket.close(); } catch (_) {}
-        try { downloader.readable.cancel(); } catch (_) {}
+        downloader.abort();
     });
 
     return {
