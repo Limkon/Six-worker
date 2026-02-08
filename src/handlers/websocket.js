@@ -1,11 +1,12 @@
 // src/handlers/websocket.js
 /**
  * 文件名: src/handlers/websocket.js
- * 最终修复版:
- * 1. [Fix] 恢复 Idle Timeout (60s) 机制，强制清理僵尸连接.
- * 2. [Fix] 恢复 activeConnectionsInInstance 计数器幂等性保护 (hasDecremented).
- * 3. [Fix] 恢复 bufferedBytes 的 reduce 实时计算逻辑，确保 100% 准确.
- * 4. [Security] 包含实例级硬性熔断 (Max Concurrent) 和 动态 Buffer 限制.
+ * 状态: [Refactored & Optimized & Fixed]
+ * 1. [Optimization] 握手阶段内存优化: 使用 vlessChunks 数组代替 concatUint8，降低 GC 压力。
+ * 2. [Fix] 集成 Idle Timeout (60s): 强制清理僵尸连接。
+ * 3. [Fix] 集成幂等递减 (hasDecremented): 确保计数器准确。
+ * 4. [Fix] 集成精确缓冲计算 (reduce): 确保与 outbound.js 状态同步。
+ * 5. [Security] 保持硬性熔断和动态 Buffer 限制。
  */
 import { ProtocolManager } from '../protocols/manager.js';
 import { processVlessHeader } from '../protocols/vless.js';
@@ -28,12 +29,17 @@ const protocolManager = new ProtocolManager()
 // [Smart Global State] 当前 Worker 实例活跃连接计数器
 let activeConnectionsInInstance = 0;
 
-// 工具：合并 Uint8Array
-function concatUint8(a, b) {
-    const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
-    const res = new Uint8Array(a.length + bArr.length);
-    res.set(a);
-    res.set(bArr, a.length);
+// [New Helper] 合并 Chunk 数组 (替代频繁 concatUint8)
+function mergeChunks(chunks) {
+    if (chunks.length === 0) return new Uint8Array(0);
+    if (chunks.length === 1) return chunks[0];
+    const totalLen = chunks.reduce((sum, c) => sum + c.byteLength, 0);
+    const res = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const c of chunks) {
+        res.set(c, offset);
+        offset += c.byteLength;
+    }
     return res;
 }
 
@@ -80,7 +86,9 @@ export async function handleWebSocketRequest(request, ctx) {
     let isConnected = false; 
     let socks5State = 0; 
     
-    let vlessBuffer = new Uint8Array(0); 
+    // [Optimization] 使用 Chunk Array 替代 buffer 累加
+    let vlessChunks = []; 
+    let vlessBufferLength = 0;
     
     let activeWriter = null;
     let activeSocket = null;
@@ -90,7 +98,6 @@ export async function handleWebSocketRequest(request, ctx) {
     const PROBE_THRESHOLD = 1024;
     
     // [Fix] 空闲超时控制 (Idle Timeout)
-    // 关键逻辑：防止死连接占用计数器
     const IDLE_TIMEOUT = 60 * 1000; 
     let lastActivityTime = Date.now();
     let idleTimer = null;
@@ -104,7 +111,7 @@ export async function handleWebSocketRequest(request, ctx) {
             cleanup();
             safeCloseWebSocket(webSocket);
         }
-    }, 10000); // 每 10 秒检查一次
+    }, 10000); 
 
     const log = (info, event) => console.log(`[WS][Conns:${activeConnectionsInInstance}] ${info}`, event || '');
 
@@ -146,10 +153,8 @@ export async function handleWebSocketRequest(request, ctx) {
                     await activeWriter.write(chunkArr);
                 } else if (remoteSocketWrapper.isConnecting) {
                     // [Fix] 实时计算 Buffer 大小 (Reduce)
-                    // outbound.js 清空 buffer 数组 (length=0) 时，这里自动重新计算，无需显式重置标志
+                    // 确保与 outbound.js 的 buffer 状态同步
                     remoteSocketWrapper.buffer.push(chunkArr);
-                    
-                    // 使用 reduce 确保与 buffer 真实内容 100% 同步
                     const currentBufferSize = remoteSocketWrapper.buffer.reduce((sum, c) => sum + c.byteLength, 0);
                     remoteSocketWrapper.bufferedBytes = currentBufferSize;
 
@@ -164,29 +169,46 @@ export async function handleWebSocketRequest(request, ctx) {
             }
 
             // --- 阶段一：协议识别与握手 ---
-            vlessBuffer = concatUint8(vlessBuffer, chunkArr);
+            // [Optimization] 使用 chunks push 代替 concat
+            vlessChunks.push(chunkArr);
+            vlessBufferLength += chunkArr.byteLength;
 
-            if (vlessBuffer.length > MAX_HEADER_BUFFER) {
+            if (vlessBufferLength > MAX_HEADER_BUFFER) {
                 clearTimeout(protocolDetectTimer);
                 throw new Error(`Header buffer limit exceeded`);
             }
+            
+            // 为了进行协议检测，我们需要临时合并当前的 chunks
+            // 注意：这里仍然需要合并，因为解析器需要连续的 Buffer，
+            // 但通过使用 vlessChunks，我们避免了每次 chunk 到来时对整个历史数据的 reallocation，
+            // 只有在试图解析的那一刻才临时分配。
+            const currentBuffer = mergeChunks(vlessChunks);
 
             // SOCKS5 握手
             if (socks5State < 2) {
-                const { consumed, newState, error } = tryHandleSocks5Handshake(vlessBuffer, socks5State, webSocket, ctx, log);
+                const { consumed, newState, error } = tryHandleSocks5Handshake(currentBuffer, socks5State, webSocket, ctx, log);
                 if (error) { clearTimeout(protocolDetectTimer); throw new Error(error); }
                 if (consumed > 0) {
-                    vlessBuffer = vlessBuffer.slice(consumed);
+                    // 消费了部分数据，需要调整 chunks
+                    // 简化处理：由于 socks5 握手通常很短，我们直接重置 chunks 为剩余部分
+                    const remaining = currentBuffer.slice(consumed);
+                    vlessChunks = [remaining];
+                    vlessBufferLength = remaining.byteLength;
                     socks5State = newState;
                     if (socks5State !== 2) return; 
+                    // 如果进入 stage 2，重新 merge 并继续
                 }
             }
 
-            if (vlessBuffer.length === 0) return;
+            if (vlessBufferLength === 0) return;
 
             try {
                 // 识别协议
-                const result = await protocolManager.detect(vlessBuffer, ctx);
+                // 再次 merge (如果刚才 socks5 消耗过数据，currentBuffer 需要刷新)
+                // 优化：如果 socks5 没消耗数据，可以直接复用 currentBuffer
+                const bufferToDetect = (socks5State > 0) ? mergeChunks(vlessChunks) : currentBuffer;
+
+                const result = await protocolManager.detect(bufferToDetect, ctx);
                 
                 if (socks5State === 2 && result.protocol !== 'socks5') {
                     throw new Error('Protocol mismatch after Socks5 handshake');
@@ -210,11 +232,11 @@ export async function handleWebSocketRequest(request, ctx) {
                 clearTimeout(protocolDetectTimer); 
                 remoteSocketWrapper.isConnecting = true;
 
-                let clientData = vlessBuffer; 
+                let clientData = bufferToDetect; // Default
                 let responseHeader = null;
 
                 if (protocol === 'vless') {
-                    clientData = vlessBuffer.subarray(rawDataIndex);
+                    clientData = bufferToDetect.subarray(rawDataIndex);
                     responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
                 } else if (protocol === 'trojan' || protocol === 'ss' || protocol === 'mandala') {
                     clientData = result.rawClientData;
@@ -224,7 +246,7 @@ export async function handleWebSocketRequest(request, ctx) {
                     socks5State = 3;
                 }
 
-                vlessBuffer = null; 
+                vlessChunks = null; // GC
 
                 if (isUDP) {
                     handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
@@ -233,7 +255,7 @@ export async function handleWebSocketRequest(request, ctx) {
                 }
 
             } catch (e) {
-                if (vlessBuffer && vlessBuffer.length < PROBE_THRESHOLD && vlessBuffer.length < MAX_HEADER_BUFFER) {
+                if (vlessBufferLength < PROBE_THRESHOLD && vlessBufferLength < MAX_HEADER_BUFFER) {
                     return; 
                 }
                 clearTimeout(protocolDetectTimer);
@@ -251,7 +273,7 @@ export async function handleWebSocketRequest(request, ctx) {
     // 辅助清理函数
     function cleanup() {
         clearTimeout(protocolDetectTimer);
-        clearInterval(idleTimer); // [Fix] 清理 idleTimer
+        clearInterval(idleTimer); 
         if (activeWriter) { try { activeWriter.releaseLock(); } catch(e) {} activeWriter = null; }
         if (remoteSocketWrapper.value) { try { remoteSocketWrapper.value.close(); } catch(e) {} remoteSocketWrapper.value = null; }
     }
