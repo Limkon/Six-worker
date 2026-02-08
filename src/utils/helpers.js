@@ -1,10 +1,9 @@
 // src/utils/helpers.js
 /**
  * 文件名: src/utils/helpers.js
- * 状态: [Refactored & Optimized]
- * 1. [Optimization] generateDynamicUUID: 增加内存缓存，避免重复计算 SHA-256。
- * 2. [Critical] 包含 REGEX_CACHE，确保 isHostBanned 高效运行。
- * 3. [Full] 包含所有核心工具函数。
+ * 状态: [最终完整修复版]
+ * 1. [Critical] getKV: 增加 ctx 参数，使用 ctx.waitUntil 确保 Cache API 写入成功，解决 Worker Hung 问题。
+ * 2. [Full] 保留 StreamCipher, REGEX_CACHE, SHA224, UUID 等所有核心工具。
  */
 
 // 全局编解码器实例
@@ -25,7 +24,7 @@ export async function sha1(str) {
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// --- SHA224 静态资源 (保持原样) ---
+// --- SHA224 静态资源 (保持完整) ---
 const SHA224_CONSTANTS = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -130,7 +129,7 @@ export function stringifyUUID(arr, offset = 0) {
     return uuid;
 }
 
-// [Optimization] UUID 缓存：避免高频计算
+// [Optimization] UUID 缓存 (动态 UUID 计算昂贵，必须缓存)
 const DYNAMIC_UUID_CACHE = new Map();
 
 export async function generateDynamicUUID(key, timeDays, updateHour) {
@@ -143,14 +142,12 @@ export async function generateDynamicUUID(key, timeDays, updateHour) {
     const timezoneOffset = 8;
     const startDate = new Date(2007, 6, 7, updateHour, 0, 0);
     const oneWeekMs = 1000 * 60 * 60 * 24 * timeDays;
-    
     function getCurrentCycle() {
         const now = new Date();
         const adjustedNow = new Date(now.getTime() + timezoneOffset * 60 * 60 * 1000);
         const timeDiff = Number(adjustedNow) - Number(startDate);
         return Math.ceil(timeDiff / oneWeekMs);
     }
-    
     async function generate(baseStr) {
         const hashBuffer = new TextEncoder().encode(baseStr);
         const hash = await crypto.subtle.digest('SHA-256', hashBuffer);
@@ -158,21 +155,18 @@ export async function generateDynamicUUID(key, timeDays, updateHour) {
         const hex = hashArr.map(b => b.toString(16).padStart(2, '0')).join('');
         return `${hex.substr(0, 8)}-${hex.substr(8, 4)}-4${hex.substr(13, 3)}-${(parseInt(hex.substr(16, 2), 16) & 0x3f | 0x80).toString(16)}${hex.substr(18, 2)}-${hex.substr(20, 12)}`;
     }
-    
     const currentCycle = getCurrentCycle();
     const current = await generate(key + currentCycle);
     const prev = await generate(key + (currentCycle - 1));
-    
     const result = [current, prev];
     
-    // 写入缓存 (简单的 LRU 或定时清理机制可以视情况增加，但此处 Key 变化极慢，无需复杂清理)
-    if (DYNAMIC_UUID_CACHE.size > 100) DYNAMIC_UUID_CACHE.clear(); // 简单防护
+    // 写入缓存
+    if (DYNAMIC_UUID_CACHE.size > 100) DYNAMIC_UUID_CACHE.clear();
     DYNAMIC_UUID_CACHE.set(cacheKey, result);
-    
     return result;
 }
 
-// [Optimization] Host 正则缓存 (REGEX_CACHE)
+// [Optimization] 正则缓存 (REGEX_CACHE)
 const REGEX_CACHE = new Map();
 
 export function isHostBanned(hostname, banList) {
@@ -195,18 +189,24 @@ export function isHostBanned(hostname, banList) {
     });
 }
 
-// --- KV Cache & StreamCipher (保持原样) ---
+// --- KV Cache & StreamCipher ---
 const GLOBAL_KV_CACHE = new Map();
 const MAX_KV_CACHE_SIZE = 200; 
 const CACHE_API_PREFIX = 'http://kv-cache.local/';
 const CACHE_NULL_SENTINEL = "##NULL##"; 
 const KNOWN_KV_KEYS = ['UUID', 'KEY', 'ADMIN_PASS', 'SUPER_PASSWORD', 'PROXYIP', 'SOCKS5', 'GO2SOCKS5', 'DNS64', 'BAN', 'DIS', 'TIME', 'UPTIME', 'SUBNAME', 'ADD.txt', 'ADDAPI', 'ADDNOTLS', 'ADDNOTLSAPI', 'ADDCSV', 'CFPORTS', 'BESTIP_SOURCES', 'REMOTE_CONFIG', 'REMOTE_CONFIG_URL', 'URL', 'URL302', 'SAVED_DOMAIN'];
 
-export async function getKV(env, key) {
+// [Critical Fix] 增加 ctx 参数
+export async function getKV(env, key, ctx = null) {
     if (!env.KV || !key) return null;
+    
+    // L1 Memory
     if (GLOBAL_KV_CACHE.has(key)) return GLOBAL_KV_CACHE.get(key);
+    
     const cache = caches.default;
     const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
+    
+    // L2 Cache API (Read)
     try {
         const match = await cache.match(cacheKeyUrl);
         if (match) {
@@ -217,12 +217,33 @@ export async function getKV(env, key) {
             return val;
         }
     } catch (e) { console.error(`[KV] Cache API error for ${key}:`, e); }
+    
+    // L3 Real KV Get (Fallback)
     let val = null;
     try { val = await env.KV.get(key); } catch (e) { console.error(`[KV] Real KV get failed:`, e); }
+    
     if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
     GLOBAL_KV_CACHE.set(key, val);
+    
     const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
-    try { cache.put(cacheKeyUrl, new Response(cacheVal, { headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'max-age=2592000' } })).catch(() => {}); } catch (e) {}
+    
+    // [Critical Fix] L2 Cache API (Write) - 使用 ctx.waitUntil 确保写入成功
+    try { 
+        const response = new Response(cacheVal, { 
+            headers: { 
+                'Content-Type': 'text/plain', 
+                'Cache-Control': 'max-age=2592000' // 30 Days
+            } 
+        });
+        
+        if (ctx && ctx.waitUntil) {
+            ctx.waitUntil(cache.put(cacheKeyUrl, response).catch(() => {}));
+        } else {
+            // 如果没有 ctx，只能尽力而为（可能会失败）
+            cache.put(cacheKeyUrl, response).catch(() => {});
+        }
+    } catch (e) {}
+    
     return val;
 }
 
