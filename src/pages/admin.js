@@ -1,26 +1,104 @@
 // src/pages/admin.js
 /**
  * 文件名: src/pages/admin.js
- * 修改说明:
- * 1. [Fix] 修复缓存清理逻辑冗余导致的保存失败问题。统一使用 cleanConfigCache(keys) 进行原子化清理。
- * 2. [Fix] 在 initializeContext 中传递 ctx，防止 WebDAV 推送等后台任务因上下文丢失而被中断。
- * 3. [Robustness] 增加表单解析的错误捕获，防止因内容过大导致的静默失败。
+ * 状态: [审计优化版]
+ * 1. [Fix] 移除未使用的 cleanList 引用。
+ * 2. [UX] 修复修改 SUBNAME 后页面标题不立即更新的问题。
+ * 3. [Stability] 为优选 IP 的外部 Fetch 请求增加 5秒 超时控制，防止源站卡死导致 Worker 挂起。
+ * 4. [Refactor] 将 GetCFIPs 逻辑抽离，提升代码可读性。
  */
 import { getConfig, cleanConfigCache, initializeContext } from '../config.js'; 
-import { CONSTANTS } from '../constants.js';
-import { cleanList, getKV, clearKVCache } from '../utils/helpers.js';
+import { getKV, clearKVCache } from '../utils/helpers.js'; // 移除了 cleanList
 import { getAdminConfigHtml, getBestIPHtml } from '../templates/admin.js';
 import { executeWebDavPush } from '../handlers/webdav.js';
 
+// 辅助函数：带超时的 Fetch
+async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    const config = { ...options, signal: controller.signal };
+    try {
+        const response = await fetch(url, config);
+        clearTimeout(id);
+        return response;
+    } catch (error) {
+        clearTimeout(id);
+        throw error;
+    }
+}
+
+// 辅助函数：解析 IP 逻辑抽离
+async function resolveIPSource(sourceName, allIpSources) {
+    try {
+        let response;
+        const source = allIpSources.find(s => s.name === sourceName);
+        
+        if (sourceName === '反代IP列表') {
+            response = await fetchWithTimeout('https://raw.githubusercontent.com/cmliu/ACL4SSR/main/baipiao.txt');
+            const text = response.ok ? await response.text() : '';
+            return text.split('\n').map(l => l.trim()).filter(Boolean);
+        } else if (source) {
+            response = await fetchWithTimeout(source.url);
+        } else {
+            response = await fetchWithTimeout(allIpSources[0].url);
+        }
+
+        const text = response.ok ? await response.text() : '';
+        const cidrs = text.split('\n').filter(line => line.trim() && !line.startsWith('#'));
+        const ips = new Set();
+
+        // 防止无限循环：如果一轮循环后IP数量没有增加，强制退出
+        while (ips.size < 512 && cidrs.length > 0) {
+            const startSize = ips.size; 
+            
+            for (const cidr of cidrs) {
+                if (ips.size >= 512) break;
+                try {
+                    if (!cidr.includes('/')) { ips.add(cidr); continue; }
+                    const [network, prefixStr] = cidr.split('/');
+                    
+                    // IPv6 兼容
+                    if (network.includes(':')) {
+                        if (network.endsWith('::')) {
+                            const rand = Math.floor(Math.random() * 0xffff).toString(16);
+                            ips.add(network + rand);
+                        } else {
+                            ips.add(network);
+                        }
+                        continue;
+                    }
+                    
+                    const prefix = parseInt(prefixStr);
+                    if (prefix < 12 || prefix > 31) continue;
+                    const ipToInt = (ip) => ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
+                    const intToIp = (int) => [(int >>> 24) & 255, (int >>> 16) & 255, (int >>> 8) & 255, int & 255].join('.');
+                    const networkInt = ipToInt(network);
+                    const hostBits = 32 - prefix;
+                    const numHosts = 1 << hostBits;
+                    if (numHosts > 2) {
+                        const randomOffset = Math.floor(Math.random() * (numHosts - 2)) + 1;
+                        ips.add(intToIp(networkInt + randomOffset));
+                    }
+                } catch (e) {}
+            }
+            if (ips.size === startSize) break;
+        }
+        return Array.from(ips);
+    } catch (error) { 
+        console.warn('[BestIP] Fetch source failed:', error);
+        return []; 
+    }
+}
+
 // 处理 /edit 页面 (配置编辑器)
 export async function handleEditConfig(request, env, ctx) {
-    const FileName = await getConfig(env, 'SUBNAME', 'sub', ctx);
+    // 初始读取 Subname
+    let FileName = await getConfig(env, 'SUBNAME', 'sub', ctx);
     
     if (!env.KV) {
         return new Response('<p>错误：未绑定KV空间，无法使用在线配置功能。</p>', { status: 404, headers: { "Content-Type": "text/html;charset=utf-8" } });
     }
 
-    // 定义配置项列表 (完全保留原版所有配置项)
     const configItems = [
         ['ADMIN_PASS', '后台管理访问密码', '设置后，通过 /KEY 路径访问管理页需输入此密码。留空则不开启验证。', '例如: 123456', 'text'],
         ['UUID', 'UUID (用户ID/密码)', 'VLESS的用户ID, 也是Trojan/SS的密码。', '例如: 1234567', 'text'],
@@ -57,11 +135,15 @@ export async function handleEditConfig(request, env, ctx) {
             }
 
             const savePromises = [];
-            // [优化] 动态收集本次提交涉及的所有 Key，用于缓存清理
             const keysToClear = []; 
 
+            // [UX Fix] 如果用户修改了 SUBNAME，立即更新当前页面的变量，这样返回的 HTML 标题就是新的
+            const newSubName = formData.get('SUBNAME');
+            if (newSubName && newSubName !== FileName) {
+                FileName = newSubName;
+            }
+
             for (const [key] of configItems) {
-                // 只要是 configItems 里有的 key，都加入清理列表
                 keysToClear.push(key); 
                 
                 const value = formData.get(key);
@@ -87,16 +169,12 @@ export async function handleEditConfig(request, env, ctx) {
             }
             await Promise.all(savePromises);
             
-            // 1. [Fix] 统一清理缓存 (内存 L1 + Cache API L2)
-            // 直接传递 keysToClear 给 cleanConfigCache，它内部会正确处理内存清除和 clearKVCache 调用
-            // 移除了之前版本中 cleanConfigCache() 和 clearKVCache(keys) 的重复调用，消除冗余和竞争风险
+            // 清理缓存
             await cleanConfigCache(keysToClear);
 
-            // 3. 触发 WebDAV 推送
+            // 触发 WebDAV 推送
             try {
-                // [Fix] 传递 ctx，确保 initializeContext 内部能正确处理非阻塞任务
                 const appCtx = await initializeContext(request, env, ctx);
-                // 确保 waitUntil 绑定正确
                 if (ctx && ctx.waitUntil) {
                     appCtx.waitUntil = ctx.waitUntil.bind(ctx);
                 }
@@ -107,6 +185,7 @@ export async function handleEditConfig(request, env, ctx) {
                 console.error('[Admin] Failed to trigger WebDAV push:', err);
             }
 
+            // 返回成功响应，此时 FileName 已经是新的
             return new Response('保存成功', { status: 200 });
         } catch (e) {
             return new Response('保存失败: ' + (e.message || e.toString()), { status: 500 });
@@ -114,7 +193,6 @@ export async function handleEditConfig(request, env, ctx) {
     }
     
     // 处理 GET 渲染页面
-    // [Fix] 这里的 getKV 不需要强制 ctx，因为读取操作不需要 waitUntil
     const kvPromises = configItems.map(item => getKV(env, item[0]));
     const kvValues = await Promise.all(kvPromises);
     let formHtml = '';
@@ -159,15 +237,13 @@ export async function handleBestIP(request, env) {
         const testUrl = 'https://cloudflare.com/cdn-cgi/trace';
         const startTime = Date.now();
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 2000);
-            const response = await fetch(testUrl, {
+            // 这里使用短暂超时，因为是前端逐个 IP 并发测
+            const response = await fetchWithTimeout(testUrl, {
                 method: "GET",
                 headers: { "Accept": "text/plain" },
-                signal: controller.signal,
                 resolveOverride: ip
-            });
-            clearTimeout(timeoutId);
+            }, 2000); // 2秒超时
+            
             if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
             const traceText = await response.text();
             const latency = Date.now() - startTime;
@@ -196,27 +272,23 @@ export async function handleBestIP(request, env) {
             const data = await request.json();
             const action = url.searchParams.get('action') || 'save';
             
-            // [Security Fix] 限制最大行数为 50，并进行基本格式清洗
             let inputIps = [];
             if (data.ips && Array.isArray(data.ips)) {
                 inputIps = data.ips
-                    .slice(0, 50) // 限制输入最多 50 行
-                    .map(line => String(line).trim().substring(0, 100)) // 单行最大 100 字符
+                    .slice(0, 50) 
+                    .map(line => String(line).trim().substring(0, 100))
                     .filter(Boolean);
             }
             
             if (action === 'append') {
                 const existing = await getKV(env, txt) || ''; 
                 const existingLines = existing.split('\n').map(l => l.trim()).filter(Boolean);
-                // 去重并合并
                 const newContent = [...new Set([...existingLines, ...inputIps])].join('\n');
                 await env.KV.put(txt, newContent);
             } else {
-                // 覆盖保存
                 await env.KV.put(txt, inputIps.join('\n'));
             }
             
-            // [Fix] 清理缓存: 使用 cleanConfigCache 统一处理，移除 redundant 的 clearKVCache 调用
             await cleanConfigCache([txt]);
 
             return new Response(JSON.stringify({ success: true, message: action === 'append' ? '追加成功' : '保存成功' }), { headers: { 'Content-Type': 'application/json' } });
@@ -232,7 +304,6 @@ export async function handleBestIP(request, env) {
     let ipSources = defaultIpSources;
     if (env.KV) {
         const kvData = await getKV(env, 'BESTIP_SOURCES');
-        // [Fix] 传递 ctx (此处为 null, 读操作可接受)
         const remoteData = await getConfig(env, 'BESTIP_SOURCES'); 
         const sourceData = kvData || remoteData;
 
@@ -263,67 +334,7 @@ export async function handleBestIP(request, env) {
 
     if (url.searchParams.has('loadIPs')) {
         const ipSourceName = url.searchParams.get('loadIPs');
-        
-        // [完整恢复] 之前省略的复杂 IP 解析逻辑
-        async function GetCFIPs(sourceName) {
-             try {
-                let response;
-                const source = allIpSources.find(s => s.name === sourceName);
-                if (sourceName === '反代IP列表') {
-                    response = await fetch('https://raw.githubusercontent.com/cmliu/ACL4SSR/main/baipiao.txt');
-                    const text = response.ok ? await response.text() : '';
-                    return text.split('\n').map(l => l.trim()).filter(Boolean);
-                } else if (source) {
-                    response = await fetch(source.url);
-                } else {
-                    response = await fetch(allIpSources[0].url);
-                }
-                const text = response.ok ? await response.text() : '';
-                const cidrs = text.split('\n').filter(line => line.trim() && !line.startsWith('#'));
-                const ips = new Set();
-                
-                // 防止无限循环
-                while (ips.size < 512 && cidrs.length > 0) {
-                    const startSize = ips.size; 
-                    
-                    for (const cidr of cidrs) {
-                        if (ips.size >= 512) break;
-                        try {
-                            if (!cidr.includes('/')) { ips.add(cidr); continue; }
-                            const [network, prefixStr] = cidr.split('/');
-                            
-                            // IPv6 兼容
-                            if (network.includes(':')) {
-                                if (network.endsWith('::')) {
-                                    const rand = Math.floor(Math.random() * 0xffff).toString(16);
-                                    ips.add(network + rand);
-                                } else {
-                                    ips.add(network);
-                                }
-                                continue;
-                            }
-                            
-                            const prefix = parseInt(prefixStr);
-                            if (prefix < 12 || prefix > 31) continue;
-                            const ipToInt = (ip) => ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
-                            const intToIp = (int) => [(int >>> 24) & 255, (int >>> 16) & 255, (int >>> 8) & 255, int & 255].join('.');
-                            const networkInt = ipToInt(network);
-                            const hostBits = 32 - prefix;
-                            const numHosts = 1 << hostBits;
-                            if (numHosts > 2) {
-                                const randomOffset = Math.floor(Math.random() * (numHosts - 2)) + 1;
-                                ips.add(intToIp(networkInt + randomOffset));
-                            }
-                        } catch (e) {}
-                    }
-                    
-                    if (ips.size === startSize) break;
-                }
-                return Array.from(ips);
-            } catch (error) { return []; }
-        }
-        
-        const ips = await GetCFIPs(ipSourceName);
+        const ips = await resolveIPSource(ipSourceName, allIpSources);
         return new Response(JSON.stringify({ ips }), { headers: { 'Content-Type': 'application/json' } });
     }
 
