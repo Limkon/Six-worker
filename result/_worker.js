@@ -2168,6 +2168,7 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
   });
 }
 
+var SESSION_MAX_LIFE_MS = 8 * 60 * 1e3;
 async function safe_cancel(reader, reason) {
   if (!reader) return;
   try {
@@ -2178,14 +2179,18 @@ async function safe_cancel(reader, reason) {
 async function safe_read(reader, deadline) {
   if (!reader) return { done: true };
   const remainingTime = deadline - Date.now();
-  if (remainingTime <= 0) return { done: true, error: new Error("Read timeout") };
+  if (remainingTime <= 0) {
+    return { done: true, error: new Error("Read timeout") };
+  }
   let timeoutId;
   const timeoutPromise = new Promise((resolve) => {
     timeoutId = setTimeout(() => resolve({ timeout: true }), remainingTime);
   });
   try {
     const result = await Promise.race([reader.read(), timeoutPromise]);
-    if (result.timeout) return { done: true, error: new Error("Read timeout") };
+    if (result.timeout) {
+      return { done: true, error: new Error("Read timeout") };
+    }
     return result;
   } catch (e) {
     const msg = (e.message || "").toLowerCase();
@@ -2301,6 +2306,67 @@ async function read_xhttp_header(readable, ctx) {
     throw error;
   }
 }
+async function upload_to_remote_xhttp(writer, httpx, abortSignal) {
+  if (httpx.data && httpx.data.length > 0) {
+    await writer.write(httpx.data);
+  }
+  if (httpx.done) return;
+  while (true) {
+    if (abortSignal && abortSignal.aborted) break;
+    try {
+      const { value, done } = await httpx.reader.read();
+      if (done) break;
+      if (value) await writer.write(value);
+    } catch (e) {
+      break;
+    }
+  }
+}
+function create_xhttp_downloader(resp, remote_readable, initialData, abortController) {
+  const IDLE_TIMEOUT_MS = CONSTANTS.IDLE_TIMEOUT_MS || 45e3;
+  let lastActivity = Date.now();
+  let idleTimer;
+  let chunkCount = 0;
+  const monitorStream = new TransformStream({
+    start(controller) {
+      controller.enqueue(resp);
+      if (initialData && initialData.byteLength > 0) {
+        controller.enqueue(initialData);
+      }
+      idleTimer = setInterval(() => {
+        if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+          abortController.abort("idle timeout");
+          return;
+        }
+        if (abortController.signal.aborted) {
+          clearInterval(idleTimer);
+        }
+      }, 5e3);
+    },
+    transform(chunk, controller) {
+      chunkCount++;
+      if (chunkCount >= 50) {
+        lastActivity = Date.now();
+        chunkCount = 0;
+      } else if (chunk.byteLength > 16384) {
+        lastActivity = Date.now();
+      }
+      controller.enqueue(chunk);
+    },
+    flush() {
+      clearInterval(idleTimer);
+    },
+    cancel() {
+      clearInterval(idleTimer);
+    }
+  });
+  const pipePromise = remote_readable.pipeTo(monitorStream.writable).catch(() => {
+  });
+  return {
+    readable: monitorStream.readable,
+    done: pipePromise
+  };
+}
 async function handleXhttpClient(request, ctx) {
   let result;
   try {
@@ -2326,48 +2392,44 @@ async function handleXhttpClient(request, ctx) {
     await safe_cancel(reader, "connect failed");
     return null;
   }
+  const lifeController = new AbortController();
+  const sessionTimeout = setTimeout(() => {
+    lifeController.abort("session_max_life_reached");
+  }, SESSION_MAX_LIFE_MS);
   const uploaderPromise = (async () => {
+    let writer = null;
     try {
-      if (data && data.length > 0) {
-        const writer = remoteSocket.writable.getWriter();
-        try {
-          await writer.write(data);
-        } finally {
-          writer.releaseLock();
-        }
-      }
-      if (done) {
-        await remoteSocket.writable.close();
-      } else {
-        reader.releaseLock();
-        await request.body.pipeTo(remoteSocket.writable);
-      }
+      writer = remoteSocket.writable.getWriter();
+      await upload_to_remote_xhttp(writer, { data, done, reader }, lifeController.signal);
     } catch (e) {
+    } finally {
+      if (writer) try {
+        await writer.close();
+      } catch (_) {
+      }
+      await safe_cancel(reader, "upload finished");
     }
   })();
-  let responseReadable = remoteSocket.readable;
-  if (resp && resp.length > 0 || remoteSocket.initialData && remoteSocket.initialData.byteLength > 0) {
-    const { readable, writable } = new TransformStream();
-    const writer = writable.getWriter();
-    (async () => {
-      try {
-        if (resp) await writer.write(resp);
-        if (remoteSocket.initialData) await writer.write(remoteSocket.initialData);
-        writer.releaseLock();
-        await remoteSocket.readable.pipeTo(writable);
-      } catch (e) {
-        try {
-          writable.abort(e);
-        } catch (_) {
-        }
-      }
-    })();
-    responseReadable = readable;
-  }
-  const connectionClosed = uploaderPromise.then(() => {
+  const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData, lifeController);
+  const connectionClosed = Promise.allSettled([downloader.done, uploaderPromise]).then(() => {
+    clearTimeout(sessionTimeout);
+    try {
+      remoteSocket.close();
+    } catch (_) {
+    }
+    try {
+      downloader.readable.cancel();
+    } catch (_) {
+    }
+  });
+  lifeController.signal.addEventListener("abort", () => {
+    try {
+      remoteSocket.close();
+    } catch (_) {
+    }
   });
   return {
-    readable: responseReadable,
+    readable: downloader.readable,
     closed: connectionClosed
   };
 }
