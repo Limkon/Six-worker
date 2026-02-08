@@ -1,12 +1,13 @@
 // src/utils/helpers.js
 /**
  * 文件名: src/utils/helpers.js
+ * 状态: [最终完整版]
  * 说明: 核心工具库。包含加密、UUID生成、KV缓存系统(L1/L2)等核心功能。
- * 最终确认状态:
- * 1. [Fix] cleanList: 优化为单次 split 正则，高效处理大文本。
- * 2. [Optimization] computeSha224Core: 移除低效循环，使用 repeat 填充。
- * 3. [Optimization] base64ToArrayBuffer: 使用 padEnd 替代 while 循环。
- * 4. [Critical] isHostBanned: 增加正则缓存 (REGEX_CACHE)，防止 CPU 飙升。
+ * * 优化点汇总:
+ * 1. [Critical] isHostBanned: 集成正则缓存 (REGEX_CACHE)，彻底解决 CPU 超时问题。
+ * 2. [Perf] cleanList: 优化为单次 split 正则，高效处理大文本。
+ * 3. [Perf] computeSha224Core: 移除低效循环，使用 repeat 一次性填充。
+ * 4. [Perf] base64ToArrayBuffer: 使用 padEnd 替代 while 循环。
  */
 
 // 全局编解码器实例
@@ -61,7 +62,7 @@ const computeSha224Core = (inputStr) => {
     const messageBitLength = inputStr.length * 8;
     inputStr += String.fromCharCode(0x80);
     
-    // [Optimization] 一次性填充
+    // [Optimization] 一次性填充，消除循环开销
     const currentLen = inputStr.length;
     const padLen = (56 - (currentLen % 64) + 64) % 64;
     if (padLen > 0) inputStr += String.fromCharCode(0).repeat(padLen);
@@ -121,6 +122,7 @@ export function base64ToArrayBuffer(base64Str) {
     if (!base64Str) return { earlyData: undefined, error: null };
     try {
         base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
+        // [Optimization] 使用 padEnd 高效补全
         const padLen = (4 - (base64Str.length % 4)) % 4;
         if (padLen > 0) base64Str = base64Str.padEnd(base64Str.length + padLen, '=');
         
@@ -134,7 +136,8 @@ export function base64ToArrayBuffer(base64Str) {
 
 export async function cleanList(content) {
     if (!content) return [];
-    // [Fix] 高效分割
+    // [Fix] 优化性能：直接使用 split 正则分割
+    // 允许的分隔符：逗号、制表符、双引号、单引号、换行符
     return content.split(/[\t"'\r\n,]+/).filter(Boolean);
 }
 
@@ -179,6 +182,7 @@ export async function generateDynamicUUID(key, timeDays, updateHour) {
 }
 
 // [CPU Optimization] 正则缓存，防止 ReDoS 和重复编译
+// 修复了之前遗漏的 isHostBanned 缓存
 const REGEX_CACHE = new Map();
 
 export function isHostBanned(hostname, banList) {
