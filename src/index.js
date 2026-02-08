@@ -5,7 +5,8 @@
  * 1. [Security] 实施 "路由严格分发策略"。
  * 2. [Fix] 针对 Hash 路由 (GET) 增加空路径拦截，彻底阻断 XHTTP 探测流量进入订阅逻辑。
  * 3. [Stability] 保持 Watchdog 机制保护全局上下文加载。
- * 4. [Fix] 修复 Watchdog Promise 泄露: 重构 timeout 使用 AbortController，确保超时能中止 fetch 等异步任务。
+ * 4. [Fix] 修复 Watchdog Promise 泄露: 使用 AbortController 确保超时能中止异步任务。
+ * 5. [Optimization] 利用 Cache API 持久化 "域名推送状态"，解决 Worker 实例重启导致 KV 重复读取的问题。
  */
 import { initializeContext, getConfig, cleanConfigCache } from './config.js';
 import { handleWebSocketRequest } from './handlers/websocket.js';
@@ -18,12 +19,54 @@ import { sha1 } from './utils/helpers.js';
 import { CONSTANTS } from './constants.js';
 import { getPasswordSetupHtml, getLoginHtml } from './templates/auth.js';
 
-// --- 全局配置 ---
+// --- 全局状态 (L1 内存缓存) ---
+// 仅作为最快速的短路检查，不作为持久化依据
 let lastSavedDomain = ''; 
-let lastPushTime = 0;     
-const PUSH_COOLDOWN = 24 * 60 * 60 * 1000; 
 
-// --- 看门狗工具函数 (Fixed) ---
+// --- 缓存工具 (L2 Cache API) ---
+// 使用 Cache API 跨实例记录 "该域名近期已推送过"，减少 KV 读写
+async function hasDomainBeenPushedRecently(hostName) {
+    if (!hostName) return false;
+    // 1. L1 Memory Check (Fastest)
+    if (hostName === lastSavedDomain) return true;
+
+    // 2. L2 Cache API Check (Persistent across isolates)
+    const cache = caches.default;
+    const cacheKey = `http://six-worker.local/domain_pushed/${encodeURIComponent(hostName)}`;
+    try {
+        const res = await cache.match(cacheKey);
+        if (res) {
+            // 如果缓存命中，同步回 L1
+            lastSavedDomain = hostName;
+            return true;
+        }
+    } catch (e) {
+        console.warn('[Cache] Check failed:', e);
+    }
+    return false;
+}
+
+async function markDomainAsPushed(hostName, ctx) {
+    if (!hostName) return;
+    // Update L1
+    lastSavedDomain = hostName;
+    
+    // Update L2 (Cache API) - 缓存 24 小时
+    const cache = caches.default;
+    const cacheKey = `http://six-worker.local/domain_pushed/${encodeURIComponent(hostName)}`;
+    const response = new Response('1', {
+        headers: { 'Cache-Control': 'public, max-age=86400' } // 24 Hours
+    });
+    
+    // 使用 waitUntil 避免阻塞响应
+    if (ctx && ctx.waitUntil) {
+        ctx.waitUntil(cache.put(cacheKey, response).catch(() => {}));
+    } else {
+        cache.put(cacheKey, response).catch(() => {});
+    }
+}
+
+// --- 看门狗工具函数 (Fixed with AbortController) ---
 
 /**
  * 改进版 Watchdog: 使用 AbortController 真正取消任务
@@ -43,14 +86,13 @@ async function timeout(taskFn, ms, errorMsg = 'Operation timed out') {
     });
 
     try {
-        // 竞速：任务完成 vs 超时
-        // 传递 controller.signal 给任务，使其能够感知超时并自我终止
+        // 传递 controller.signal 给任务
         return await Promise.race([
             taskFn(controller.signal),
             timeoutPromise
         ]);
     } finally {
-        clearTimeout(timer); // 任务完成或报错后，必须清理定时器
+        clearTimeout(timer);
     }
 }
 
@@ -58,7 +100,7 @@ async function execWithRetry(taskFn, maxRetries = 3, timeoutMs = 3000) {
     let lastError;
     for (let i = 0; i < maxRetries; i++) {
         try {
-            // [Fix] 传递 signal 给 taskFn (虽然 initializeContext 目前可能忽略它，但结构上已就绪)
+            // 传递 signal 占位符
             return await timeout((signal) => taskFn(signal), timeoutMs, `Attempt ${i + 1} timeout`);
         } catch (e) {
             console.warn(`[Watchdog] Task failed (Attempt ${i + 1}/${maxRetries}):`, e.message);
@@ -95,12 +137,13 @@ async function handlePasswordSetup(request, env, ctx) {
         
         const now = Date.now();
         await env.KV.put('LAST_PUSH_TIME', now.toString());
-        lastPushTime = now;
+        // [Opt] setup 成功也写入缓存
+        await markDomainAsPushed('init-setup', ctx);
 
         await cleanConfigCache();
 
         try {
-            // [Fix] 适配新的 execWithRetry 签名，传递 signal 占位符
+            // [Fix] 适配 signal
             const appCtx = await execWithRetry((signal) => initializeContext(request, env), 2, 5000);
             appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
             safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
@@ -113,7 +156,7 @@ async function handlePasswordSetup(request, env, ctx) {
     return new Response(getPasswordSetupHtml(), { headers: { 'Content-Type': 'text/html;charset=utf-8' } });
 }
 
-// [Fix] 增加 signal 参数以支持请求中止
+// [Fix] 增加 signal 支持
 async function proxyUrl(urlStr, targetUrlObj, request, signal) {
     if (!urlStr) return null;
     try {
@@ -133,7 +176,7 @@ async function proxyUrl(urlStr, targetUrlObj, request, signal) {
             headers: newHeaders,
             body: request.body,
             redirect: 'follow',
-            signal: signal // [Fix] 绑定 AbortSignal
+            signal: signal // [Fix] 绑定中止信号
         }));
     } catch (e) { 
         return null; 
@@ -143,11 +186,10 @@ async function proxyUrl(urlStr, targetUrlObj, request, signal) {
 export default {
     async fetch(request, env, ctx) {
         // [Global Timeout] 45秒硬限制
-        // [Fix] 使用新的 timeout 签名，接收 signal 并传递给内部逻辑
+        // [Fix] 使用带 signal 的 timeout
         return await timeout(async (signal) => {
             try {
-                // [Fix] 传递 signal 给 execWithRetry (尽管 initializeContext 可能未完全利用，但链路已打通)
-                const context = await execWithRetry((innerSignal) => initializeContext(request, env), 3, 3000);
+                const context = await execWithRetry((s) => initializeContext(request, env), 3, 3000);
                 context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
 
                 const url = new URL(request.url);
@@ -176,7 +218,7 @@ export default {
                     
                     const urlProxy = await getConfig(env, 'URL');
                     if (urlProxy) {
-                        // [Fix] 传递 signal 给 proxyUrl
+                        // [Fix] 传递 signal
                         const resp = await proxyUrl(urlProxy, url, request, signal);
                         if (resp) return resp;
                     }
@@ -208,22 +250,37 @@ export default {
                 const isLoginRequest = url.searchParams.get('auth') === 'login';
 
                 // 4. 域名自动发现 (仅限管理/订阅路由)
+                // [Optimization] 引入 Cache API 检查，大幅减少 KV 读取
                 if (request.method === 'GET' && (isManagementRoute || isCalculatedHash) && env.KV && hostName && hostName.includes('.')) {
-                    if (hostName !== lastSavedDomain) {
-                        const now = Date.now();
-                        if (now - lastPushTime > PUSH_COOLDOWN) {
-                            context.waitUntil((async () => {
+                    // 检查 L1 & L2 缓存
+                    const isPushedRecently = await hasDomainBeenPushedRecently(hostName);
+                    
+                    if (!isPushedRecently) {
+                        // 缓存未命中，说明可能需要推送，进入后台逻辑检查 KV
+                        const PUSH_COOLDOWN = 24 * 60 * 60 * 1000;
+                        context.waitUntil((async () => {
+                            try {
+                                const now = Date.now();
+                                // Double Check KV (Source of Truth)
                                 let kvPushTime = await env.KV.get('LAST_PUSH_TIME');
                                 if (!kvPushTime || (now - parseInt(kvPushTime)) > PUSH_COOLDOWN) {
+                                    // 需要推送
                                     await env.KV.put('SAVED_DOMAIN', hostName);
                                     await env.KV.put('LAST_PUSH_TIME', now.toString());
-                                    lastSavedDomain = hostName;
-                                    lastPushTime = now;
+                                    
                                     await cleanConfigCache(['SAVED_DOMAIN']);
                                     await executeWebDavPush(env, context, false);
+                                    
+                                    // 成功后写入缓存 (L1 + L2)
+                                    await markDomainAsPushed(hostName, context);
+                                } else {
+                                    // 虽然 KV 显示不需要推送，但也更新缓存以避免后续请求再次查 KV
+                                    await markDomainAsPushed(hostName, context);
                                 }
-                            })());
-                        }
+                            } catch (e) {
+                                console.error('[Domain Discovery] Error:', e);
+                            }
+                        })());
                     }
                 }
 
@@ -281,13 +338,10 @@ export default {
                     
                     // 订阅入口 (GET) - [Critical Fix] 增加严格校验
                     if (request.method === 'GET' && isCalculatedHash) {
-                        // 1. 如果 subPath 为空 (裸路径)，说明这不是订阅请求，而是 XHTTP 探测
-                        // 2. 如果 subPath 只有 '/'，同样无效
                         if (!subPath || subPath.trim().length <= 1) {
                             return new Response('404 Not Found', { status: 404 });
                         }
 
-                        // 3. 只有带有有效子路径 (如 /8fee08ee/sub) 才交给 handleSubscription
                         const response = await handleSubscription(request, env, context, subPath, hostName);
                         if (response) return response;
                     }
@@ -296,11 +350,8 @@ export default {
                 return new Response('404 Not Found', { status: 404 });
 
             } catch (e) {
-                // 如果是中止错误，抛出原始超时信息
-                if (signal && signal.aborted) {
-                     // 这里的错误会被外层 timeout 捕获并忽略(因为 timeoutPromise 已经 reject 过了)
-                     // 或者如果是在 execWithRetry 内，它会被重试逻辑捕获
-                }
+                // 如果是 signal 中止的错误，通常会被 timeout 捕获处理
+                // 但如果是内部逻辑抛出，仍需兜底
                 const errInfo = (e && (e.stack || e.message || e.toString())) || "Unknown Internal Error";
                 console.error('[Global Error]:', errInfo);
                 return new Response('Internal Server Error', { status: 500 });
