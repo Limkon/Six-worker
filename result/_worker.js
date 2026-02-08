@@ -1768,8 +1768,8 @@ async function handleSocks5UDPFlow(controlSocket, addressType, addressRemote, po
   });
 }
 async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-  if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) {
-    log(`[Block] TCP request blocked: ${addressRemote} is private or banned.`);
+  if (isHostBanned(addressRemote, ctx.banHosts)) {
+    log(`[Block] TCP request blocked: ${addressRemote} is banned.`);
     safeCloseWebSocket(webSocket);
     return;
   }
@@ -1841,8 +1841,8 @@ async function handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressR
   }
 }
 async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-  if (isPrivateIP(addressRemote) || isHostBanned(addressRemote, ctx.banHosts)) {
-    log(`[Block] UDP request blocked: ${addressRemote} is private or banned.`);
+  if (isHostBanned(addressRemote, ctx.banHosts)) {
+    log(`[Block] UDP request blocked: ${addressRemote} is banned.`);
     safeCloseWebSocket(webSocket);
     return;
   }
