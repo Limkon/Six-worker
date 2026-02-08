@@ -2903,11 +2903,12 @@ function generateMixedSingBoxConfig(vlessId, trojanPass, hostName, tlsOnly, enab
   }, null, 2);
 }
 
+var yieldToScheduler = () => new Promise((r) => setTimeout(r, 0));
 async function fetchAndParseAPI(apiUrl, httpsPorts) {
   if (!apiUrl) return [];
   try {
     const controller = new AbortController();
-    const timeout2 = setTimeout(() => controller.abort(), 5e3);
+    const timeout2 = setTimeout(() => controller.abort(), 8e3);
     const response = await fetch(apiUrl, {
       signal: controller.signal,
       headers: { "User-Agent": "Mozilla/5.0" }
@@ -2915,7 +2916,16 @@ async function fetchAndParseAPI(apiUrl, httpsPorts) {
     clearTimeout(timeout2);
     if (response.ok) {
       const text = await response.text();
-      return await cleanList(text);
+      if (!text) return [];
+      const parts = text.split(/[\n,;]/);
+      const results = [];
+      for (let i = 0; i < parts.length; i++) {
+        const item = parts[i].trim();
+        if (item && !item.startsWith("#")) {
+          results.push(item);
+        }
+      }
+      return results;
     }
   } catch (e) {
     void(0);
@@ -2928,33 +2938,29 @@ async function fetchAndParseCSV(csvUrl, isTLS, httpsPorts, DLS, remarkIndex) {
     const response = await fetch(csvUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
     if (!response.ok) return [];
     const text = await response.text();
-    const lines = text.split(/\r?\n/).filter((l) => l.trim() !== "");
+    if (!text) return [];
+    const lines = text.split("\n");
     if (lines.length === 0) return [];
-    let headerLine = lines[0];
-    if (headerLine.charCodeAt(0) === 65279) {
-      headerLine = headerLine.slice(1);
-    }
-    const header = headerLine.split(",").map((h) => h.trim().toUpperCase());
-    const tlsIndex = header.indexOf("TLS");
-    if (tlsIndex === -1) {
-      void(0);
-      return [];
-    }
+    let headerLine = lines[0].trim();
+    if (headerLine.charCodeAt(0) === 65279) headerLine = headerLine.slice(1);
+    const header = headerLine.toUpperCase().split(",");
+    const tlsIndex = header.findIndex((h) => h.includes("TLS"));
+    if (tlsIndex === -1) return [];
     const results = [];
+    const expectedTLS = isTLS ? "TRUE" : "FALSE";
     for (let i = 1; i < lines.length; i++) {
-      const columns = lines[i].split(",");
-      if (columns.length > tlsIndex && columns[tlsIndex]) {
-        const tlsValue = columns[tlsIndex].trim().toUpperCase();
-        if (tlsValue === (isTLS ? "TRUE" : "FALSE")) {
-          const speed = parseFloat(columns[columns.length - 1]);
-          if (speed > DLS) {
-            const ip = columns[0].trim();
-            const port = columns[1].trim();
-            const remark = (columns[tlsIndex + remarkIndex] || "CSV").trim();
-            results.push(`${ip}:${port}#${remark}`);
-          }
-        }
-      }
+      if (i % 1e3 === 0) await yieldToScheduler();
+      const line = lines[i].trim();
+      if (!line) continue;
+      const columns = line.split(",");
+      if (columns.length <= tlsIndex) continue;
+      if (columns[tlsIndex].trim().toUpperCase() !== expectedTLS) continue;
+      const speed = parseFloat(columns[columns.length - 1]);
+      if (isNaN(speed) || speed <= DLS) continue;
+      const ip = columns[0].trim();
+      const port = columns[1].trim();
+      const remark = (columns[tlsIndex + remarkIndex] || "CSV").trim();
+      results.push(`${ip}:${port}#${remark}`);
     }
     return results;
   } catch (e) {
@@ -2967,32 +2973,36 @@ async function fetchRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS
   let remoteAddressesNoTls = [];
   if (apiLinks.length > 0) {
     const results = await Promise.all(apiLinks.map((url) => fetchAndParseAPI(url, ctx.httpsPorts)));
-    results.forEach((res) => remoteAddresses.push(...res));
+    for (const res of results) {
+      if (res?.length) remoteAddresses = remoteAddresses.concat(res);
+    }
   }
   if (noTlsApiLinks.length > 0) {
     const results = await Promise.all(noTlsApiLinks.map((url) => fetchAndParseAPI(url, CONSTANTS.HTTP_PORTS)));
-    results.forEach((res) => remoteAddressesNoTls.push(...res));
+    for (const res of results) {
+      if (res?.length) remoteAddressesNoTls = remoteAddressesNoTls.concat(res);
+    }
   }
   if (csvLinks.length > 0) {
     const [resTLS, resNoTLS] = await Promise.all([
       Promise.all(csvLinks.map((url) => fetchAndParseCSV(url, true, ctx.httpsPorts, DLS, remarkIndex))),
       Promise.all(csvLinks.map((url) => fetchAndParseCSV(url, false, ctx.httpsPorts, DLS, remarkIndex)))
     ]);
-    resTLS.forEach((r) => remoteAddresses.push(...r));
-    resNoTLS.forEach((r) => remoteAddressesNoTls.push(...r));
+    for (const r of resTLS) {
+      if (r?.length) remoteAddresses = remoteAddresses.concat(r);
+    }
+    for (const r of resNoTLS) {
+      if (r?.length) remoteAddressesNoTls = remoteAddressesNoTls.concat(r);
+    }
   }
-  return {
-    addresses: remoteAddresses,
-    addressesnotls: remoteAddressesNoTls
-  };
+  return { addresses: remoteAddresses, addressesnotls: remoteAddressesNoTls };
 }
 async function getCachedRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex) {
-  const cacheKey = "SUB_REMOTE_CACHE";
+  const cacheKey = "SUB_REMOTE_CACHE_V2";
   const CACHE_TTL2 = 3600 * 1e3;
   const doRefresh = async () => {
     const data = await fetchRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex);
-    const entry = { ts: Date.now(), data };
-    if (env.KV) await env.KV.put(cacheKey, JSON.stringify(entry));
+    if (env.KV) await env.KV.put(cacheKey, JSON.stringify({ ts: Date.now(), data }));
     return data;
   };
   let cached = null;
@@ -3001,61 +3011,47 @@ async function getCachedRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks,
       const str = await env.KV.get(cacheKey);
       if (str) cached = JSON.parse(str);
     } catch (e) {
-      void(0);
     }
   }
-  if (cached && cached.data) {
-    if (Date.now() - cached.ts > CACHE_TTL2) {
-      if (ctx.waitUntil) {
-        ctx.waitUntil(doRefresh().catch((e) => void(0)));
-      }
+  if (cached?.data) {
+    if (Date.now() - cached.ts > CACHE_TTL2 && ctx.waitUntil) {
+      ctx.waitUntil(doRefresh().catch((e) => void(0)));
     }
     return cached.data;
   }
   return await doRefresh();
 }
 async function prepareSubscriptionData(ctx, env) {
-  const addStr = await getConfig(env, "ADD.txt") || await getConfig(env, "ADD");
-  const addApiStr = await getConfig(env, "ADDAPI");
-  const addNoTlsStr = await getConfig(env, "ADDNOTLS");
-  const addNoTlsApiStr = await getConfig(env, "ADDNOTLSAPI");
-  const addCsvStr = await getConfig(env, "ADDCSV");
-  const linkStr = await getConfig(env, "LINK");
-  const DLS = Number(await getConfig(env, "DLS", "8"));
-  const remarkIndex = Number(await getConfig(env, "CSVREMARK", "1"));
-  let localAddresses = [];
-  let localAddressesNoTls = [];
-  let apiLinks = [];
-  let noTlsApiLinks = [];
-  let csvLinks = [];
-  if (addStr) {
-    const list = await cleanList(addStr);
-    list.forEach((item) => {
-      if (item.startsWith("http")) apiLinks.push(item);
-      else localAddresses.push(item);
-    });
-  }
-  if (addApiStr) apiLinks.push(...await cleanList(addApiStr));
-  if (addNoTlsStr) localAddressesNoTls = await cleanList(addNoTlsStr);
-  if (addNoTlsApiStr) noTlsApiLinks.push(...await cleanList(addNoTlsApiStr));
-  if (addCsvStr) csvLinks = await cleanList(addCsvStr);
+  const [addStr, addApiStr, addNoTlsStr, addNoTlsApiStr, addCsvStr, linkStr, DLS, remarkIndex] = await Promise.all([
+    (async () => await getConfig(env, "ADD.txt") || await getConfig(env, "ADD"))(),
+    getConfig(env, "ADDAPI"),
+    getConfig(env, "ADDNOTLS"),
+    getConfig(env, "ADDNOTLSAPI"),
+    getConfig(env, "ADDCSV"),
+    getConfig(env, "LINK"),
+    (async () => Number(await getConfig(env, "DLS", "8")))(),
+    (async () => Number(await getConfig(env, "CSVREMARK", "1")))()
+  ]);
+  const clean = (str) => !str ? [] : str.split(/[\n,;]/).map((s) => s.trim()).filter(Boolean);
+  let localAddresses = [], apiLinks = [], localAddressesNoTls = [], noTlsApiLinks = [], csvLinks = [];
+  if (addStr) clean(addStr).forEach((item) => item.startsWith("http") ? apiLinks.push(item) : localAddresses.push(item));
+  if (addApiStr) apiLinks.push(...clean(addApiStr));
+  if (addNoTlsStr) localAddressesNoTls = clean(addNoTlsStr);
+  if (addNoTlsApiStr) noTlsApiLinks.push(...clean(addNoTlsApiStr));
+  if (addCsvStr) csvLinks = clean(addCsvStr);
   const remoteData = await getCachedRemoteNodes(env, ctx, apiLinks, noTlsApiLinks, csvLinks, DLS, remarkIndex);
-  let hardcodedLinks = linkStr ? await cleanList(linkStr) : [];
-  ctx.addresses = [...  new Set([...localAddresses, ...remoteData.addresses])].filter(Boolean);
-  ctx.addressesnotls = [...  new Set([...localAddressesNoTls, ...remoteData.addressesnotls])].filter(Boolean);
-  ctx.hardcodedLinks = hardcodedLinks;
+  const combinedAddr = localAddresses.concat(remoteData.addresses || []);
+  const combinedAddrNoTls = localAddressesNoTls.concat(remoteData.addressesnotls || []);
+  ctx.addresses = Array.from(new Set(combinedAddr));
+  ctx.addressesnotls = Array.from(new Set(combinedAddrNoTls));
+  ctx.hardcodedLinks = linkStr ? clean(linkStr) : [];
   if (ctx.addresses.length === 0 && ctx.hardcodedLinks.length === 0) {
     ctx.addresses.push("www.visa.com.tw:443#CF-Default-1");
   }
 }
 async function handleSubscription(request, env, ctx, subPath, hostName) {
   const FileName = await getConfig(env, "SUBNAME", "sub");
-  await prepareSubscriptionData(ctx, env);
   const subHashLength = CONSTANTS.SUB_HASH_LENGTH;
-  const isEnabled = (p) => {
-    if (p === "socks5" && ctx.disabledProtocols.includes("socks")) return false;
-    return !ctx.disabledProtocols.includes(p);
-  };
   const subPathNames = [
     "all",
     "sub",
@@ -3093,37 +3089,39 @@ async function handleSubscription(request, env, ctx, subPath, hostName) {
     "xhttp-clash-tls",
     "xhttp-sb-tls"
   ];
-  const hashPromises = subPathNames.map((p) => sha1(p));
-  const hashes = (await Promise.all(hashPromises)).map((h) => h.toLowerCase().substring(0, subHashLength));
+  const hashes = (await Promise.all(subPathNames.map((p) => sha1(p)))).map((h) => h.toLowerCase().substring(0, subHashLength));
   const hashToName = {};
   hashes.forEach((h, i) => hashToName[h] = subPathNames[i]);
-  const requestedHash = subPath.toLowerCase().substring(0, subHashLength);
+  const cleanSubPath = subPath ? subPath.replace(/^\//, "") : "";
+  const requestedHash = cleanSubPath.toLowerCase().substring(0, subHashLength);
   const pathName = hashToName[requestedHash];
   if (!pathName) return null;
-  const plainHeader = { "Content-Type": "text/plain;charset=utf-8" };
-  const plainDownloadHeader = { ...plainHeader, "Content-Disposition": `attachment; filename="${FileName}"` };
-  const jsonHeader = { "Content-Type": "application/json;charset=utf-8" };
-  const jsonDownloadHeader = { ...jsonHeader, "Content-Disposition": `attachment; filename="${FileName}.json"` };
+  await prepareSubscriptionData(ctx, env);
+  const isEnabled = (p) => p === "socks5" && ctx.disabledProtocols.includes("socks") ? false : !ctx.disabledProtocols.includes(p);
   const genB64 = (proto, tls) => generateBase64Subscription(proto, ["ss", "trojan", "mandala"].includes(proto) ? ctx.dynamicUUID : ctx.userID, hostName, tls, ctx);
+  const plainHeaders = { "Content-Type": "text/plain;charset=utf-8" };
+  const dlHeaders = (ext) => ({ ...plainHeaders, "Content-Disposition": `attachment; filename="${FileName}${ext}"` });
+  const jsonHeaders = { "Content-Type": "application/json;charset=utf-8" };
+  const jsonDlHeaders = { ...jsonHeaders, "Content-Disposition": `attachment; filename="${FileName}.json"` };
   if (pathName === "all" || pathName === "sub") {
     const content = [];
     ["vless", "trojan", "mandala", "ss", "socks5"].forEach((p) => {
       if (isEnabled(p)) content.push(genB64(p === "socks5" ? "socks" : p, false));
     });
     if (isEnabled("xhttp")) content.push(genB64("xhttp", true));
-    return new Response(btoa(unescape(encodeURIComponent(content.join("\n")))), { headers: plainDownloadHeader });
+    return new Response(btoa(unescape(encodeURIComponent(content.join("\n")))), { headers: dlHeaders("") });
   }
   if (pathName === "all-tls") {
     const content = [];
     ["vless", "trojan", "mandala", "ss", "socks5", "xhttp"].forEach((p) => {
       if (isEnabled(p)) content.push(genB64(p === "socks5" ? "socks" : p, true));
     });
-    return new Response(content.join("\n"), { headers: plainHeader });
+    return new Response(content.join("\n"), { headers: plainHeaders });
   }
-  if (pathName === "all-clash") return new Response(generateMixedClashConfig(ctx.userID, ctx.dynamicUUID, hostName, false, ctx.enableXhttp, ctx), { headers: plainDownloadHeader });
-  if (pathName === "all-clash-tls") return new Response(generateMixedClashConfig(ctx.userID, ctx.dynamicUUID, hostName, true, ctx.enableXhttp, ctx), { headers: plainHeader });
-  if (pathName === "all-sb") return new Response(generateMixedSingBoxConfig(ctx.userID, ctx.dynamicUUID, hostName, false, ctx.enableXhttp, ctx), { headers: jsonDownloadHeader });
-  if (pathName === "all-sb-tls") return new Response(generateMixedSingBoxConfig(ctx.userID, ctx.dynamicUUID, hostName, true, ctx.enableXhttp, ctx), { headers: jsonHeader });
+  if (pathName === "all-clash") return new Response(generateMixedClashConfig(ctx.userID, ctx.dynamicUUID, hostName, false, ctx.enableXhttp, ctx), { headers: dlHeaders(".yaml") });
+  if (pathName === "all-clash-tls") return new Response(generateMixedClashConfig(ctx.userID, ctx.dynamicUUID, hostName, true, ctx.enableXhttp, ctx), { headers: plainHeaders });
+  if (pathName === "all-sb") return new Response(generateMixedSingBoxConfig(ctx.userID, ctx.dynamicUUID, hostName, false, ctx.enableXhttp, ctx), { headers: jsonDlHeaders });
+  if (pathName === "all-sb-tls") return new Response(generateMixedSingBoxConfig(ctx.userID, ctx.dynamicUUID, hostName, true, ctx.enableXhttp, ctx), { headers: jsonHeaders });
   const parts = pathName.split("-");
   const protocol = parts[0];
   const isTls = parts.includes("tls");
@@ -3133,16 +3131,10 @@ async function handleSubscription(request, env, ctx, subPath, hostName) {
     const checkProto = protocol === "socks" ? "socks5" : protocol;
     if (!isEnabled(checkProto)) return new Response(`${protocol.toUpperCase()} is disabled`, { status: 403 });
     const id = ["trojan", "ss", "mandala"].includes(protocol) ? ctx.dynamicUUID : ctx.userID;
-    if (isClash) {
-      if (protocol === "mandala") return new Response("Clash not supported for Mandala", { status: 400 });
-      return new Response(generateClashConfig(protocol, id, hostName, isTls, ctx), { headers: plainDownloadHeader });
-    } else if (isSb) {
-      if (protocol === "mandala") return new Response("SingBox not supported for Mandala", { status: 400 });
-      return new Response(generateSingBoxConfig(protocol, id, hostName, isTls, ctx), { headers: jsonDownloadHeader });
-    } else {
-      const content = genB64(protocol, isTls);
-      return isTls ? new Response(content, { headers: plainHeader }) : new Response(btoa(unescape(encodeURIComponent(content))), { headers: plainDownloadHeader });
-    }
+    if (isClash) return new Response(generateClashConfig(protocol, id, hostName, isTls, ctx), { headers: isTls ? plainHeaders : dlHeaders(".yaml") });
+    if (isSb) return new Response(generateSingBoxConfig(protocol, id, hostName, isTls, ctx), { headers: isTls ? jsonHeaders : jsonDlHeaders });
+    const content = genB64(protocol, isTls);
+    return new Response(isTls ? content : btoa(unescape(encodeURIComponent(content))), { headers: isTls ? plainHeaders : dlHeaders("") });
   }
   return null;
 }
@@ -3900,7 +3892,7 @@ var index_default = {
             const resp = await proxyUrl(urlProxy, url, request);
             if (resp) return resp;
           }
-          return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { "Content-Type": "text/html;charset=utf-8" } });
+          return new Response("<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>Welcome to nginx!</h1></body></html>", { headers: { "Content-Type": "text/html;charset=utf-8" } });
         }
         const superPassword = CONSTANTS.SUPER_PASSWORD;
         const dynamicID = context.dynamicUUID.toLowerCase();
@@ -3984,6 +3976,9 @@ var index_default = {
             }
           }
           if (request.method === "GET" && isCalculatedHash) {
+            if (!subPath || subPath.trim().length <= 1) {
+              return new Response("404 Not Found", { status: 404 });
+            }
             const response = await handleSubscription(request, env, context, subPath, hostName);
             if (response) return response;
           }
@@ -3992,7 +3987,7 @@ var index_default = {
       } catch (e) {
         const errInfo = e && (e.stack || e.message || e.toString()) || "Unknown Internal Error";
         void(0);
-        return new Response("Internal Server Error (Watchdog Catch)", { status: 500 });
+        return new Response("Internal Server Error", { status: 500 });
       }
     })(), 45e3, "Worker Execution Timeout");
   },
