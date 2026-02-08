@@ -217,7 +217,12 @@ function stringifyUUID(arr, offset = 0) {
   if (!isValidUUID(uuid)) throw TypeError("Invalid stringified UUID");
   return uuid;
 }
+var DYNAMIC_UUID_CACHE =   new Map();
 async function generateDynamicUUID(key, timeDays, updateHour) {
+  const cacheKey = `${key}-${timeDays}-${updateHour}`;
+  if (DYNAMIC_UUID_CACHE.has(cacheKey)) {
+    return DYNAMIC_UUID_CACHE.get(cacheKey);
+  }
   const timezoneOffset = 8;
   const startDate = new Date(2007, 6, 7, updateHour, 0, 0);
   const oneWeekMs = 1e3 * 60 * 60 * 24 * timeDays;
@@ -237,7 +242,10 @@ async function generateDynamicUUID(key, timeDays, updateHour) {
   const currentCycle = getCurrentCycle();
   const current = await generate(key + currentCycle);
   const prev = await generate(key + (currentCycle - 1));
-  return [current, prev];
+  const result = [current, prev];
+  if (DYNAMIC_UUID_CACHE.size > 100) DYNAMIC_UUID_CACHE.clear();
+  DYNAMIC_UUID_CACHE.set(cacheKey, result);
+  return result;
 }
 var REGEX_CACHE =   new Map();
 function isHostBanned(hostname, banList) {
@@ -1331,12 +1339,24 @@ function parseProxyIP(proxyAddr, defaultPort) {
   }
   return { host, port };
 }
+var SOCKS5_REGEX_CACHE =   new Map();
 function shouldUseSocks5(addressRemote, go2socks5) {
   if (!go2socks5 || go2socks5.length === 0) return false;
   if (go2socks5.includes("all in") || go2socks5.includes("*")) return true;
   return go2socks5.some((pattern) => {
-    let regexPattern = pattern.replace(/\*/g, ".*");
-    let regex = new RegExp(`^${regexPattern}$`, "i");
+    let regex;
+    if (SOCKS5_REGEX_CACHE.has(pattern)) {
+      regex = SOCKS5_REGEX_CACHE.get(pattern);
+    } else {
+      try {
+        let regexPattern = pattern.replace(/\*/g, ".*");
+        regex = new RegExp(`^${regexPattern}$`, "i");
+      } catch (e) {
+        regex = /^$/;
+      }
+      if (SOCKS5_REGEX_CACHE.size > 200) SOCKS5_REGEX_CACHE.delete(SOCKS5_REGEX_CACHE.keys().next().value);
+      SOCKS5_REGEX_CACHE.set(pattern, regex);
+    }
     return regex.test(addressRemote);
   });
 }
@@ -1877,11 +1897,16 @@ async function handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressR
 
 var protocolManager = new ProtocolManager().register("vless", processVlessHeader).register("trojan", parseTrojanHeader).register("mandala", parseMandalaHeader).register("socks5", parseSocks5Header).register("ss", parseShadowsocksHeader);
 var activeConnectionsInInstance = 0;
-function concatUint82(a, b) {
-  const bArr = b instanceof Uint8Array ? b : new Uint8Array(b);
-  const res = new Uint8Array(a.length + bArr.length);
-  res.set(a);
-  res.set(bArr, a.length);
+function mergeChunks(chunks) {
+  if (chunks.length === 0) return new Uint8Array(0);
+  if (chunks.length === 1) return chunks[0];
+  const totalLen = chunks.reduce((sum, c) => sum + c.byteLength, 0);
+  const res = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const c of chunks) {
+    res.set(c, offset);
+    offset += c.byteLength;
+  }
   return res;
 }
 function getDynamicBufferSize() {
@@ -1904,17 +1929,39 @@ async function handleWebSocketRequest(request, ctx) {
     return new Response("WebSocket Accept Failed", { status: 500 });
   }
   activeConnectionsInInstance++;
+  let hasDecremented = false;
+  const safeDecrement = () => {
+    if (!hasDecremented) {
+      activeConnectionsInInstance--;
+      if (activeConnectionsInInstance < 0) activeConnectionsInInstance = 0;
+      hasDecremented = true;
+    }
+  };
   let remoteSocketWrapper = { value: null, isConnecting: false, buffer: [], bufferedBytes: 0 };
   let isConnected = false;
   let socks5State = 0;
-  let vlessBuffer = new Uint8Array(0);
+  let vlessChunks = [];
+  let vlessBufferLength = 0;
   let activeWriter = null;
   let activeSocket = null;
   const MAX_HEADER_BUFFER = 2048;
   const PROBE_THRESHOLD = 1024;
-  const DETECT_TIMEOUT_MS = 1e4;
+  const IDLE_TIMEOUT = 60 * 1e3;
+  let lastActivityTime = Date.now();
+  let idleTimer = null;
+  const updateActivity = () => {
+    lastActivityTime = Date.now();
+  };
+  idleTimer = setInterval(() => {
+    if (Date.now() - lastActivityTime > IDLE_TIMEOUT) {
+      void(0);
+      cleanup();
+      safeCloseWebSocket(webSocket);
+    }
+  }, 1e4);
   const log = (info, event) => void(0);
-  const timeoutTimer = setTimeout(() => {
+  const DETECT_TIMEOUT_MS = 1e4;
+  const protocolDetectTimer = setTimeout(() => {
     if (!isConnected) {
       log("Timeout: Protocol detection took too long");
       safeCloseWebSocket(webSocket);
@@ -1924,6 +1971,7 @@ async function handleWebSocketRequest(request, ctx) {
   const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
   const streamPromise = readableWebSocketStream.pipeTo(new WritableStream({
     async write(chunk, controller) {
+      updateActivity();
       const chunkArr = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
       if (isConnected) {
         if (activeSocket !== remoteSocketWrapper.value) {
@@ -1948,47 +1996,47 @@ async function handleWebSocketRequest(request, ctx) {
         if (activeWriter) {
           await activeWriter.write(chunkArr);
         } else if (remoteSocketWrapper.isConnecting) {
-          if (remoteSocketWrapper.buffer.length === 0) {
-            remoteSocketWrapper.bufferedBytes = 0;
-          }
-          const newSize = remoteSocketWrapper.bufferedBytes + chunkArr.byteLength;
-          const dynamicLimit = getDynamicBufferSize();
-          if (newSize > dynamicLimit) {
-            clearTimeout(timeoutTimer);
-            throw new Error(`Smart Buffer Limit Exceeded: ${newSize} > ${dynamicLimit} (ActiveConns: ${activeConnectionsInInstance})`);
-          }
           remoteSocketWrapper.buffer.push(chunkArr);
-          remoteSocketWrapper.bufferedBytes = newSize;
+          const currentBufferSize = remoteSocketWrapper.buffer.reduce((sum, c) => sum + c.byteLength, 0);
+          remoteSocketWrapper.bufferedBytes = currentBufferSize;
+          const dynamicLimit = getDynamicBufferSize();
+          if (currentBufferSize > dynamicLimit) {
+            clearTimeout(protocolDetectTimer);
+            throw new Error(`Smart Buffer Limit Exceeded: ${currentBufferSize} > ${dynamicLimit}`);
+          }
         }
         return;
       }
-      vlessBuffer = concatUint82(vlessBuffer, chunkArr);
-      if (vlessBuffer.length > MAX_HEADER_BUFFER) {
-        clearTimeout(timeoutTimer);
+      vlessChunks.push(chunkArr);
+      vlessBufferLength += chunkArr.byteLength;
+      if (vlessBufferLength > MAX_HEADER_BUFFER) {
+        clearTimeout(protocolDetectTimer);
         throw new Error(`Header buffer limit exceeded`);
       }
+      const currentBuffer = mergeChunks(vlessChunks);
       if (socks5State < 2) {
-        const { consumed, newState, error } = tryHandleSocks5Handshake(vlessBuffer, socks5State, webSocket, ctx, log);
+        const { consumed, newState, error } = tryHandleSocks5Handshake(currentBuffer, socks5State, webSocket, ctx, log);
         if (error) {
-          clearTimeout(timeoutTimer);
+          clearTimeout(protocolDetectTimer);
           throw new Error(error);
         }
         if (consumed > 0) {
-          vlessBuffer = vlessBuffer.slice(consumed);
+          const remaining = currentBuffer.slice(consumed);
+          vlessChunks = [remaining];
+          vlessBufferLength = remaining.byteLength;
           socks5State = newState;
           if (socks5State !== 2) return;
         }
       }
-      if (vlessBuffer.length === 0) return;
+      if (vlessBufferLength === 0) return;
       try {
-        const result = await protocolManager.detect(vlessBuffer, ctx);
+        const bufferToDetect = socks5State > 0 ? mergeChunks(vlessChunks) : currentBuffer;
+        const result = await protocolManager.detect(bufferToDetect, ctx);
         if (socks5State === 2 && result.protocol !== "socks5") {
           throw new Error("Protocol mismatch after Socks5 handshake");
         }
-        const pName = result.protocol;
-        const isSocksDisabled = pName === "socks5" && ctx.disabledProtocols.includes("socks");
-        if (ctx.disabledProtocols.includes(pName) || isSocksDisabled) {
-          throw new Error(`Protocol ${pName} is disabled`);
+        if (ctx.disabledProtocols.includes(result.protocol) || result.protocol === "socks5" && ctx.disabledProtocols.includes("socks")) {
+          throw new Error(`Protocol ${result.protocol} is disabled`);
         }
         const { protocol, addressRemote, portRemote, addressType, rawDataIndex, isUDP } = result;
         log(`Detected: ${protocol.toUpperCase()} -> ${addressRemote}:${portRemote}`);
@@ -1996,12 +2044,12 @@ async function handleWebSocketRequest(request, ctx) {
           throw new Error(`Blocked: ${addressRemote}`);
         }
         isConnected = true;
-        clearTimeout(timeoutTimer);
+        clearTimeout(protocolDetectTimer);
         remoteSocketWrapper.isConnecting = true;
-        let clientData = vlessBuffer;
+        let clientData = bufferToDetect;
         let responseHeader = null;
         if (protocol === "vless") {
-          clientData = vlessBuffer.subarray(rawDataIndex);
+          clientData = bufferToDetect.subarray(rawDataIndex);
           responseHeader = new Uint8Array([result.cloudflareVersion[0], 0]);
         } else if (protocol === "trojan" || protocol === "ss" || protocol === "mandala") {
           clientData = result.rawClientData;
@@ -2010,18 +2058,17 @@ async function handleWebSocketRequest(request, ctx) {
           webSocket.send(new Uint8Array([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
           socks5State = 3;
         }
-        vlessBuffer = null;
+        vlessChunks = null;
         if (isUDP) {
           handleUDPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
         } else {
           handleTCPOutBound(ctx, remoteSocketWrapper, addressType, addressRemote, portRemote, clientData, webSocket, responseHeader, log);
         }
       } catch (e) {
-        if (vlessBuffer && vlessBuffer.length < PROBE_THRESHOLD && vlessBuffer.length < MAX_HEADER_BUFFER) {
+        if (vlessBufferLength < PROBE_THRESHOLD && vlessBufferLength < MAX_HEADER_BUFFER) {
           return;
         }
-        clearTimeout(timeoutTimer);
-        log(`Detection failed: ${e.message}`);
+        clearTimeout(protocolDetectTimer);
         safeCloseWebSocket(webSocket);
       }
     },
@@ -2033,11 +2080,12 @@ async function handleWebSocketRequest(request, ctx) {
       safeCloseWebSocket(webSocket);
     }
   })).catch((err) => {
-    clearTimeout(timeoutTimer);
     cleanup();
     safeCloseWebSocket(webSocket);
   });
   function cleanup() {
+    clearTimeout(protocolDetectTimer);
+    clearInterval(idleTimer);
     if (activeWriter) {
       try {
         activeWriter.releaseLock();
@@ -2053,16 +2101,15 @@ async function handleWebSocketRequest(request, ctx) {
       remoteSocketWrapper.value = null;
     }
   }
-  if (ctx.waitUntil) {
-    ctx.waitUntil(streamPromise.finally(() => {
-      activeConnectionsInInstance--;
-      if (activeConnectionsInInstance < 0) activeConnectionsInInstance = 0;
-    }));
-  } else {
-    streamPromise.finally(() => {
-      activeConnectionsInInstance--;
-      if (activeConnectionsInInstance < 0) activeConnectionsInInstance = 0;
+  const handleLifecycle = () => {
+    return streamPromise.finally(() => {
+      safeDecrement();
     });
+  };
+  if (ctx.waitUntil) {
+    ctx.waitUntil(handleLifecycle());
+  } else {
+    handleLifecycle();
   }
   return new Response(null, { status: 101, webSocket: client });
 }
@@ -2250,11 +2297,7 @@ async function read_xhttp_header(readable, ctx) {
     const cmdIndex = 18 + pb_len;
     if (cache[cmdIndex] !== 1) throw new Error("unsupported command: " + cache[cmdIndex]);
     const portIndex = cmdIndex + 1;
-    let port;
-    {
-      const view = new DataView(cache.buffer, cache.byteOffset, cache.byteLength);
-      port = view.getUint16(portIndex, false);
-    }
+    const port = new DataView(cache.buffer, cache.byteOffset, cache.byteLength).getUint16(portIndex, false);
     const atype = cache[portIndex + 2];
     const addr_body_idx = portIndex + 3;
     let header_len = -1;
@@ -3733,23 +3776,61 @@ function getLoginHtml() {
 }
 
 var lastSavedDomain = "";
-var lastPushTime = 0;
-var PUSH_COOLDOWN = 24 * 60 * 60 * 1e3;
-function timeout(promise, ms, errorMsg = "Operation timed out") {
+async function hasDomainBeenPushedRecently(hostName) {
+  if (!hostName) return false;
+  if (hostName === lastSavedDomain) return true;
+  const cache = caches.default;
+  const cacheKey = `http://six-worker.local/domain_pushed/${encodeURIComponent(hostName)}`;
+  try {
+    const res = await cache.match(cacheKey);
+    if (res) {
+      lastSavedDomain = hostName;
+      return true;
+    }
+  } catch (e) {
+    void(0);
+  }
+  return false;
+}
+async function markDomainAsPushed(hostName, ctx) {
+  if (!hostName) return;
+  lastSavedDomain = hostName;
+  const cache = caches.default;
+  const cacheKey = `http://six-worker.local/domain_pushed/${encodeURIComponent(hostName)}`;
+  const response = new Response("1", {
+    headers: { "Cache-Control": "public, max-age=86400" }
+  });
+  if (ctx && ctx.waitUntil) {
+    ctx.waitUntil(cache.put(cacheKey, response).catch(() => {
+    }));
+  } else {
+    cache.put(cacheKey, response).catch(() => {
+    });
+  }
+}
+async function timeout(taskFn, ms, errorMsg = "Operation timed out") {
+  const controller = new AbortController();
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(errorMsg)), ms);
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(errorMsg));
+    }, ms);
   });
-  return Promise.race([
-    promise.finally(() => clearTimeout(timer)),
-    timeoutPromise
-  ]);
+  try {
+    return await Promise.race([
+      taskFn(controller.signal),
+      timeoutPromise
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 async function execWithRetry(taskFn, maxRetries = 3, timeoutMs = 3e3) {
   let lastError;
   for (let i = 0; i < maxRetries; i++) {
     try {
-      return await timeout(taskFn(), timeoutMs, `Attempt ${i + 1} timeout`);
+      return await timeout((signal) => taskFn(signal), timeoutMs, `Attempt ${i + 1} timeout`);
     } catch (e) {
       void(0);
       lastError = e;
@@ -3781,10 +3862,10 @@ async function handlePasswordSetup(request, env, ctx) {
     await env.KV.put("UUID", password);
     const now = Date.now();
     await env.KV.put("LAST_PUSH_TIME", now.toString());
-    lastPushTime = now;
+    await markDomainAsPushed("init-setup", ctx);
     await cleanConfigCache();
     try {
-      const appCtx = await execWithRetry(() => initializeContext(request, env), 2, 5e3);
+      const appCtx = await execWithRetry((signal) => initializeContext(request, env), 2, 5e3);
       appCtx.waitUntil = (p) => safeWaitUntil(ctx, p);
       safeWaitUntil(ctx, executeWebDavPush(env, appCtx, true));
     } catch (e) {
@@ -3794,7 +3875,7 @@ async function handlePasswordSetup(request, env, ctx) {
   }
   return new Response(getPasswordSetupHtml(), { headers: { "Content-Type": "text/html;charset=utf-8" } });
 }
-async function proxyUrl(urlStr, targetUrlObj, request) {
+async function proxyUrl(urlStr, targetUrlObj, request, signal) {
   if (!urlStr) return null;
   try {
     const proxyUrl2 = new URL(urlStr);
@@ -3809,7 +3890,8 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
       method: request.method,
       headers: newHeaders,
       body: request.body,
-      redirect: "follow"
+      redirect: "follow",
+      signal
     }));
   } catch (e) {
     return null;
@@ -3817,9 +3899,9 @@ async function proxyUrl(urlStr, targetUrlObj, request) {
 }
 var index_default = {
   async fetch(request, env, ctx) {
-    return await timeout((async () => {
+    return await timeout(async (signal) => {
       try {
-        const context = await execWithRetry(() => initializeContext(request, env), 3, 3e3);
+        const context = await execWithRetry((s) => initializeContext(request, env), 3, 3e3);
         context.waitUntil = (promise) => safeWaitUntil(ctx, promise);
         const url = new URL(request.url);
         const path = normalizePath(url);
@@ -3840,7 +3922,7 @@ var index_default = {
           if (url302) return Response.redirect(url302, 302);
           const urlProxy = await getConfig(env, "URL");
           if (urlProxy) {
-            const resp = await proxyUrl(urlProxy, url, request);
+            const resp = await proxyUrl(urlProxy, url, request, signal);
             if (resp) return resp;
           }
           return new Response('<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body{width:35em;margin:0 auto;font-family:Tahoma,Verdana,Arial,sans-serif;}</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p><p>For online documentation and support please refer to<a href="http://nginx.org/">nginx.org</a>.<br/>Commercial support is available at<a href="http://nginx.com/">nginx.com</a>.</p><p><em>Thank you for using nginx.</em></p></body></html>', { headers: { "Content-Type": "text/html;charset=utf-8" } });
@@ -3863,21 +3945,26 @@ var index_default = {
         const isManagementRoute = isSuperRoute || isFullUserRoute;
         const isLoginRequest = url.searchParams.get("auth") === "login";
         if (request.method === "GET" && (isManagementRoute || isCalculatedHash) && env.KV && hostName && hostName.includes(".")) {
-          if (hostName !== lastSavedDomain) {
-            const now = Date.now();
-            if (now - lastPushTime > PUSH_COOLDOWN) {
-              context.waitUntil((async () => {
+          const isPushedRecently = await hasDomainBeenPushedRecently(hostName);
+          if (!isPushedRecently) {
+            const PUSH_COOLDOWN = 24 * 60 * 60 * 1e3;
+            context.waitUntil((async () => {
+              try {
+                const now = Date.now();
                 let kvPushTime = await env.KV.get("LAST_PUSH_TIME");
                 if (!kvPushTime || now - parseInt(kvPushTime) > PUSH_COOLDOWN) {
                   await env.KV.put("SAVED_DOMAIN", hostName);
                   await env.KV.put("LAST_PUSH_TIME", now.toString());
-                  lastSavedDomain = hostName;
-                  lastPushTime = now;
                   await cleanConfigCache(["SAVED_DOMAIN"]);
                   await executeWebDavPush(env, context, false);
+                  await markDomainAsPushed(hostName, context);
+                } else {
+                  await markDomainAsPushed(hostName, context);
                 }
-              })());
-            }
+              } catch (e) {
+                void(0);
+              }
+            })());
           }
         }
         if (isManagementRoute) {
@@ -3939,7 +4026,7 @@ var index_default = {
         void(0);
         return new Response("Internal Server Error", { status: 500 });
       }
-    })(), 45e3, "Worker Execution Timeout");
+    }, 45e3, "Worker Execution Timeout");
   },
   async scheduled(event, env, ctx) {
   }
