@@ -2327,6 +2327,7 @@ function create_xhttp_downloader(resp, remote_readable, initialData, abortContro
   let lastActivity = Date.now();
   let idleTimer;
   let chunkCount = 0;
+  let lastSampleTime = Date.now();
   const monitorStream = new TransformStream({
     start(controller) {
       controller.enqueue(resp);
@@ -2334,7 +2335,8 @@ function create_xhttp_downloader(resp, remote_readable, initialData, abortContro
         controller.enqueue(initialData);
       }
       idleTimer = setInterval(() => {
-        if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
+        const now = Date.now();
+        if (now - lastActivity > IDLE_TIMEOUT_MS) {
           abortController.abort("idle timeout");
           return;
         }
@@ -2345,11 +2347,11 @@ function create_xhttp_downloader(resp, remote_readable, initialData, abortContro
     },
     transform(chunk, controller) {
       chunkCount++;
-      if (chunkCount >= 50) {
-        lastActivity = Date.now();
+      const now = Date.now();
+      if (chunkCount >= 50 || now - lastSampleTime > 3e3 || chunk.byteLength > 16384) {
+        lastActivity = now;
+        lastSampleTime = now;
         chunkCount = 0;
-      } else if (chunk.byteLength > 16384) {
-        lastActivity = Date.now();
       }
       controller.enqueue(chunk);
     },
@@ -2411,6 +2413,13 @@ async function handleXhttpClient(request, ctx) {
     }
   })();
   const downloader = create_xhttp_downloader(resp, remoteSocket.readable, remoteSocket.initialData, lifeController);
+  lifeController.signal.addEventListener("abort", () => {
+    try {
+      remoteSocket.close();
+    } catch (_) {
+    }
+    safe_cancel(reader, "session aborted");
+  });
   const connectionClosed = Promise.allSettled([downloader.done, uploaderPromise]).then(() => {
     clearTimeout(sessionTimeout);
     try {
@@ -2419,12 +2428,6 @@ async function handleXhttpClient(request, ctx) {
     }
     try {
       downloader.readable.cancel();
-    } catch (_) {
-    }
-  });
-  lifeController.signal.addEventListener("abort", () => {
-    try {
-      remoteSocket.close();
     } catch (_) {
     }
   });
