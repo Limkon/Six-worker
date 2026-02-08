@@ -251,18 +251,26 @@ var REGEX_CACHE =   new Map();
 function isHostBanned(hostname, banList) {
   if (!banList || banList.length === 0) return false;
   return banList.some((pattern) => {
+    const cleanPattern = pattern.trim();
+    if (!cleanPattern) return false;
     let regex;
-    if (REGEX_CACHE.has(pattern)) {
-      regex = REGEX_CACHE.get(pattern);
+    if (REGEX_CACHE.has(cleanPattern)) {
+      regex = REGEX_CACHE.get(cleanPattern);
     } else {
       try {
-        let regexPattern = pattern.replace(/\*/g, ".*");
-        regex = new RegExp(`^${regexPattern}$`, "i");
+        if (cleanPattern.includes("*")) {
+          const escaped = cleanPattern.replace(/[.+^${}()|[\]\\?]/g, "\\$&");
+          const regexStr = "^" + escaped.replace(/\*/g, ".*") + "$";
+          regex = new RegExp(regexStr, "i");
+        } else {
+          const escaped = cleanPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          regex = new RegExp(`(^|\\.)${escaped}$`, "i");
+        }
       } catch (e) {
-        regex = /^$/;
+        regex = /(?:)/;
       }
       if (REGEX_CACHE.size > 500) REGEX_CACHE.delete(REGEX_CACHE.keys().next().value);
-      REGEX_CACHE.set(pattern, regex);
+      REGEX_CACHE.set(cleanPattern, regex);
     }
     return regex.test(hostname);
   });
@@ -308,7 +316,7 @@ async function getKV(env, key, ctx = null) {
         "Cache-Control": "max-age=2592000"
       }
     });
-    if (ctx && ctx.waitUntil) {
+    if (ctx && typeof ctx.waitUntil === "function") {
       ctx.waitUntil(cache.put(cacheKeyUrl, response).catch(() => {
       }));
     } else {
@@ -324,6 +332,7 @@ async function clearKVCache(keys) {
   const targetKeys = keys && Array.isArray(keys) ? keys : KNOWN_KV_KEYS;
   if (keys) keys.forEach((k) => GLOBAL_KV_CACHE.delete(k));
   else GLOBAL_KV_CACHE.clear();
+  if (!keys || keys.includes("BAN")) REGEX_CACHE.clear();
   await Promise.all(targetKeys.map((key) => cache.delete(CACHE_API_PREFIX + encodeURIComponent(key)).catch(() => {
   })));
   void(0);
