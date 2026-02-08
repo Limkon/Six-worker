@@ -1,30 +1,21 @@
 // src/utils/helpers.js
 /**
  * 文件名: src/utils/helpers.js
- * 状态: [最终完整版]
- * 说明: 核心工具库。包含加密、UUID生成、KV缓存系统(L1/L2)等核心功能。
- * * 优化点汇总:
- * 1. [Critical] isHostBanned: 集成正则缓存 (REGEX_CACHE)，彻底解决 CPU 超时问题。
- * 2. [Perf] cleanList: 优化为单次 split 正则，高效处理大文本。
- * 3. [Perf] computeSha224Core: 移除低效循环，使用 repeat 一次性填充。
- * 4. [Perf] base64ToArrayBuffer: 使用 padEnd 替代 while 循环。
+ * 状态: [最终修复版]
+ * 1. [Critical] 增加 REGEX_CACHE，修复 isHostBanned 的 CPU 性能问题。
+ * 2. [Full] 包含所有核心工具函数。
  */
 
 // 全局编解码器实例
 export const textDecoder = new TextDecoder();
 export const textEncoder = new TextEncoder();
 
-// --- UUID Regex (静态资源) ---
+// --- UUID Regex ---
 const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const UUID_SIMPLE_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function isStrictV4UUID(uuid) {
-    return UUID_V4_REGEX.test(uuid);
-}
-
-export function isValidUUID(uuid) {
-    return isStrictV4UUID(uuid) || UUID_SIMPLE_REGEX.test(uuid);
-}
+export function isStrictV4UUID(uuid) { return UUID_V4_REGEX.test(uuid); }
+export function isValidUUID(uuid) { return isStrictV4UUID(uuid) || UUID_SIMPLE_REGEX.test(uuid); }
 
 export async function sha1(str) {
     const buffer = textEncoder.encode(str);
@@ -33,7 +24,7 @@ export async function sha1(str) {
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// --- SHA224 静态资源 (一次初始化) ---
+// --- SHA224 静态资源 ---
 const SHA224_CONSTANTS = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -47,7 +38,6 @@ const SHA224_CONSTANTS = [
 
 const sha224RotateRight = (value, shift) => ((value >>> shift) | (value << (32 - shift))) >>> 0;
 const sha224ToUtf8 = (str) => unescape(encodeURIComponent(str));
-
 const sha224BytesToHex = (byteArray) => {
     let hexString = '';
     for (let i = 0; i < byteArray.length; i++) {
@@ -61,8 +51,6 @@ const computeSha224Core = (inputStr) => {
     let hState = [0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4];
     const messageBitLength = inputStr.length * 8;
     inputStr += String.fromCharCode(0x80);
-    
-    // [Optimization] 一次性填充，消除循环开销
     const currentLen = inputStr.length;
     const padLen = (56 - (currentLen % 64) + 64) % 64;
     if (padLen > 0) inputStr += String.fromCharCode(0).repeat(padLen);
@@ -73,12 +61,10 @@ const computeSha224Core = (inputStr) => {
         (highBits >>> 24) & 0xFF, (highBits >>> 16) & 0xFF, (highBits >>> 8) & 0xFF, highBits & 0xFF,
         (lowBits >>> 24) & 0xFF, (lowBits >>> 16) & 0xFF, (lowBits >>> 8) & 0xFF, lowBits & 0xFF
     );
-
     const words = [];
     for (let i = 0; i < inputStr.length; i += 4) {
         words.push((inputStr.charCodeAt(i) << 24) | (inputStr.charCodeAt(i + 1) << 16) | (inputStr.charCodeAt(i + 2) << 8) | inputStr.charCodeAt(i + 3));
     }
-
     const w = new Array(64);
     for (let i = 0; i < words.length; i += 16) {
         for (let j = 0; j < 16; j++) w[j] = words[i + j];
@@ -103,16 +89,13 @@ const computeSha224Core = (inputStr) => {
     return hState.slice(0, 7);
 };
 
-// --- SHA224 缓存系统 ---
 const globalSha224Cache = new Map();
 const MAX_SHA224_CACHE_SIZE = 50; 
-
 export function sha224Hash(message) {
     if (globalSha224Cache.has(message)) return globalSha224Cache.get(message);
     const utf8Message = sha224ToUtf8(message);
     const hashWords = computeSha224Core(utf8Message);
     const resultHex = sha224BytesToHex(hashWords.flatMap(h => [(h >>> 24) & 0xFF, (h >>> 16) & 0xFF, (h >>> 8) & 0xFF, h & 0xFF]));
-
     if (globalSha224Cache.size >= MAX_SHA224_CACHE_SIZE) globalSha224Cache.delete(globalSha224Cache.keys().next().value);
     globalSha224Cache.set(message, resultHex);
     return resultHex;
@@ -122,33 +105,24 @@ export function base64ToArrayBuffer(base64Str) {
     if (!base64Str) return { earlyData: undefined, error: null };
     try {
         base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
-        // [Optimization] 使用 padEnd 高效补全
         const padLen = (4 - (base64Str.length % 4)) % 4;
         if (padLen > 0) base64Str = base64Str.padEnd(base64Str.length + padLen, '=');
-        
         const decode = atob(base64Str);
         const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
         return { earlyData: arryBuffer.buffer, error: null };
-    } catch (error) {
-        return { earlyData: undefined, error };
-    }
+    } catch (error) { return { earlyData: undefined, error }; }
 }
 
 export async function cleanList(content) {
     if (!content) return [];
-    // [Fix] 优化性能：直接使用 split 正则分割
-    // 允许的分隔符：逗号、制表符、双引号、单引号、换行符
     return content.split(/[\t"'\r\n,]+/).filter(Boolean);
 }
 
 export function safeCloseWebSocket(socket) {
-    try {
-        if (socket.readyState === 1 || socket.readyState === 2) socket.close();
-    } catch (error) { console.error('safeCloseWebSocket error', error); }
+    try { if (socket.readyState === 1 || socket.readyState === 2) socket.close(); } catch (error) { console.error('safeCloseWebSocket error', error); }
 }
 
 const byteToHex = Array.from({ length: 256 }, (v, i) => (i + 256).toString(16).slice(1));
-
 export function stringifyUUID(arr, offset = 0) {
     const uuid = (byteToHex[arr[offset+0]]+byteToHex[arr[offset+1]]+byteToHex[arr[offset+2]]+byteToHex[arr[offset+3]]+"-"+byteToHex[arr[offset+4]]+byteToHex[arr[offset+5]]+"-"+byteToHex[arr[offset+6]]+byteToHex[arr[offset+7]]+"-"+byteToHex[arr[offset+8]]+byteToHex[arr[offset+9]]+"-"+byteToHex[arr[offset+10]]+byteToHex[arr[offset+11]]+byteToHex[arr[offset+12]]+byteToHex[arr[offset+13]]+byteToHex[arr[offset+14]]+byteToHex[arr[offset+15]]).toLowerCase();
     if (!isValidUUID(uuid)) throw TypeError("Invalid stringified UUID");
@@ -159,14 +133,12 @@ export async function generateDynamicUUID(key, timeDays, updateHour) {
     const timezoneOffset = 8;
     const startDate = new Date(2007, 6, 7, updateHour, 0, 0);
     const oneWeekMs = 1000 * 60 * 60 * 24 * timeDays;
-    
     function getCurrentCycle() {
         const now = new Date();
         const adjustedNow = new Date(now.getTime() + timezoneOffset * 60 * 60 * 1000);
         const timeDiff = Number(adjustedNow) - Number(startDate);
         return Math.ceil(timeDiff / oneWeekMs);
     }
-    
     async function generate(baseStr) {
         const hashBuffer = new TextEncoder().encode(baseStr);
         const hash = await crypto.subtle.digest('SHA-256', hashBuffer);
@@ -174,37 +146,30 @@ export async function generateDynamicUUID(key, timeDays, updateHour) {
         const hex = hashArr.map(b => b.toString(16).padStart(2, '0')).join('');
         return `${hex.substr(0, 8)}-${hex.substr(8, 4)}-4${hex.substr(13, 3)}-${(parseInt(hex.substr(16, 2), 16) & 0x3f | 0x80).toString(16)}${hex.substr(18, 2)}-${hex.substr(20, 12)}`;
     }
-    
     const currentCycle = getCurrentCycle();
     const current = await generate(key + currentCycle);
     const prev = await generate(key + (currentCycle - 1));
     return [current, prev];
 }
 
-// [CPU Optimization] 正则缓存，防止 ReDoS 和重复编译
-// 修复了之前遗漏的 isHostBanned 缓存
+// [Critical Optimization] 正则缓存 (REGEX_CACHE)
+// 之前版本遗漏了这个缓存，导致 isHostBanned 每次请求都 new RegExp，造成 CPU 飙升
 const REGEX_CACHE = new Map();
 
 export function isHostBanned(hostname, banList) {
     if (!banList || banList.length === 0) return false;
-    
     return banList.some(pattern => {
         let regex;
         if (REGEX_CACHE.has(pattern)) {
             regex = REGEX_CACHE.get(pattern);
         } else {
-            // 只编译一次，显著降低 CPU 占用
             try {
                 let regexPattern = pattern.replace(/\*/g, '.*');
                 regex = new RegExp(`^${regexPattern}$`, 'i');
             } catch (e) {
-                regex = /^$/; // 无效规则降级
+                regex = /^$/;
             }
-            
-            // 简单的 LRU 保护
-            if (REGEX_CACHE.size > 500) {
-                REGEX_CACHE.delete(REGEX_CACHE.keys().next().value);
-            }
+            if (REGEX_CACHE.size > 500) REGEX_CACHE.delete(REGEX_CACHE.keys().next().value);
             REGEX_CACHE.set(pattern, regex);
         }
         return regex.test(hostname);
@@ -216,19 +181,11 @@ const GLOBAL_KV_CACHE = new Map();
 const MAX_KV_CACHE_SIZE = 200; 
 const CACHE_API_PREFIX = 'http://kv-cache.local/';
 const CACHE_NULL_SENTINEL = "##NULL##"; 
-const KNOWN_KV_KEYS = [
-    'UUID', 'KEY', 'ADMIN_PASS', 'SUPER_PASSWORD',
-    'PROXYIP', 'SOCKS5', 'GO2SOCKS5', 'DNS64', 'BAN', 'DIS', 
-    'TIME', 'UPTIME', 
-    'SUBNAME', 'ADD.txt', 'ADDAPI', 'ADDNOTLS', 'ADDNOTLSAPI', 'ADDCSV', 
-    'CFPORTS', 'BESTIP_SOURCES',
-    'REMOTE_CONFIG', 'REMOTE_CONFIG_URL', 'URL', 'URL302', 'SAVED_DOMAIN'
-];
+const KNOWN_KV_KEYS = ['UUID', 'KEY', 'ADMIN_PASS', 'SUPER_PASSWORD', 'PROXYIP', 'SOCKS5', 'GO2SOCKS5', 'DNS64', 'BAN', 'DIS', 'TIME', 'UPTIME', 'SUBNAME', 'ADD.txt', 'ADDAPI', 'ADDNOTLS', 'ADDNOTLSAPI', 'ADDCSV', 'CFPORTS', 'BESTIP_SOURCES', 'REMOTE_CONFIG', 'REMOTE_CONFIG_URL', 'URL', 'URL302', 'SAVED_DOMAIN'];
 
 export async function getKV(env, key) {
     if (!env.KV || !key) return null;
     if (GLOBAL_KV_CACHE.has(key)) return GLOBAL_KV_CACHE.get(key);
-
     const cache = caches.default;
     const cacheKeyUrl = CACHE_API_PREFIX + encodeURIComponent(key);
     try {
@@ -241,16 +198,12 @@ export async function getKV(env, key) {
             return val;
         }
     } catch (e) { console.error(`[KV] Cache API error for ${key}:`, e); }
-
     let val = null;
     try { val = await env.KV.get(key); } catch (e) { console.error(`[KV] Real KV get failed:`, e); }
-
     if (GLOBAL_KV_CACHE.size >= MAX_KV_CACHE_SIZE) GLOBAL_KV_CACHE.clear();
     GLOBAL_KV_CACHE.set(key, val);
     const cacheVal = val === null ? CACHE_NULL_SENTINEL : val;
-    try {
-        cache.put(cacheKeyUrl, new Response(cacheVal, { headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'max-age=2592000' } })).catch(() => {});
-    } catch (e) {}
+    try { cache.put(cacheKeyUrl, new Response(cacheVal, { headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'max-age=2592000' } })).catch(() => {}); } catch (e) {}
     return val;
 }
 
