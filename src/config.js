@@ -1,12 +1,10 @@
 // src/config.js
 /**
  * 文件名: src/config.js
- * 状态: [最终完整修复版]
- * 1. [Fix] 解决 Worker Code Hung 问题:
- * - 限制远程配置读取大小 (Max 50KB)。
- * - 增加 ProxyIP Fetch 的 AbortController 超时控制。
- * 2. [Full] 保留远程配置、ProxyIP 智能抓取、UUID 死循环防护等所有逻辑。
- * 3. [Ctx] initializeContext 和 getConfig 增加 ctx 参数，打通 getKV 的 waitUntil 链路。
+ * 状态: [修复 Worker Hung 问题]
+ * 1. [Fix] initializeContext 和 loadRemoteConfig 增加 signal 参数，支持外部取消。
+ * 2. [Stability] 解决 execWithRetry 重试时旧任务不释放导致的资源累积。
+ * 3. [Ctx] 保持 ctx 参数传递，确保 Cache API 写入可靠。
  */
 import { CONSTANTS } from './constants.js';
 import { cleanList, generateDynamicUUID, isStrictV4UUID, getKV, clearKVCache } from './utils/helpers.js';
@@ -106,7 +104,8 @@ export async function cleanConfigCache(updatedKeys) {
     }
 }
 
-export async function loadRemoteConfig(env, forceReload = false) {
+// [Fix] 增加 signal 参数，支持中止
+export async function loadRemoteConfig(env, forceReload = false, signal = null) {
     const remoteConfigUrl = await getKV(env, 'REMOTE_CONFIG_URL');
     const now = Date.now();
     const isExpired = (now - remoteConfigCache.lastFetch) > REMOTE_CONFIG_TTL;
@@ -118,6 +117,13 @@ export async function loadRemoteConfig(env, forceReload = false) {
     if (remoteConfigUrl) {
         try {
             const controller = new AbortController();
+            
+            // [Fix] 信号合并：如果外部传入了 signal 且触发了 abort，这里也应该 abort
+            if (signal) {
+                signal.addEventListener('abort', () => controller.abort());
+                if (signal.aborted) controller.abort();
+            }
+
             const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒硬超时
             
             const response = await fetch(remoteConfigUrl, {
@@ -154,7 +160,10 @@ export async function loadRemoteConfig(env, forceReload = false) {
                 parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
             }
         } catch (e) {
-            console.error('Failed to load remote config', e);
+            // 如果是中止错误，不做处理
+            if (e.name !== 'AbortError') {
+                console.error('Failed to load remote config', e);
+            }
         }
     }
     return remoteConfigCache.data;
@@ -210,10 +219,13 @@ async function getCachedUUID(seed, timeDays, updateHour) {
     return userIDs;
 }
 
-// [Critical Fix] initializeContext 接收 ctx
-export async function initializeContext(request, env, ctx = null) {
+// [Critical Fix] initializeContext 接收 signal 参数，防止死任务累积
+export async function initializeContext(request, env, ctx = null, signal = null) {
     const url = new URL(request ? request.url : 'http://localhost');
     const forceReload = url.searchParams.get('flush') === '1'; 
+
+    // 如果信号已中止，提前退出
+    if (signal && signal.aborted) throw new Error('Init Aborted');
 
     if (forceReload) {
         console.log('[Config] Flush requested via URL parameter. Purging caches...');
@@ -221,16 +233,18 @@ export async function initializeContext(request, env, ctx = null) {
     }
 
     // 处理远程配置
-    // [Fix] 传递 ctx
+    // [Fix] 传递 ctx 和 signal
     const enableRemote = await getConfig(env, 'REMOTE_CONFIG', '0', ctx);
     if (enableRemote === '1') {
-        await loadRemoteConfig(env, forceReload);
+        await loadRemoteConfig(env, forceReload, signal);
     } else if (remoteConfigCache.lastFetch > 0) {
         remoteConfigCache = { data: {}, lastFetch: 0 };
         configCache = {}; 
         configGeneration++; 
         parsedListCache = { proxyIP: null, banHosts: null, disabledProtocols: null, go2socks5: null };
     }
+
+    if (signal && signal.aborted) throw new Error('Init Aborted');
 
     // [Fix] 传递 ctx 到 getConfig
     const [adminPass, rawUUID, rawKey, timeDaysStr, updateHourStr] = await Promise.all([
@@ -354,8 +368,11 @@ export async function initializeContext(request, env, ctx = null) {
                      })();
                  }
                  // 安全等待结果
-                 // [Fix] 使用 waitUntil 防止 fetch 被中断 (但 fetch 本身需要 await)
-                 // 注意：这里我们 await 了 promise，会阻塞 request，符合预期(需要 ProxyIP 才能联网)
+                 // [Fix] 尊重外部 signal，防止挂起
+                 if (signal) {
+                     // 如果外部超时，这里 race 会由外部 timeoutPromise 触发 throw，但为了保险我们手动检查
+                     if (signal.aborted) throw new Error('Init Aborted (ProxyIP)');
+                 }
                  rawList = await proxyIPRemoteCache.fetchingPromise;
              }
         } else {
